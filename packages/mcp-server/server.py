@@ -2,6 +2,7 @@ import os
 import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from ranker import rank_services
 
 load_dotenv()
 
@@ -25,6 +26,18 @@ async def _fetch_services() -> list[dict] | None:
 def _score(service: dict, tokens: list[str]) -> int:
     haystack = f"{service.get('name', '')} {service.get('description', '')}".lower()
     return sum(1 for t in tokens if t in haystack)
+
+
+def _format_ranked_service(idx: int, s: dict) -> str:
+    tier = TIER_LABELS.get(s.get("coverage_tier", 0), str(s.get("coverage_tier")))
+    price = s.get("pricing_usdc")
+    price_str = f"${float(price):.4f}" if price is not None else "$0"
+    score = s.get("score", 0)
+    reason = s.get("reason", "")
+    return (
+        f"{idx}. {s['name']} (score: {score}) — Reason: {reason}\n"
+        f"   Tier: {tier} | Price: {price_str} | Endpoint: {s.get('endpoint_url', 'N/A')}"
+    )
 
 
 def _format_service(s: dict) -> str:
@@ -61,9 +74,8 @@ async def wayforth_search(intent: str, category: str = None, max_tier: int = 2) 
         and s.get("coverage_tier", 0) <= max_tier
     ]
 
-    tokens = [w.lower() for w in intent.split() if len(w) > 2]
-    ranked = sorted(candidates, key=lambda s: _score(s, tokens), reverse=True)
-    top = ranked[:5]
+    ranked = await rank_services(intent, candidates)
+    top = ranked[:3]
 
     if not top:
         return f"No services found matching '{intent}'" + (
@@ -71,7 +83,7 @@ async def wayforth_search(intent: str, category: str = None, max_tier: int = 2) 
         )
 
     lines = [f"Top {len(top)} result(s) for \"{intent}\":\n"]
-    lines += [_format_service(s) for s in top]
+    lines += [_format_ranked_service(i + 1, s) for i, s in enumerate(top)]
     return "\n\n".join(lines)
 
 

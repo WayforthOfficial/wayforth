@@ -101,3 +101,28 @@ Full-text or vector search requires either Postgres `pg_trgm`/`tsvector` queries
 - The MCP server has no caching: every tool call hits the REST API. Acceptable for Phase 1 traffic; a short TTL in-process cache can be added when needed.
 - Keyword ranking is order-insensitive and ignores synonyms — a search for "LLM" won't match "large language model". Mitigated in practice by descriptive service names and deferred to Phase 3 for a proper fix.
 - Running `server.py` requires the Wayforth API to be up. The server handles this gracefully by returning a human-readable message with start instructions rather than raising an exception.
+
+---
+
+## ADR-004: Claude Haiku for MCP Search Ranking
+
+**Date:** 2026-04-23
+**Status:** Accepted
+
+### Decision
+
+Replace Phase 1 keyword ranking in `wayforth_search` with a Claude Haiku call (`claude-haiku-4-5`) that returns services ranked by semantic relevance with a 0–100 score and one-sentence reason per result. Return top 3 results (down from 5). Degrade silently to keyword ranking if `ANTHROPIC_API_KEY` is absent or the API call fails.
+
+### Rationale
+
+- **Semantic understanding**: Haiku understands that "fast cheap inference" is relevant to a "Claude Sonnet pay-per-call" service even if neither word appears verbatim — a gap keyword matching cannot bridge.
+- **Low cost**: Each ranking call processes ~10 service names/descriptions. At Haiku pricing (~$0.25/M input tokens), a call costs roughly $0.0001 — negligible.
+- **Low latency**: Haiku is Anthropic's fastest model. A ranking call adds ~300–500 ms to search, acceptable for an agent tool that already awaits an HTTP fetch.
+- **Graceful degradation**: If `ANTHROPIC_API_KEY` is unset or the call fails, the server falls back to token-count keyword ranking with no user-visible error. This preserves the Phase 1 reliability guarantee.
+- **No infrastructure change**: All ranking logic stays in the MCP server process; no new services, vector DBs, or embedding pipelines are introduced.
+
+### Trade-offs
+
+- Adds Anthropic API dependency and a per-call cost (~$0.0001). Acceptable at Phase 1 catalog scale; revisit if call volume exceeds ~10,000/day.
+- Haiku's ranking is non-deterministic — same query may return different orderings across calls. Acceptable for discovery; determinism can be enforced with a fixed seed if needed.
+- Requires `ANTHROPIC_API_KEY` in the MCP server environment. Documented in `.env.example`; Claude Code sessions inherit it automatically.
