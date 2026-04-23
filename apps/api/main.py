@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 
 from db import check_db
 
@@ -34,15 +34,17 @@ def health():
 
 
 @app.get("/services")
-async def list_services():
+async def list_services(category: str | None = Query(default=None)):
     async with app.state.pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT id, name, description, endpoint_url, category,
                    coverage_tier, pricing_usdc, source, created_at
             FROM services
+            WHERE ($1::text IS NULL OR category = $1)
             ORDER BY created_at DESC
-            LIMIT 20
-            """
+            LIMIT 100
+            """,
+            category,
         )
     return [dict(r) for r in rows]

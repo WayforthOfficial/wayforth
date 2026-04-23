@@ -126,3 +126,47 @@ Replace Phase 1 keyword ranking in `wayforth_search` with a Claude Haiku call (`
 - Adds Anthropic API dependency and a per-call cost (~$0.0001). Acceptable at Phase 1 catalog scale; revisit if call volume exceeds ~10,000/day.
 - Haiku's ranking is non-deterministic — same query may return different orderings across calls. Acceptable for discovery; determinism can be enforced with a fixed seed if needed.
 - Requires `ANTHROPIC_API_KEY` in the MCP server environment. Documented in `.env.example`; Claude Code sessions inherit it automatically.
+
+---
+
+## ADR-005: Real Crawler Sources — mcp-get.com Primary, Glama as Backup
+
+**Date:** 2026-04-23
+**Status:** Accepted
+
+### Decision
+
+Replace the mock/dead crawler sources with two real public JSON APIs:
+
+| Source | URL | Role |
+|---|---|---|
+| mcp-get.com | `https://mcp-get.com/api/packages` | Primary — 15,937 packages, simple flat JSON array |
+| Glama | `https://glama.ai/api/mcp/v1/servers` | Secondary — curated set with richer metadata |
+
+Crawl the first 100 entries from mcp-get.com and one page (10) from Glama per run. Add a `categorize_service(name, description)` function that classifies each service into `inference`, `translation`, or `data` using keyword sets. Add `?category=` query parameter to `GET /services`.
+
+### Why mcp-get.com as primary
+
+- Returns a flat JSON array — no auth, no pagination complexity, no API key required
+- 15,937 packages as of 2026-04-23 — the largest open catalog of MCP servers
+- Each entry has `name`, `description`, `sourceUrl` (GitHub link), `homepage`, `vendor`, `runtime` — enough to populate the schema and run category inference
+- Discovered via direct API probe; registry.mcp.so (original plan) was NXDOMAIN
+
+### Why Glama as backup
+
+- Different catalog with curated entries; provides diversification vs mcp-get
+- Consistent JSON structure (`id`, `name`, `description`, `url`, `repository`) with cursor-based pagination for future multi-page crawls
+- Discovered as a working alternative after Smithery's API returned HTML (no public JSON endpoint)
+
+### Why keyword-based category inference
+
+- Zero latency, zero API cost — runs inline during the crawl before any DB write
+- Three categories is a coarse distinction; keyword matching on `{name} {description}` is accurate enough for O(100) entries and the seeded demo catalog
+- Semantics at query time are handled by Claude Haiku (ADR-004), so the category label is a coarse filter, not a precision signal
+- Revisit with an embedding model if category accuracy becomes a product requirement
+
+### Trade-offs
+
+- The 100-entry cap on mcp-get keeps each crawl run fast (<5 s) but leaves 15,800+ entries unprocessed; increase `_MCP_GET_LIMIT` or add pagination when the catalog needs to grow
+- Keyword inference misclassifies packages with ambiguous names (e.g. a "language server" that's not about human language translation); acceptable at Phase 1 scale
+- Glama returns only 10 entries per page; future multi-page support requires cursor-based pagination using `pageInfo.endCursor`

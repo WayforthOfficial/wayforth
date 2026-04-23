@@ -18,6 +18,25 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://wayforth:wayforth_dev@loca
 _ASYNCPG_URL = DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 # ---------------------------------------------------------------------------
+# Category inference
+# ---------------------------------------------------------------------------
+
+_INFERENCE_KW = {"llm", "model", "gpt", "claude", "gemini", "mistral",
+                 "inference", "completion", "embedding", "openai", "anthropic"}
+_TRANSLATION_KW = {"translate", "translation", "language", "localization",
+                   "multilingual", "i18n", "l10n"}
+
+
+def categorize_service(name: str, description: str | None) -> str:
+    text = f"{name} {description or ''}".lower()
+    if any(kw in text for kw in _INFERENCE_KW):
+        return "inference"
+    if any(kw in text for kw in _TRANSLATION_KW):
+        return "translation"
+    return "data"
+
+
+# ---------------------------------------------------------------------------
 # Upsert
 # ---------------------------------------------------------------------------
 
@@ -51,62 +70,51 @@ async def upsert_service(conn: asyncpg.Connection, svc: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# MCP Registry crawler
+# mcp-get.com crawler (Source 1)
 # ---------------------------------------------------------------------------
 
-_MCP_REGISTRY_URL = "https://registry.mcp.so/api/servers"
+_MCP_GET_URL = "https://mcp-get.com/api/packages"
+_MCP_GET_LIMIT = 100  # API returns all ~16k; we take the first N
 
 
-def _parse_mcp_server(entry: dict) -> dict[str, Any] | None:
-    url = (
-        entry.get("url")
-        or entry.get("endpoint_url")
-        or entry.get("homepage")
-        or entry.get("repository")
-    )
-    name = entry.get("name") or entry.get("title")
-    if not url or not name:
+def _parse_mcp_get_entry(entry: dict) -> dict[str, Any] | None:
+    name = entry.get("name")
+    url = entry.get("sourceUrl") or entry.get("homepage")
+    if not name or not url:
         return None
+    desc = entry.get("description")
     return {
         "name": str(name)[:255],
-        "description": entry.get("description") or entry.get("summary"),
+        "description": desc,
         "endpoint_url": str(url),
-        "category": "data",
-        "source": "mcp_registry",
+        "category": categorize_service(str(name), desc),
+        "source": "mcp_get",
         "metadata": {
-            k: v
-            for k, v in entry.items()
-            if k not in ("name", "title", "description", "summary", "url", "endpoint_url")
+            k: v for k, v in entry.items()
+            if k not in ("name", "description", "sourceUrl", "homepage", "readme")
         },
     }
 
 
-async def crawl_mcp_registry(conn: asyncpg.Connection) -> tuple[int, int, int]:
+async def crawl_mcp_get(conn: asyncpg.Connection) -> tuple[int, int, int]:
     inserted = updated = skipped = 0
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(_MCP_REGISTRY_URL, headers={"Accept": "application/json"})
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(_MCP_GET_URL, headers={"Accept": "application/json"})
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
-        logger.warning("MCP registry fetch failed: %s", exc)
+        logger.warning("mcp-get fetch failed: %s", exc)
         return 0, 0, 0
 
-    if isinstance(data, list):
-        entries = data
-    elif isinstance(data, dict):
-        entries = data.get("servers") or data.get("results") or data.get("data") or []
-        if not isinstance(entries, list):
-            logger.warning("MCP registry: unexpected shape %s", type(entries))
-            return 0, 0, 0
-    else:
-        logger.warning("MCP registry: unexpected top-level type %s", type(data))
-        return 0, 0, 0
+    entries = data if isinstance(data, list) else []
+    entries = entries[:_MCP_GET_LIMIT]
+    logger.info("mcp-get: processing %d of %d entries", len(entries), len(data) if isinstance(data, list) else 0)
 
     for raw in entries:
         if not isinstance(raw, dict):
             continue
-        svc = _parse_mcp_server(raw)
+        svc = _parse_mcp_get_entry(raw)
         if svc is None:
             skipped += 1
             continue
@@ -118,7 +126,78 @@ async def crawl_mcp_registry(conn: asyncpg.Connection) -> tuple[int, int, int]:
         else:
             skipped += 1
 
-    logger.info("MCP registry: inserted=%d updated=%d skipped=%d", inserted, updated, skipped)
+    logger.info("mcp-get: inserted=%d updated=%d skipped=%d", inserted, updated, skipped)
+    return inserted, updated, skipped
+
+
+# ---------------------------------------------------------------------------
+# Glama MCP registry crawler (Source 2 / backup)
+# ---------------------------------------------------------------------------
+
+_GLAMA_URL = "https://glama.ai/api/mcp/v1/servers"
+
+
+def _parse_glama_entry(entry: dict) -> dict[str, Any] | None:
+    name = entry.get("name")
+    url = (
+        entry.get("url")
+        or (entry.get("repository") or {}).get("url")
+    )
+    if not name or not url:
+        return None
+    desc = entry.get("description")
+    return {
+        "name": str(name)[:255],
+        "description": desc,
+        "endpoint_url": str(url),
+        "category": categorize_service(str(name), desc),
+        "source": "glama",
+        "metadata": {
+            k: v for k, v in entry.items()
+            if k not in ("name", "description", "url", "repository")
+        },
+    }
+
+
+async def crawl_glama(conn: asyncpg.Connection) -> tuple[int, int, int]:
+    inserted = updated = skipped = 0
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(_GLAMA_URL, headers={"Accept": "application/json"})
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning("Glama fetch failed: %s", exc)
+        return 0, 0, 0
+
+    if isinstance(data, list):
+        entries = data
+    elif isinstance(data, dict):
+        entries = data.get("servers") or data.get("results") or data.get("data") or []
+    else:
+        logger.warning("Glama: unexpected top-level type %s", type(data))
+        return 0, 0, 0
+
+    if not isinstance(entries, list):
+        logger.warning("Glama: entries is not a list: %s", type(entries))
+        return 0, 0, 0
+
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        svc = _parse_glama_entry(raw)
+        if svc is None:
+            skipped += 1
+            continue
+        outcome = await upsert_service(conn, svc)
+        if outcome == "inserted":
+            inserted += 1
+        elif outcome == "updated":
+            updated += 1
+        else:
+            skipped += 1
+
+    logger.info("Glama: inserted=%d updated=%d skipped=%d", inserted, updated, skipped)
     return inserted, updated, skipped
 
 
@@ -220,15 +299,25 @@ async def crawl_bankr_x402(conn: asyncpg.Connection) -> tuple[int, int, int]:
 async def _run() -> None:
     conn = await asyncpg.connect(_ASYNCPG_URL)
     try:
-        mcp_i, mcp_u, mcp_s = await crawl_mcp_registry(conn)
+        mcp_i, mcp_u, mcp_s = await crawl_mcp_get(conn)
+        glama_i, glama_u, glama_s = await crawl_glama(conn)
         bankr_i, bankr_u, bankr_s = await crawl_bankr_x402(conn)
+
+        sample = await conn.fetch(
+            "SELECT name, category, source FROM services "
+            "WHERE source IN ('mcp_get', 'glama') "
+            "ORDER BY created_at DESC LIMIT 3"
+        )
     finally:
         await conn.close()
 
-    total = mcp_i + mcp_u + mcp_s + bankr_i + bankr_u + bankr_s
-    new_total = mcp_i + bankr_i
-    updated_total = mcp_u + bankr_u
-    print(f"\nCrawled {total} services, inserted {new_total} new, updated {updated_total} existing")
+    print(f"\n--- mcp-get.com   : inserted={mcp_i} updated={mcp_u} skipped={mcp_s}")
+    print(f"--- Glama         : inserted={glama_i} updated={glama_u} skipped={glama_s}")
+    print(f"--- Bankr x402    : inserted={bankr_i} updated={bankr_u} skipped={bankr_s}")
+    if sample:
+        print("\nSample real services inserted:")
+        for r in sample:
+            print(f"  [{r['category']}] {r['name']}  ({r['source']})")
 
 
 def main() -> None:
