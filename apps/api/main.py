@@ -5,8 +5,11 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from web3 import Web3
 
 from chain import PAYMENT_INFO, build_payment_calldata, get_chain_stats
@@ -40,21 +43,28 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 @app.get("/debug/env")
-def debug_env():
+@limiter.limit("10/minute")
+def debug_env(request: Request):
     key = os.getenv("ANTHROPIC_API_KEY", "")
     return {"anthropic_key_present": bool(key), "key_prefix": key[:8]}
 
 
 @app.get("/health")
-def health():
+@limiter.limit("60/minute")
+def health(request: Request):
     db_status = "ok" if getattr(app.state, "db_ok", False) else "unavailable"
     return {"status": "ok", "service": "wayforth-api", "version": "0.1.0", "db_status": db_status}
 
 
 @app.get("/chain")
-def chain_info():
+@limiter.limit("10/minute")
+def chain_info(request: Request):
     """On-chain contract addresses and stats"""
     return get_chain_stats()
 
@@ -67,7 +77,9 @@ def chain_info():
         "Falls back to keyword scoring when ANTHROPIC_API_KEY is not set."
     ),
 )
+@limiter.limit("10/minute")
 async def search_services(
+    request: Request,
     q: str = Query(description="Natural language query, e.g. 'fast cheap inference for coding'"),
     category: str | None = Query(default=None, description="Filter by category: inference, data, translation, …"),
     tier: int | None = Query(default=None, description="Filter by exact coverage tier (0=free, 1=basic, 2=standard, 3=premium)"),
@@ -107,7 +119,9 @@ async def search_services(
 
 
 @app.get("/services")
+@limiter.limit("30/minute")
 async def list_services(
+    request: Request,
     category: str | None = Query(default=None),
     tier: int | None = Query(default=None, description="Filter by coverage tier (0=free, 1=basic, 2=standard, 3=premium)"),
     limit: int = Query(default=20, ge=1, le=100),
@@ -142,7 +156,8 @@ async def list_services(
 
 
 @app.get("/stats")
-async def get_stats():
+@limiter.limit("30/minute")
+async def get_stats(request: Request):
     async with app.state.pool.acquire() as conn:
         total = await conn.fetchval("SELECT COUNT(*) FROM services")
         tier_rows = await conn.fetch(
@@ -180,7 +195,8 @@ class PayRequest(BaseModel):
 
 
 @app.post("/pay")
-async def pay(req: PayRequest):
+@limiter.limit("20/minute")
+async def pay(request: Request, req: PayRequest):
     if req.amount_usdc <= 0.000066:
         raise HTTPException(
             status_code=400,
@@ -198,7 +214,8 @@ async def pay(req: PayRequest):
 
 
 @app.get("/services/{service_id}")
-async def get_service(service_id: str):
+@limiter.limit("30/minute")
+async def get_service(request: Request, service_id: str):
     async with app.state.pool.acquire() as conn:
         row = await conn.fetchrow(
             """
