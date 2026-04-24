@@ -11,5 +11,8 @@
   "basescan": {
     "registry": "https://sepolia.basescan.org/address/0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7",
     "escrow": "https://sepolia.basescan.org/address/0xC9945621CfefD9a15972D3f3d33e2D6f0cc3E320"
+  },
+  "transactions": {
+    "smokeTest_routePayment": "0xa63ea729648df431f143c6d9c11619a94e093b7b731b4021bd2883f6121c31f9"
   }
 }
