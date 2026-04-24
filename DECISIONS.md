@@ -412,3 +412,27 @@ No reentrancy, no overflow (Solidity 0.8 checked arithmetic + realistic amounts 
 - **Off-chain `serviceOwner` spoofing:** documented above; detectable via `PaymentRouted` events, closed in Phase 2.
 - **`ownerServices[]` array grows without bound:** deactivated services stay in each owner's array. No privileged path loops over it, so no DoS. Cleanup is a Phase 3 concern.
 - **No pause:** intentional — no custody, nothing worth pausing for. A latent bug would require a redeploy at a new address, which is fine because the Registry serviceId → owner mapping is stable across Escrow versions.
+
+---
+
+## ADR-013: Payment Instructions in Search Results
+
+**Date:** 2026-04-24
+**Status:** Accepted
+
+### Decision
+
+Each `/search` result includes a `payment` field containing the escrow contract address, USDC address, network identifier, fee_bps, and a human/agent-readable instruction string. A new `/chain` endpoint exposes live on-chain stats (service count, fee_bps confirmed from contract) for health and audit purposes.
+
+### Rationale
+
+**One call for discovery + payment.** An autonomous agent querying `/search` gets both the service it needs and the exact payment instructions in one response, with no second round-trip. The alternative — a separate `/payment-info` endpoint — requires agents to know to call it and to join the results client-side.
+
+**Static payment field, no per-request RPC.** `fee_bps = 150` is an immutable contract constant (no admin setter on the Escrow; changing the fee requires deploying a new contract at a new address). We define it as a module-level constant in `chain.py` and include it in every search result at zero cost. The `/chain` endpoint makes live RPC calls but is a low-traffic status/audit endpoint where latency is acceptable.
+
+**Base Sepolia for now; mainnet after audit.** Contracts are on Base Sepolia testnet. The `network: "base-sepolia"` field signals this explicitly to callers. A future mainnet deployment updates the addresses and network field; the API shape is identical.
+
+### Trade-offs
+
+- Payment instructions are generic (not service-specific on-chain serviceId). Agents calling `routePayment` on-chain still need the serviceId from the Registry and the serviceOwner address — available via `Registry.getService(serviceId)` but not yet surfaced by the API. Phase 2 will add per-service on-chain metadata when Registry ↔ API sync is implemented.
+- The `/chain` endpoint makes synchronous RPC calls to Base Sepolia. If the RPC is down it returns `{"error": "..."}` gracefully rather than 500-ing.
