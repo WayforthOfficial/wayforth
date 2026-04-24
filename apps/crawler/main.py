@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -45,13 +46,14 @@ async def upsert_service(conn: asyncpg.Connection, svc: dict[str, Any]) -> str:
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO services (name, description, endpoint_url, category, source, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO services (name, description, endpoint_url, category, source, pricing_usdc, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (endpoint_url) DO UPDATE
                 SET name        = EXCLUDED.name,
                     description = EXCLUDED.description,
                     category    = EXCLUDED.category,
                     source      = EXCLUDED.source,
+                    pricing_usdc = EXCLUDED.pricing_usdc,
                     metadata    = EXCLUDED.metadata,
                     updated_at  = NOW()
             RETURNING (xmax = 0) AS inserted
@@ -61,6 +63,7 @@ async def upsert_service(conn: asyncpg.Connection, svc: dict[str, Any]) -> str:
             svc["endpoint_url"],
             svc.get("category"),
             svc.get("source"),
+            svc.get("pricing_usdc"),
             json.dumps(svc.get("metadata", {})),
         )
         return "inserted" if row["inserted"] else "updated"
@@ -70,54 +73,61 @@ async def upsert_service(conn: asyncpg.Connection, svc: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# mcp-get.com crawler (Source 1)
+# Step 0: delete low-quality Tier 0 services from old sources
 # ---------------------------------------------------------------------------
 
-_MCP_GET_URL = "https://mcp-get.com/api/packages"
-_MCP_GET_LIMIT = 100  # API returns all ~16k; we take the first N
+async def delete_low_quality_tier0(conn: asyncpg.Connection) -> int:
+    result = await conn.execute(
+        """
+        DELETE FROM services
+        WHERE source IN ('mcp_registry', 'smithery', 'mcp_get')
+          AND coverage_tier = 0
+        """
+    )
+    # result is a string like "DELETE 114"
+    count = int(result.split()[-1])
+    return count
 
 
-def _parse_mcp_get_entry(entry: dict) -> dict[str, Any] | None:
-    name = entry.get("name")
-    url = entry.get("sourceUrl") or entry.get("homepage")
-    if not name or not url:
-        return None
-    desc = entry.get("description")
-    return {
-        "name": str(name)[:255],
-        "description": desc,
-        "endpoint_url": str(url),
-        "category": categorize_service(str(name), desc),
-        "source": "mcp_get",
-        "metadata": {
-            k: v for k, v in entry.items()
-            if k not in ("name", "description", "sourceUrl", "homepage", "readme")
-        },
-    }
+# ---------------------------------------------------------------------------
+# Source A: Awesome MCP Servers README (GitHub)
+# ---------------------------------------------------------------------------
+
+_AWESOME_URL = (
+    "https://raw.githubusercontent.com/punkpeye/awesome-mcp-servers/main/README.md"
+)
+_ITEM_RE = re.compile(r"^-\s+\[([^\]]+)\]\(([^)]+)\)(?:\s+-\s+(.+))?")
 
 
-async def crawl_mcp_get(conn: asyncpg.Connection) -> tuple[int, int, int]:
+async def crawl_awesome_mcp(conn: asyncpg.Connection) -> tuple[int, int, int]:
     inserted = updated = skipped = 0
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(_MCP_GET_URL, headers={"Accept": "application/json"})
+            resp = await client.get(_AWESOME_URL)
             resp.raise_for_status()
-            data = resp.json()
+            text = resp.text
     except Exception as exc:
-        logger.warning("mcp-get fetch failed: %s", exc)
+        logger.warning("awesome-mcp fetch failed: %s", exc)
         return 0, 0, 0
 
-    entries = data if isinstance(data, list) else []
-    entries = entries[:_MCP_GET_LIMIT]
-    logger.info("mcp-get: processing %d of %d entries", len(entries), len(data) if isinstance(data, list) else 0)
-
-    for raw in entries:
-        if not isinstance(raw, dict):
+    for line in text.splitlines():
+        m = _ITEM_RE.match(line.strip())
+        if not m:
             continue
-        svc = _parse_mcp_get_entry(raw)
-        if svc is None:
+        name, url, desc = m.group(1), m.group(2), m.group(3)
+        if not url.startswith("http") or not name:
             skipped += 1
             continue
+        desc = desc.strip() if desc else None
+        svc = {
+            "name": name[:255],
+            "description": desc,
+            "endpoint_url": url,
+            "category": categorize_service(name, desc),
+            "source": "awesome_mcp",
+            "pricing_usdc": None,
+            "metadata": {},
+        }
         outcome = await upsert_service(conn, svc)
         if outcome == "inserted":
             inserted += 1
@@ -126,15 +136,17 @@ async def crawl_mcp_get(conn: asyncpg.Connection) -> tuple[int, int, int]:
         else:
             skipped += 1
 
-    logger.info("mcp-get: inserted=%d updated=%d skipped=%d", inserted, updated, skipped)
+    logger.info("awesome-mcp: inserted=%d updated=%d skipped=%d", inserted, updated, skipped)
     return inserted, updated, skipped
 
 
 # ---------------------------------------------------------------------------
-# Glama MCP registry crawler (Source 2 / backup)
+# Source B: Glama MCP registry — paginated up to 200 services
 # ---------------------------------------------------------------------------
 
 _GLAMA_URL = "https://glama.ai/api/mcp/v1/servers"
+_GLAMA_PAGE_SIZE = 50
+_GLAMA_MAX = 200
 
 
 def _parse_glama_entry(entry: dict) -> dict[str, Any] | None:
@@ -152,6 +164,7 @@ def _parse_glama_entry(entry: dict) -> dict[str, Any] | None:
         "endpoint_url": str(url),
         "category": categorize_service(str(name), desc),
         "source": "glama",
+        "pricing_usdc": None,
         "metadata": {
             k: v for k, v in entry.items()
             if k not in ("name", "description", "url", "repository")
@@ -161,125 +174,228 @@ def _parse_glama_entry(entry: dict) -> dict[str, Any] | None:
 
 async def crawl_glama(conn: asyncpg.Connection) -> tuple[int, int, int]:
     inserted = updated = skipped = 0
+    cursor: str | None = None
+    total_fetched = 0
+
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(_GLAMA_URL, headers={"Accept": "application/json"})
-            resp.raise_for_status()
-            data = resp.json()
+        async with httpx.AsyncClient(timeout=20) as client:
+            while total_fetched < _GLAMA_MAX:
+                params: dict[str, Any] = {"limit": _GLAMA_PAGE_SIZE}
+                if cursor:
+                    params["after"] = cursor
+
+                try:
+                    resp = await client.get(_GLAMA_URL, params=params,
+                                            headers={"Accept": "application/json"})
+                    resp.raise_for_status()
+                    data = resp.json()
+                except Exception as exc:
+                    logger.warning("Glama page fetch failed: %s", exc)
+                    break
+
+                # Extract entries from various possible response shapes
+                if isinstance(data, list):
+                    entries = data
+                    page_info: dict = {}
+                elif isinstance(data, dict):
+                    entries = (
+                        data.get("data")
+                        or data.get("servers")
+                        or data.get("results")
+                        or []
+                    )
+                    page_info = data.get("pageInfo") or {}
+                else:
+                    logger.warning("Glama: unexpected response type %s", type(data))
+                    break
+
+                if not entries:
+                    break
+
+                for raw in entries:
+                    if not isinstance(raw, dict):
+                        continue
+                    svc = _parse_glama_entry(raw)
+                    if svc is None:
+                        skipped += 1
+                        continue
+                    outcome = await upsert_service(conn, svc)
+                    if outcome == "inserted":
+                        inserted += 1
+                    elif outcome == "updated":
+                        updated += 1
+                    else:
+                        skipped += 1
+
+                total_fetched += len(entries)
+
+                cursor = page_info.get("endCursor")
+                if not page_info.get("hasNextPage") or not cursor:
+                    break
+
     except Exception as exc:
-        logger.warning("Glama fetch failed: %s", exc)
-        return 0, 0, 0
+        logger.warning("Glama crawl error: %s", exc)
 
-    if isinstance(data, list):
-        entries = data
-    elif isinstance(data, dict):
-        entries = data.get("servers") or data.get("results") or data.get("data") or []
-    else:
-        logger.warning("Glama: unexpected top-level type %s", type(data))
-        return 0, 0, 0
-
-    if not isinstance(entries, list):
-        logger.warning("Glama: entries is not a list: %s", type(entries))
-        return 0, 0, 0
-
-    for raw in entries:
-        if not isinstance(raw, dict):
-            continue
-        svc = _parse_glama_entry(raw)
-        if svc is None:
-            skipped += 1
-            continue
-        outcome = await upsert_service(conn, svc)
-        if outcome == "inserted":
-            inserted += 1
-        elif outcome == "updated":
-            updated += 1
-        else:
-            skipped += 1
-
-    logger.info("Glama: inserted=%d updated=%d skipped=%d", inserted, updated, skipped)
+    logger.info("Glama: inserted=%d updated=%d skipped=%d (fetched ~%d)",
+                inserted, updated, skipped, total_fetched)
     return inserted, updated, skipped
 
 
 # ---------------------------------------------------------------------------
-# Bankr x402 crawler (with mock fallback)
+# Source C: Hardcoded high-quality seed list
 # ---------------------------------------------------------------------------
 
-_BANKR_URL = "https://bankr.io/api/x402/services"
-
-_BANKR_MOCK: list[dict[str, Any]] = [
+_SEED_SERVICES: list[dict[str, Any]] = [
+    # inference
     {
-        "name": "Bankr Inference — GPT-4o Router",
-        "description": "Route inference requests across major LLM providers with automatic failover.",
-        "endpoint_url": "https://bankr.io/x402/inference/gpt4o-router",
+        "name": "OpenRouter",
+        "description": "Unified API for 200+ LLMs including GPT-4, Claude, Llama. Pay per token.",
+        "endpoint_url": "https://openrouter.ai/api/v1",
         "category": "inference",
-        "source": "x402_bankr",
-        "metadata": {"model": "gpt-4o", "provider": "openai", "x402": True},
+        "pricing_usdc": 0.000001,
     },
     {
-        "name": "Bankr Inference — Claude Sonnet",
-        "description": "Pay-per-call access to Claude Sonnet via the x402 payment protocol.",
-        "endpoint_url": "https://bankr.io/x402/inference/claude-sonnet",
+        "name": "Together AI",
+        "description": "Fast inference for open-source models including Llama, Mistral, Qwen.",
+        "endpoint_url": "https://api.together.xyz/v1",
         "category": "inference",
-        "source": "x402_bankr",
-        "metadata": {"model": "claude-sonnet-4-6", "provider": "anthropic", "x402": True},
+        "pricing_usdc": 0.000001,
     },
     {
-        "name": "Bankr Data — News Feed Aggregator",
-        "description": "Real-time news aggregation from 5,000+ sources, tokenised per article batch.",
-        "endpoint_url": "https://bankr.io/x402/data/news-feed",
+        "name": "Groq",
+        "description": "Ultra-fast LLM inference. Llama 3 at 800 tokens/second.",
+        "endpoint_url": "https://api.groq.com/openai/v1",
+        "category": "inference",
+        "pricing_usdc": 0.0000001,
+    },
+    {
+        "name": "Replicate",
+        "description": "Run open-source ML models via API. Image, video, audio, text generation.",
+        "endpoint_url": "https://api.replicate.com/v1",
+        "category": "inference",
+        "pricing_usdc": 0.0001,
+    },
+    {
+        "name": "Fireworks AI",
+        "description": "Production inference for open-source LLMs. Fast, cheap, reliable.",
+        "endpoint_url": "https://api.fireworks.ai/inference/v1",
+        "category": "inference",
+        "pricing_usdc": 0.0000002,
+    },
+    {
+        "name": "Hugging Face Inference",
+        "description": "Inference API for 200,000+ models hosted on Hugging Face.",
+        "endpoint_url": "https://api-inference.huggingface.co/models",
+        "category": "inference",
+        "pricing_usdc": 0.000001,
+    },
+    {
+        "name": "Voyage AI",
+        "description": "State-of-the-art text embeddings for RAG and semantic search.",
+        "endpoint_url": "https://api.voyageai.com/v1",
+        "category": "inference",
+        "pricing_usdc": 0.0000001,
+    },
+    {
+        "name": "fal.ai",
+        "description": "Fast inference for image and video generation models. Flux, SDXL, Sora.",
+        "endpoint_url": "https://fal.run",
+        "category": "inference",
+        "pricing_usdc": 0.001,
+    },
+    # data
+    {
+        "name": "Polygon.io",
+        "description": "Real-time and historical stock, options, forex, and crypto market data.",
+        "endpoint_url": "https://api.polygon.io/v2",
         "category": "data",
-        "source": "x402_bankr",
-        "metadata": {"sources": 5000, "latency_ms": 120, "x402": True},
+        "pricing_usdc": 0.0001,
     },
     {
-        "name": "Bankr Translation — DeepL Pro Gateway",
-        "description": "High-quality neural translation via DeepL Pro, billed per 1k characters.",
-        "endpoint_url": "https://bankr.io/x402/translation/deepl-pro",
+        "name": "Alpha Vantage",
+        "description": "Free stock market API. Equities, forex, crypto, economic indicators.",
+        "endpoint_url": "https://www.alphavantage.co/query",
+        "category": "data",
+        "pricing_usdc": 0.00001,
+    },
+    {
+        "name": "Clearbit",
+        "description": "Company and person enrichment API. Firmographics, tech stack, contacts.",
+        "endpoint_url": "https://person.clearbit.com/v2",
+        "category": "data",
+        "pricing_usdc": 0.01,
+    },
+    {
+        "name": "Hunter.io",
+        "description": "Find and verify professional email addresses by domain or name.",
+        "endpoint_url": "https://api.hunter.io/v2",
+        "category": "data",
+        "pricing_usdc": 0.005,
+    },
+    {
+        "name": "NewsAPI",
+        "description": "Live and historical news articles from 150,000+ sources worldwide.",
+        "endpoint_url": "https://newsapi.org/v2",
+        "category": "data",
+        "pricing_usdc": 0.0001,
+    },
+    {
+        "name": "OpenWeatherMap",
+        "description": "Current weather and 16-day forecast for any city. 60 calls/minute free.",
+        "endpoint_url": "https://api.openweathermap.org/data/2.5",
+        "category": "data",
+        "pricing_usdc": 0.0001,
+    },
+    {
+        "name": "Mapbox",
+        "description": "Maps, geocoding, routing, and search APIs for location-aware applications.",
+        "endpoint_url": "https://api.mapbox.com",
+        "category": "data",
+        "pricing_usdc": 0.001,
+    },
+    # translation
+    {
+        "name": "DeepL API",
+        "description": "Highest quality neural machine translation. 31 languages. GDPR compliant.",
+        "endpoint_url": "https://api-free.deepl.com/v2",
         "category": "translation",
-        "source": "x402_bankr",
-        "metadata": {"engine": "deepl-pro", "langs": 29, "x402": True},
+        "pricing_usdc": 0.0008,
     },
     {
-        "name": "Bankr Data — On-Chain Price Oracle",
-        "description": "Signed spot prices for 500+ ERC-20 tokens, updated every block.",
-        "endpoint_url": "https://bankr.io/x402/data/price-oracle",
-        "category": "data",
-        "source": "x402_bankr",
-        "metadata": {"tokens": 500, "chain": "base", "x402": True},
+        "name": "Google Cloud Translation",
+        "description": "Neural machine translation across 130+ languages. AutoML support.",
+        "endpoint_url": "https://translation.googleapis.com/language/translate/v2",
+        "category": "translation",
+        "pricing_usdc": 0.00002,
+    },
+    {
+        "name": "Azure Translator",
+        "description": "Microsoft neural translation. 100+ languages. Custom glossary support.",
+        "endpoint_url": "https://api.cognitive.microsofttranslator.com",
+        "category": "translation",
+        "pricing_usdc": 0.00001,
+    },
+    {
+        "name": "LibreTranslate",
+        "description": "Open-source self-hostable machine translation API. Free to use.",
+        "endpoint_url": "https://libretranslate.com/translate",
+        "category": "translation",
+        "pricing_usdc": 0.0,
+    },
+    {
+        "name": "Lingvanex",
+        "description": "Translation API with 112 languages. Supports text, documents, and voice.",
+        "endpoint_url": "https://api-b2b.backenster.com/b1/api/v3/translate",
+        "category": "translation",
+        "pricing_usdc": 0.0001,
     },
 ]
 
 
-async def crawl_bankr_x402(conn: asyncpg.Connection) -> tuple[int, int, int]:
+async def crawl_seeds(conn: asyncpg.Connection) -> tuple[int, int, int]:
     inserted = updated = skipped = 0
-    entries: list[dict[str, Any]] = []
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(_BANKR_URL, headers={"Accept": "application/json"})
-            resp.raise_for_status()
-            raw = resp.json()
-            entries = raw if isinstance(raw, list) else raw.get("services", [])
-            logger.info("Bankr x402: fetched %d entries from live API", len(entries))
-    except Exception as exc:
-        logger.info("Bankr x402 API unavailable (%s) — seeding mock data", exc)
-        entries = _BANKR_MOCK
-
-    for raw in entries:
-        if not isinstance(raw, dict):
-            continue
-        svc = {
-            "name": raw.get("name", "Unknown"),
-            "description": raw.get("description"),
-            "endpoint_url": raw.get("endpoint_url") or raw.get("url", ""),
-            "category": raw.get("category", "inference"),
-            "source": raw.get("source", "x402_bankr"),
-            "metadata": raw.get("metadata", {}),
-        }
-        if not svc["endpoint_url"]:
-            skipped += 1
-            continue
+    for entry in _SEED_SERVICES:
+        svc = {**entry, "source": "seed", "metadata": {}}
         outcome = await upsert_service(conn, svc)
         if outcome == "inserted":
             inserted += 1
@@ -287,8 +403,7 @@ async def crawl_bankr_x402(conn: asyncpg.Connection) -> tuple[int, int, int]:
             updated += 1
         else:
             skipped += 1
-
-    logger.info("Bankr x402: inserted=%d updated=%d skipped=%d", inserted, updated, skipped)
+    logger.info("seeds: inserted=%d updated=%d skipped=%d", inserted, updated, skipped)
     return inserted, updated, skipped
 
 
@@ -299,25 +414,26 @@ async def crawl_bankr_x402(conn: asyncpg.Connection) -> tuple[int, int, int]:
 async def _run() -> None:
     conn = await asyncpg.connect(_ASYNCPG_URL)
     try:
-        mcp_i, mcp_u, mcp_s = await crawl_mcp_get(conn)
+        deleted = await delete_low_quality_tier0(conn)
+
+        awesome_i, awesome_u, awesome_s = await crawl_awesome_mcp(conn)
         glama_i, glama_u, glama_s = await crawl_glama(conn)
-        bankr_i, bankr_u, bankr_s = await crawl_bankr_x402(conn)
+        seed_i, seed_u, seed_s = await crawl_seeds(conn)
 
         sample = await conn.fetch(
-            "SELECT name, category, source FROM services "
-            "WHERE source IN ('mcp_get', 'glama') "
-            "ORDER BY created_at DESC LIMIT 3"
+            "SELECT name FROM services WHERE source = 'seed' ORDER BY name LIMIT 5"
         )
     finally:
         await conn.close()
 
-    print(f"\n--- mcp-get.com   : inserted={mcp_i} updated={mcp_u} skipped={mcp_s}")
-    print(f"--- Glama         : inserted={glama_i} updated={glama_u} skipped={glama_s}")
-    print(f"--- Bankr x402    : inserted={bankr_i} updated={bankr_u} skipped={bankr_s}")
+    print(f"\n--- Deleted {deleted} low-quality Tier 0 services (mcp_get/smithery/mcp_registry)")
+    print(f"--- Awesome MCP : inserted={awesome_i} updated={awesome_u} skipped={awesome_s}")
+    print(f"--- Glama       : inserted={glama_i} updated={glama_u} skipped={glama_s}")
+    print(f"--- Seeds       : inserted={seed_i} updated={seed_u} skipped={seed_s}")
     if sample:
-        print("\nSample real services inserted:")
+        print("\nSample seed services:")
         for r in sample:
-            print(f"  [{r['category']}] {r['name']}  ({r['source']})")
+            print(f"  {r['name']}")
 
 
 def main() -> None:

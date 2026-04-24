@@ -237,3 +237,37 @@ A standalone promotion cycle (`apps/crawler/promoter.py`) graduates services thr
 - A brand-new Tier 1 service has no probe history → `uptime_7d=NULL` → cannot be promoted to Tier 2 until at least one full cycle completes after initial Tier 0→1 promotion.
 - Re-fetching the service row after `update_uptime_stats` (so `promote_tier1_to_tier2` sees fresh data) adds one extra SELECT per Tier-1 service per cycle — acceptable at O(100) scale.
 - `payment_tested=TRUE` is set unconditionally in Phase 1. Phase 2 must either add a pre-UPDATE payment verification step, or migrate existing Tier-2 rows back to `FALSE` and re-promote through the real flow.
+
+---
+
+## ADR-008: Crawler Quality over Quantity
+
+**Date:** 2026-04-23
+**Status:** Accepted
+
+### Decision
+
+Replace 114 low-quality Tier 0 services sourced from mcp-get.com (GitHub repo URLs only, no descriptions) with three high-signal sources:
+
+| Source | Type | Result |
+|---|---|---|
+| Awesome MCP Servers README | Markdown-parsed community list | 2121 inserted |
+| Glama (paginated, up to 200) | Curated JSON API with pagination | 190 inserted |
+| Hardcoded seed list | 20 manually curated real production APIs | 20 inserted |
+
+Also fixed: raised Haiku `max_tokens` from 1024 to 2048 and added a 20-candidate keyword pre-filter before sending to Haiku. This prevents JSON truncation on large service lists and ensures the token budget always fits.
+
+### Rationale
+
+Claude Haiku ranking relies entirely on service descriptions to produce differentiated scores. With only GitHub repo URLs (`mcp-server-foo`, no description), all services scored identically — Haiku could not distinguish "fast cheap inference for coding" from "stock market data".
+
+The awesome-mcp-servers README provides human-written, one-sentence descriptions for every MCP server in the community catalog. Glama's paginated API provides structured metadata for curated servers. The hardcoded seed list covers 20 real production APIs (OpenRouter, Groq, Polygon.io, DeepL, etc.) that agents actually use — with real endpoint URLs, accurate descriptions, and known pricing.
+
+After this change: `wayforth_search("fast cheap inference for coding tasks")` returns Groq (95), Fireworks AI (92), Together AI (90). `wayforth_search("translate English to French professionally")` returns DeepL (98), Azure Translator (92), Google Cloud Translation (90). `wayforth_search("real-time stock prices")` returns Polygon.io (100), Alpha Vantage (90).
+
+### Trade-offs
+
+- Awesome MCP README parsing uses a simple regex (`^-\s+\[name\](url)`) which is brittle to format changes. Monitored via `source='awesome_mcp'` count in `wayforth_status`.
+- Hardcoded seed pricing requires manual updates; acceptable for Phase 1 where seeds are reference anchors, not live pricing feeds.
+- Keyword pre-filter for Haiku means a service with zero keyword overlap with the query won't appear in results even if semantically relevant. Mitigated by broad keyword sets in descriptions and deferred to Phase 3 when embeddings replace the pre-filter.
+- GitHub repo URLs from awesome-mcp will always fail the Tier 0→1 probe (they serve HTML, not JSON). These services remain permanently at Tier 0 — effectively a searchable index rather than validated endpoints.

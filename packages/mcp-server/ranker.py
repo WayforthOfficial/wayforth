@@ -36,20 +36,26 @@ def _keyword_rank(intent: str, services: list[dict]) -> list[dict]:
     return ranked
 
 
+_HAIKU_CANDIDATE_LIMIT = 20  # pre-filter before sending to Haiku
+
+
 async def rank_services(intent: str, services: list[dict]) -> list[dict]:
     """Rank services by semantic relevance using Claude Haiku; falls back to keyword ranking."""
     client = _get_client()
     if not client or not services:
         return _keyword_rank(intent, list(services))
 
+    # Pre-filter: keyword rank → top N candidates so Haiku output fits in token budget
+    candidates = _keyword_rank(intent, [dict(s) for s in services])[:_HAIKU_CANDIDATE_LIMIT]
+
     try:
         slim = [
             {"name": s.get("name"), "description": s.get("description"), "category": s.get("category")}
-            for s in services
+            for s in candidates
         ]
         msg = await client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=1024,
+            max_tokens=2048,
             system=_SYSTEM,
             messages=[{"role": "user", "content": f"Intent: {intent}\n\nServices:\n{json.dumps(slim)}"}],
         )
@@ -60,7 +66,7 @@ async def rank_services(intent: str, services: list[dict]) -> list[dict]:
         name_to_meta = {item["name"]: item for item in ranked_slim}
 
         result = []
-        for s in services:
+        for s in candidates:
             s_copy = dict(s)
             meta = name_to_meta.get(s.get("name"), {})
             s_copy["score"] = int(meta.get("score", 0))
@@ -70,4 +76,4 @@ async def rank_services(intent: str, services: list[dict]) -> list[dict]:
         return sorted(result, key=lambda x: x["score"], reverse=True)
     except Exception as exc:
         print(f"[DEBUG ranker] Haiku ranking failed ({exc!r}), falling back to keyword ranking")
-        return _keyword_rank(intent, [dict(s) for s in services])
+        return _keyword_rank(intent, candidates)
