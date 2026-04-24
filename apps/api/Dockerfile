@@ -1,4 +1,6 @@
 FROM python:3.12-slim
+ARG BUILD_DATE=unknown
+RUN echo "Build date: $BUILD_DATE"
 WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 COPY apps/api/ .
