@@ -6,7 +6,7 @@ from ranker import rank_services
 
 load_dotenv()
 
-API_BASE = os.getenv("WAYFORTH_API_URL", "http://localhost:8000")
+API_BASE = os.getenv("WAYFORTH_API_URL", "https://api-production-fd71.up.railway.app")
 
 mcp = FastMCP("wayforth")
 
