@@ -1,5 +1,11 @@
 # Wayforth
 
+[![PyPI wayforth-sdk](https://img.shields.io/pypi/v/wayforth-sdk?label=wayforth-sdk&color=blue)](https://pypi.org/project/wayforth-sdk/)
+[![PyPI wayforth-mcp](https://img.shields.io/pypi/v/wayforth-mcp?label=wayforth-mcp&color=blue)](https://pypi.org/project/wayforth-mcp/)
+[![MCP Registry](https://img.shields.io/badge/MCP-Registry-purple)](https://registry.modelcontextprotocol.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![API](https://img.shields.io/badge/API-Live-green)](https://api-production-fd71.up.railway.app/docs)
+
 The search engine and payment rail for AI agents — discover services and pay in USDC, powered by Base.
 
 ## Install
@@ -90,8 +96,10 @@ wayforth/
 │   ├── api/        # FastAPI service
 │   └── crawler/    # Service crawler
 ├── packages/
-│   ├── mcp-server/ # MCP server (Claude Code / Cursor integration)
-│   └── schema/     # Shared schemas
+│   ├── sdk-python/     # Python SDK
+│   ├── sdk-typescript/ # TypeScript/JavaScript SDK
+│   ├── mcp-server/     # MCP server (Claude Code / Cursor integration)
+│   └── schema/         # Shared schemas
 ├── contracts/
 │   └── base/       # Solidity contracts — Foundry (Phase 2)
 └── infra/

@@ -1,0 +1,20 @@
+{
+  "name": "wayforth-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript/JavaScript SDK for Wayforth — search engine and payment rail for AI agents",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "example": "node -r ts-node/register examples/basic.ts"
+  },
+  "keywords": ["ai", "agents", "mcp", "wayforth", "api"],
+  "license": "MIT",
+  "homepage": "https://wayforth.io",
+  "repository": {"type": "git", "url": "https://github.com/WayforthOfficial/wayforth"},
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0"
+  }
+}
