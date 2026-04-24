@@ -17,7 +17,7 @@ _DB_URL = os.environ.get(
 )
 _ASYNCPG_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 
-_BASE_URL = "http://localhost:8001"
+_BASE_URL = os.environ.get("LABS_BASE_URL", "http://localhost:8001")
 
 _LABS_SERVICES = [
     {
