@@ -1,0 +1,15 @@
+{
+  "network": "base-sepolia",
+  "chainId": 84532,
+  "deployedAt": "2026-04-24",
+  "deployer": "0xAE99a420073780bCcd13E832222E0b07731da431",
+  "contracts": {
+    "WayforthRegistry": "0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7",
+    "WayforthEscrow": "0xC9945621CfefD9a15972D3f3d33e2D6f0cc3E320",
+    "USDC": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+  },
+  "basescan": {
+    "registry": "https://sepolia.basescan.org/address/0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7",
+    "escrow": "https://sepolia.basescan.org/address/0xC9945621CfefD9a15972D3f3d33e2D6f0cc3E320"
+  }
+}
