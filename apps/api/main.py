@@ -92,25 +92,6 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
 
-@app.get("/test-limit")
-@limiter.limit("3/minute")
-def test_limit(request: Request):
-    return {"status": "ok", "message": "rate limit not hit"}
-
-
-@app.get("/debug/env")
-@limiter.limit("10/minute")
-def debug_env(request: Request):
-    key = os.getenv("ANTHROPIC_API_KEY", "")
-    return {"anthropic_key_present": bool(key), "key_prefix": key[:8]}
-
-
-@app.get("/debug/sentry-test")
-async def sentry_test():
-    """Trigger a test error to verify Sentry is connected"""
-    raise ValueError("Sentry test error — if you see this in Sentry, it's working")
-
-
 @app.get("/health")
 @limiter.limit("60/minute")
 def health(request: Request):
