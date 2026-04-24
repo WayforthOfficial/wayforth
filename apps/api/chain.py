@@ -1,0 +1,98 @@
+from web3 import Web3
+
+BASE_SEPOLIA_RPC = "https://sepolia.base.org"
+REGISTRY_ADDRESS = "0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7"
+ESCROW_ADDRESS = "0xC9945621CfefD9a15972D3f3d33e2D6f0cc3E320"
+USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
+REGISTRY_ABI = [
+    {
+        "name": "getService",
+        "type": "function",
+        "inputs": [{"name": "serviceId", "type": "bytes32"}],
+        "outputs": [
+            {
+                "name": "",
+                "type": "tuple",
+                "components": [
+                    {"name": "name", "type": "string"},
+                    {"name": "endpointUrl", "type": "string"},
+                    {"name": "category", "type": "string"},
+                    {"name": "coverageTier", "type": "uint8"},
+                    {"name": "owner", "type": "address"},
+                    {"name": "active", "type": "bool"},
+                    {"name": "registeredAt", "type": "uint256"},
+                ],
+            }
+        ],
+        "stateMutability": "view",
+    },
+    {
+        "name": "serviceCount",
+        "type": "function",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+    },
+]
+
+ESCROW_ABI = [
+    {
+        "name": "FEE_BPS",
+        "type": "function",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+    },
+    {
+        "name": "routePayment",
+        "type": "function",
+        "inputs": [
+            {"name": "serviceId", "type": "bytes32"},
+            {"name": "serviceOwner", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable",
+    },
+]
+
+# fee_bps is immutable in the contract — no RPC needed per search request
+PAYMENT_INFO = {
+    "escrow": ESCROW_ADDRESS,
+    "usdc": USDC_ADDRESS,
+    "network": "base-sepolia",
+    "fee_bps": 150,
+    "instructions": "Approve USDC to escrow address, then call routePayment(serviceId, serviceOwner, amount)",
+}
+
+
+def get_web3():
+    return Web3(Web3.HTTPProvider(BASE_SEPOLIA_RPC))
+
+
+def get_registry():
+    w3 = get_web3()
+    return w3.eth.contract(address=REGISTRY_ADDRESS, abi=REGISTRY_ABI)
+
+
+def get_escrow():
+    w3 = get_web3()
+    return w3.eth.contract(address=ESCROW_ADDRESS, abi=ESCROW_ABI)
+
+
+def get_chain_stats() -> dict:
+    try:
+        count = get_registry().functions.serviceCount().call()
+        fee_bps = get_escrow().functions.FEE_BPS().call()
+        return {
+            "onchain_service_count": count,
+            "fee_bps": fee_bps,
+            "fee_pct": fee_bps / 100,
+            "registry": REGISTRY_ADDRESS,
+            "escrow": ESCROW_ADDRESS,
+            "network": "base-sepolia",
+            "usdc": USDC_ADDRESS,
+        }
+    except Exception as e:
+        return {"error": str(e)}

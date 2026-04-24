@@ -6,6 +6,7 @@ import asyncpg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 
+from chain import PAYMENT_INFO, get_chain_stats
 from db import check_db
 from ranker import rank_services
 
@@ -49,6 +50,12 @@ def health():
     return {"status": "ok", "service": "wayforth-api", "version": "0.1.0", "db_status": db_status}
 
 
+@app.get("/chain")
+def chain_info():
+    """On-chain contract addresses and stats"""
+    return get_chain_stats()
+
+
 @app.get(
     "/search",
     summary="Semantic service search",
@@ -88,6 +95,7 @@ async def search_services(
             "category": s.get("category"),
             "endpoint_url": s.get("endpoint_url"),
             "pricing_usdc": s.get("pricing_usdc"),
+            "payment": PAYMENT_INFO,
         }
         for s in top
     ]
