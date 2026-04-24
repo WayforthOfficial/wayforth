@@ -2,7 +2,6 @@ import os
 import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from ranker import rank_services
 
 load_dotenv()
 
@@ -13,19 +12,29 @@ mcp = FastMCP("wayforth")
 TIER_LABELS = {0: "free", 1: "basic", 2: "standard", 3: "premium"}
 
 
-async def _fetch_services() -> list[dict] | None:
+async def _fetch_services(category: str = None) -> list[dict] | None:
+    """Paginate through /services to collect all results."""
+    all_results: list[dict] = []
+    offset = 0
+    limit = 100
+    params: dict = {"limit": limit}
+    if category:
+        params["category"] = category
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{API_BASE}/services")
-            r.raise_for_status()
-            return r.json()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                params["offset"] = offset
+                r = await client.get(f"{API_BASE}/services", params=params)
+                r.raise_for_status()
+                data = r.json()
+                page = data.get("results", [])
+                all_results.extend(page)
+                if len(all_results) >= data.get("total", 0) or not page:
+                    break
+                offset += limit
     except Exception:
         return None
-
-
-def _score(service: dict, tokens: list[str]) -> int:
-    haystack = f"{service.get('name', '')} {service.get('description', '')}".lower()
-    return sum(1 for t in tokens if t in haystack)
+    return all_results
 
 
 def _format_ranked_service(idx: int, s: dict) -> str:
@@ -52,100 +61,117 @@ def _format_service(s: dict) -> str:
 
 
 @mcp.tool()
-async def wayforth_search(intent: str, category: str = None, max_tier: int = 2) -> str:
-    """Search Wayforth for AI services matching a natural language intent.
+async def wayforth_search(intent: str, category: str = None, limit: int = 3) -> str:
+    """Search for agent-payable services by natural language intent.
 
     Args:
         intent: What you're looking for, e.g. "translate Spanish documents"
         category: Optional filter — inference, data, or translation
-        max_tier: Maximum coverage tier to include (0=free, 1=basic, 2=standard, 3=premium)
+        limit: Number of results to return (default 3, max 20)
     """
-    services = await _fetch_services()
-    if services is None:
-        return (
-            "Wayforth API is not reachable at "
-            f"{API_BASE}. Start the API with:\n"
-            "  cd apps/api && uv run uvicorn main:app --port 8000"
-        )
+    params = {"q": intent, "limit": limit}
+    if category:
+        params["category"] = category
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{API_BASE}/search", params=params)
+            r.raise_for_status()
+            data = r.json()
+    except Exception:
+        return f"Wayforth API is not reachable at {API_BASE}."
 
-    candidates = [
-        s for s in services
-        if (category is None or s.get("category") == category)
-        and s.get("coverage_tier", 0) <= max_tier
-    ]
-
-    ranked = await rank_services(intent, candidates)
-    top = ranked[:3]
-
-    if not top:
+    results = data.get("results", [])
+    if not results:
         return f"No services found matching '{intent}'" + (
             f" in category '{category}'" if category else ""
         )
 
-    lines = [f"Top {len(top)} result(s) for \"{intent}\":\n"]
-    lines += [_format_ranked_service(i + 1, s) for i, s in enumerate(top)]
+    lines = [f"Top {len(results)} result(s) for \"{intent}\":\n"]
+    lines += [_format_ranked_service(i + 1, s) for i, s in enumerate(results)]
     return "\n\n".join(lines)
 
 
 @mcp.tool()
 async def wayforth_list(category: str = None) -> str:
-    """List all services in the Wayforth catalog.
+    """List services in the Wayforth catalog.
 
     Args:
         category: Optional filter — inference, data, or translation
     """
-    services = await _fetch_services()
+    services = await _fetch_services(category=category)
     if services is None:
-        return (
-            "Wayforth API is not reachable at "
-            f"{API_BASE}. Start the API with:\n"
-            "  cd apps/api && uv run uvicorn main:app --port 8000"
-        )
+        return f"Wayforth API is not reachable at {API_BASE}."
 
-    filtered = [
-        s for s in services
-        if category is None or s.get("category") == category
-    ]
+    if not services:
+        return "No services found" + (f" in category '{category}'" if category else "")
 
-    if not filtered:
-        return f"No services found" + (f" in category '{category}'" if category else "")
-
-    header = "All Wayforth services" + (f" — category: {category}" if category else "")
-    lines = [f"{header} ({len(filtered)} total):\n"]
-    lines += [_format_service(s) for s in filtered]
+    header = "Wayforth services" + (f" — category: {category}" if category else "")
+    lines = [f"{header} ({len(services)} total):\n"]
+    lines += [_format_service(s) for s in services]
     return "\n\n".join(lines)
 
 
 @mcp.tool()
+async def wayforth_stats() -> str:
+    """Get current Wayforth catalog statistics."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{API_BASE}/stats")
+            r.raise_for_status()
+            data = r.json()
+    except Exception:
+        return f"Wayforth API is not reachable at {API_BASE}."
+
+    total = data.get("total_services", 0)
+    by_tier = data.get("by_tier", {})
+    by_category = data.get("by_category", {})
+    last_updated = data.get("last_updated", "unknown")
+    tier2_count = by_tier.get("2", 0)
+
+    tier_lines = "\n".join(
+        f"  Tier {t} ({TIER_LABELS.get(int(t), '?')}): {count}"
+        for t, count in sorted(by_tier.items(), key=lambda x: int(x[0]))
+    )
+    cat_lines = "\n".join(
+        f"  {cat}: {count}" for cat, count in sorted(by_category.items())
+    )
+
+    return (
+        f"Wayforth catalog: {total:,} services total\n"
+        f"{tier2_count} Tier 2 (executable)\n\n"
+        f"By tier:\n{tier_lines}\n\n"
+        f"By category:\n{cat_lines}\n\n"
+        f"Last updated: {last_updated}"
+    )
+
+
+@mcp.tool()
 async def wayforth_status() -> str:
-    """Return catalog stats: service counts by tier and category, plus API health."""
-    services = await _fetch_services()
-    if services is None:
-        return (
-            f"API health: UNREACHABLE ({API_BASE})\n"
-            "Start with: cd apps/api && uv run uvicorn main:app --port 8000"
-        )
+    """Return API health and catalog statistics."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            health_r = await client.get(f"{API_BASE}/health")
+            health = health_r.json().get("status", "unknown") if health_r.status_code == 200 else "degraded"
+            stats_r = await client.get(f"{API_BASE}/stats")
+            stats_r.raise_for_status()
+            data = stats_r.json()
+    except Exception:
+        return f"API health: UNREACHABLE ({API_BASE})"
 
-    total = len(services)
-    by_category: dict[str, int] = {}
-    by_tier: dict[int, int] = {}
-
-    for s in services:
-        cat = s.get("category") or "unknown"
-        by_category[cat] = by_category.get(cat, 0) + 1
-        tier = s.get("coverage_tier", 0)
-        by_tier[tier] = by_tier.get(tier, 0) + 1
+    total = data.get("total_services", 0)
+    by_category = data.get("by_category", {})
+    by_tier = data.get("by_tier", {})
 
     cat_lines = "\n".join(
         f"  {cat}: {count}" for cat, count in sorted(by_category.items())
     )
     tier_lines = "\n".join(
-        f"  tier {t} ({TIER_LABELS.get(t, '?')}): {count}"
-        for t, count in sorted(by_tier.items())
+        f"  tier {t} ({TIER_LABELS.get(int(t), '?')}): {count}"
+        for t, count in sorted(by_tier.items(), key=lambda x: int(x[0]))
     )
 
     return (
-        f"API health: OK ({API_BASE})\n"
+        f"API health: {health} ({API_BASE})\n"
         f"Total services: {total}\n\n"
         f"By category:\n{cat_lines}\n\n"
         f"By tier:\n{tier_lines}"
