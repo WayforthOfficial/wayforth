@@ -1,0 +1,6 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+cronSchedule = "0 6 * * *"
+startCommand = "uv run python promoter.py"
