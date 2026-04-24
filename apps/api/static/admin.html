@@ -239,7 +239,7 @@
 
   function fmt_date(iso) {
     if (!iso) return '—';
-    return new Date(iso).toLocaleString();
+    return iso.replace('T', ' ').slice(0, 19) + ' UTC';
   }
 
   function render(d, key) {
@@ -334,7 +334,7 @@
         </table>
       </div>
 
-      <p class="section-title">Recent Submissions</p>
+      <p class="section-title">Recent Submissions <span style="font-weight:400;color:#64748b;text-transform:none;letter-spacing:0">— Test submissions will be cleaned before launch</span></p>
       <div class="card" style="padding:0;overflow:hidden">
         <table>
           <thead><tr>
