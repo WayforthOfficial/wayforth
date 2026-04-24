@@ -8,7 +8,7 @@ import asyncpg
 import sentry_sdk
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sentry_sdk.integrations.fastapi import FastApiIntegration
@@ -19,7 +19,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address  # fallback only
 from web3 import Web3
 
-from chain import PAYMENT_INFO, build_payment_calldata, get_chain_stats
+from chain import ESCROW_ADDRESS, PAYMENT_INFO, REGISTRY_ADDRESS, build_payment_calldata, get_chain_stats
 from db import check_db
 from ranker import rank_services
 
@@ -27,6 +27,7 @@ load_dotenv()
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
@@ -410,6 +411,108 @@ async def get_service(request: Request, service_id: str):
     if row is None:
         raise HTTPException(status_code=404, detail="Service not found")
     return dict(row)
+
+
+@app.get("/admin/stats")
+@limiter.limit("20/minute")
+async def admin_stats(request: Request, key: str = ""):
+    if not ADMIN_KEY or key != ADMIN_KEY:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        async with app.state.pool.acquire() as conn:
+            total = await conn.fetchval("SELECT COUNT(*) FROM services")
+            tier_rows = await conn.fetch(
+                "SELECT coverage_tier, COUNT(*) AS cnt FROM services GROUP BY coverage_tier"
+            )
+            category_rows = await conn.fetch(
+                "SELECT category, COUNT(*) AS cnt FROM services GROUP BY category"
+            )
+            queries_today = await conn.fetchval(
+                "SELECT COUNT(*) FROM service_queries WHERE queried_at > NOW() - INTERVAL '1 day'"
+            )
+            queries_week = await conn.fetchval(
+                "SELECT COUNT(*) FROM service_queries WHERE queried_at > NOW() - INTERVAL '7 days'"
+            )
+            top_rows = await conn.fetch(
+                """
+                SELECT s.name, s.category, s.coverage_tier, s.endpoint_url,
+                       COUNT(q.id) AS query_count, ROUND(AVG(q.score), 1) AS avg_score
+                FROM services s
+                JOIN service_queries q ON s.id = q.service_id
+                WHERE q.queried_at > NOW() - INTERVAL '7 days'
+                GROUP BY s.id
+                ORDER BY query_count DESC
+                LIMIT 10
+                """
+            )
+            sub_total = await conn.fetchval("SELECT COUNT(*) FROM service_submissions")
+            sub_rows = await conn.fetch(
+                """
+                SELECT ss.contact_email, ss.submitted_at, ss.ip_address, s.name AS service_name
+                FROM service_submissions ss
+                JOIN services s ON ss.service_id = s.id
+                ORDER BY ss.submitted_at DESC
+                LIMIT 10
+                """
+            )
+    except Exception as e:
+        logger.error(f"Admin stats DB error: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    by_tier = {str(t): 0 for t in range(4)}
+    for r in tier_rows:
+        by_tier[str(r["coverage_tier"])] = r["cnt"]
+
+    return {
+        "services": {
+            "total": total,
+            "by_tier": by_tier,
+            "by_category": {r["category"]: r["cnt"] for r in category_rows},
+        },
+        "queries": {
+            "today": queries_today,
+            "week": queries_week,
+            "top_services": [
+                {
+                    "name": r["name"],
+                    "query_count": r["query_count"],
+                    "avg_score": r["avg_score"],
+                    "category": r["category"],
+                    "coverage_tier": r["coverage_tier"],
+                    "endpoint_url": r["endpoint_url"],
+                }
+                for r in top_rows
+            ],
+        },
+        "submissions": {
+            "total": sub_total,
+            "recent": [
+                {
+                    "service_name": r["service_name"],
+                    "contact_email": r["contact_email"],
+                    "submitted_at": r["submitted_at"].isoformat() + "Z",
+                    "ip_address": r["ip_address"],
+                }
+                for r in sub_rows
+            ],
+        },
+        "infrastructure": {
+            "api": "healthy",
+            "db": "healthy" if getattr(app.state, "db_ok", False) else "unavailable",
+            "sentry": "connected" if SENTRY_DSN else "not configured",
+            "contracts": {
+                "registry": REGISTRY_ADDRESS,
+                "escrow": ESCROW_ADDRESS,
+            },
+        },
+    }
+
+
+@app.get("/admin")
+async def admin_page(key: str = ""):
+    if not ADMIN_KEY or key != ADMIN_KEY:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return FileResponse("static/admin.html")
 
 
 @app.get("/demo")
