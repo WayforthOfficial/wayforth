@@ -463,3 +463,39 @@ The `/pay` endpoint accepts `service_id`, `service_owner`, and `amount_usdc`, an
 - Two transactions required (approve + routePayment) rather than one. ERC-20 `transferFrom` requires a prior approve; the Escrow contract cannot avoid this without a permit-based flow (Phase 3 consideration).
 - Clients must have ETH for gas on Base Sepolia (or Base mainnet). Wayforth does not provide gas sponsorship.
 - The `amount_usdc` minimum is `> 0.000066` (67 base units) to ensure `feeAmount > 0`, mirroring the contract's own `require(feeAmount > 0)` guard.
+
+---
+
+## ADR-015: Rate Limiting with slowapi
+
+**Date:** 2026-04-24
+**Status:** Accepted
+
+### Decision
+
+Use slowapi with in-memory per-IP rate limiting on all REST API endpoints.
+
+| Endpoint | Limit | Reason |
+|----------|-------|--------|
+| `GET /health` | 60/min | Health checks must never be blocked |
+| `GET /stats` | 30/min | Pure DB read, cheap |
+| `GET /services` | 30/min | Pure DB read, cheap |
+| `GET /services/{id}` | 30/min | Pure DB read, cheap |
+| `POST /pay` | 20/min | Calldata build is local but want fraud headroom |
+| `GET /search` | 10/min | Hits Claude Haiku — primary cost vector |
+| `GET /chain` | 10/min | Makes RPC call to Base Sepolia node |
+| `GET /debug/env` | 10/min | Internal diagnostic endpoint |
+
+### Rationale
+
+**Protect Haiku costs before HN post.** HN can spike to thousands of requests/minute. Every `/search` call invokes Claude Haiku (~$0.0001/call). At 10/min per IP, a single heavy user costs at most $0.006/hour — acceptable. Without limits, a single scraper could run up significant spend.
+
+**Why slowapi:** Drop-in FastAPI middleware with no infrastructure dependencies in single-replica mode. Redis-backed in production (add `storage_uri` to `Limiter`) when horizontal scaling requires shared counters.
+
+**Why not auth tokens yet:** Friction before HN post. API-key-based per-token quotas are a Month 2 addition alongside a free-tier quota system.
+
+### Trade-offs
+
+- In-memory counters reset on every redeploy (fine for single Railway replica; switch to Redis if adding replicas).
+- IP-based limiting can be bypassed by proxies — acceptable at launch, revisit if abuse occurs.
+- Adds `request: Request` as a required parameter to every endpoint handler (slowapi requirement).
