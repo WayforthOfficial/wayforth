@@ -26,6 +26,17 @@ curl http://localhost:8000/health
 # {"status":"ok","service":"wayforth-api","version":"0.1.0"}
 ```
 
+## Production API
+
+**Base URL:** `https://api-production-fd71.up.railway.app`
+
+```bash
+curl https://api-production-fd71.up.railway.app/health
+curl "https://api-production-fd71.up.railway.app/services?category=inference"
+```
+
+Swagger UI: `https://api-production-fd71.up.railway.app/docs`
+
 ## Use Wayforth from Claude Code
 
 Install the MCP server with one command:
@@ -45,7 +56,7 @@ See [`packages/mcp-server/README.md`](packages/mcp-server/README.md) for full in
 
 - [Architecture Decisions](DECISIONS.md)
 - MCP server: [`packages/mcp-server/`](packages/mcp-server/)
-- API docs available at `http://localhost:8000/docs` when running
+- API docs: `http://localhost:8000/docs` (local) or `https://api-production-fd71.up.railway.app/docs` (production)
 
 ## Structure
 
