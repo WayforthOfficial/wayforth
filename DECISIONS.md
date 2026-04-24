@@ -436,3 +436,30 @@ Each `/search` result includes a `payment` field containing the escrow contract 
 
 - Payment instructions are generic (not service-specific on-chain serviceId). Agents calling `routePayment` on-chain still need the serviceId from the Registry and the serviceOwner address — available via `Registry.getService(serviceId)` but not yet surfaced by the API. Phase 2 will add per-service on-chain metadata when Registry ↔ API sync is implemented.
 - The `/chain` endpoint makes synchronous RPC calls to Base Sepolia. If the RPC is down it returns `{"error": "..."}` gracefully rather than 500-ing.
+
+---
+
+## ADR-014: POST /pay Returns Calldata, Not Signed Transactions
+
+**Date:** 2026-04-24
+**Status:** Accepted
+
+### Decision
+
+The `/pay` endpoint accepts `service_id`, `service_owner`, and `amount_usdc`, and returns two unsigned EVM calldata payloads — `approve(escrow, amount)` on the USDC contract and `routePayment(serviceId, serviceOwner, amount)` on the Escrow contract — along with a fee summary. It does not broadcast or sign any transaction.
+
+### Rationale
+
+**Wayforth never holds private keys.** The non-custodial design of the Escrow contract extends to the API layer: if the API signed and broadcast transactions, it would need access to a funded wallet, which creates custody risk and regulatory surface area. Calldata vending is stateless and risk-free.
+
+**Agents sign their own transactions.** Agent runtimes (embedded wallets, MPC keys, EOAs) are responsible for funding, signing, and broadcasting. The API's job is to tell an agent *what* to sign, not to sign on its behalf.
+
+**Calldata is deterministic and verifiable.** A client can independently derive the same calldata from the ABI signatures and verify correctness before signing. There is no trust required in the API's output beyond the ABI encoding.
+
+**Pure computation — no RPC call.** `encodeABI()` (web3.py) is local ABI encoding. The `/pay` endpoint does not connect to Base Sepolia, so it has no RPC latency or availability dependency.
+
+### Trade-offs
+
+- Two transactions required (approve + routePayment) rather than one. ERC-20 `transferFrom` requires a prior approve; the Escrow contract cannot avoid this without a permit-based flow (Phase 3 consideration).
+- Clients must have ETH for gas on Base Sepolia (or Base mainnet). Wayforth does not provide gas sponsorship.
+- The `amount_usdc` minimum is `> 0.000066` (67 base units) to ensure `feeAmount > 0`, mirroring the contract's own `require(feeAmount > 0)` guard.

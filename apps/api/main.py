@@ -5,8 +5,10 @@ from contextlib import asynccontextmanager
 import asyncpg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
+from web3 import Web3
 
-from chain import PAYMENT_INFO, get_chain_stats
+from chain import PAYMENT_INFO, build_payment_calldata, get_chain_stats
 from db import check_db
 from ranker import rank_services
 
@@ -167,6 +169,30 @@ async def get_stats():
         "tier2_services": tier2_services,
         "last_updated": last_updated_str,
     }
+
+
+class PayRequest(BaseModel):
+    service_id: str
+    service_owner: str
+    amount_usdc: float
+
+
+@app.post("/pay")
+async def pay(req: PayRequest):
+    if req.amount_usdc <= 0.000066:
+        raise HTTPException(
+            status_code=400,
+            detail="amount_usdc must be > 0.000066 (minimum to generate non-zero fee)",
+        )
+    if not Web3.is_address(req.service_owner):
+        raise HTTPException(status_code=400, detail="service_owner is not a valid Ethereum address")
+    sid = req.service_id.removeprefix("0x")
+    if len(sid) != 64 or not all(c in "0123456789abcdefABCDEF" for c in sid):
+        raise HTTPException(
+            status_code=400,
+            detail="service_id must be a valid bytes32 hex string (0x + 64 hex chars)",
+        )
+    return build_payment_calldata(req.service_id, req.service_owner, req.amount_usdc)
 
 
 @app.get("/services/{service_id}")
