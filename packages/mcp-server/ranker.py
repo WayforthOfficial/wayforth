@@ -7,7 +7,8 @@ _client: AsyncAnthropic | None = None
 _SYSTEM = (
     "You are a service ranker for AI agents. Given an agent's intent and a list of "
     "services, return a JSON array of the same services ranked by relevance, each with "
-    "an added 'score' (0-100) and 'reason' (one sentence). Return ONLY valid JSON, no other text."
+    "an added 'score' (0-100) and 'reason' (one sentence). "
+    "Return ONLY a JSON array, no explanation, no markdown, no code fences."
 )
 
 
@@ -52,7 +53,10 @@ async def rank_services(intent: str, services: list[dict]) -> list[dict]:
             system=_SYSTEM,
             messages=[{"role": "user", "content": f"Intent: {intent}\n\nServices:\n{json.dumps(slim)}"}],
         )
-        ranked_slim = json.loads(msg.content[0].text)
+        text = msg.content[0].text
+        print(f"[DEBUG ranker] Haiku raw: {text[:500]!r}")
+        text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        ranked_slim = json.loads(text)
         name_to_meta = {item["name"]: item for item in ranked_slim}
 
         result = []
@@ -64,5 +68,6 @@ async def rank_services(intent: str, services: list[dict]) -> list[dict]:
             result.append(s_copy)
 
         return sorted(result, key=lambda x: x["score"], reverse=True)
-    except Exception:
+    except Exception as exc:
+        print(f"[DEBUG ranker] Haiku ranking failed ({exc!r}), falling back to keyword ranking")
         return _keyword_rank(intent, [dict(s) for s in services])
