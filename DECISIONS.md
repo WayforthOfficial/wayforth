@@ -305,3 +305,30 @@ A standalone `packages/sdk-python/` uv project (`wayforth-sdk`) provides synchro
 
 - Keyword ranking misses semantically related terms ("LLM inference" vs "language model"). Acceptable for v0.1; Phase 2 can add an optional `semantic=True` flag that proxies to Haiku.
 - API `LIMIT 100` is invisible to the caller. If a category grows past 100 entries, `list_services()` silently truncates. Will need pagination when the catalog exceeds 1,000 per category.
+
+---
+
+## ADR-010: Semantic /search Endpoint on the REST API
+
+**Date:** 2026-04-23  
+**Status:** Accepted
+
+### Decision
+
+Expose a `GET /search?q=&category=&tier=&limit=` endpoint directly on the REST API that returns Haiku-ranked results with `score` and `reason` fields. The ranking logic (`ranker.py`) is duplicated from `packages/mcp-server/ranker.py` into `apps/api/ranker.py` since the two packages are independently deployed.
+
+### Rationale
+
+**REST over MCP for HTTP clients:** MCP is the right transport for Claude agents, but it adds friction for web dashboards, curl scripts, CI pipelines, and non-Claude SDK callers. A plain HTTP endpoint makes Wayforth composable with any tool that speaks JSON.
+
+**Haiku quality over SDK keyword-only:** The SDK's client-side keyword ranker is fast and zero-cost but misses semantic matches. `/search` brings the same Haiku-backed quality that MCP users get to any HTTP client.
+
+**Future web UI:** A `GET /search` endpoint is the natural backing API for a search bar on a Wayforth website — no MCP plumbing required.
+
+**Duplication over shared package:** `apps/api/` and `packages/mcp-server/` are independently deployed and versioned. Sharing `ranker.py` via a third internal package (e.g. `packages/core/`) would require publishing it or adding path dependencies to both pyproject.toml files. Duplication is simpler and the file is 80 lines — the cost of keeping them in sync is low.
+
+### Trade-offs
+
+- Haiku adds ~1–2 s latency per `/search` call. Keyword fallback fires immediately if `ANTHROPIC_API_KEY` is absent, so the endpoint is never broken.
+- `ranker.py` is duplicated in two locations. If the ranking prompt or fence-stripping logic changes, both copies must be updated.
+- `/search` fetches all matching rows from the DB before ranking (no pre-limit). At 2,345 services this is fine; revisit if the catalog grows past ~50,000 rows.

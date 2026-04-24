@@ -47,6 +47,20 @@ curl "https://api-production-fd71.up.railway.app/services?category=inference"
 
 Swagger UI: `https://api-production-fd71.up.railway.app/docs`
 
+## Semantic Search
+
+Search 2,345+ AI services by natural language via the REST API — no MCP server required:
+
+```bash
+# Translate English to Spanish
+curl "https://api-production-fd71.up.railway.app/search?q=translate+english+to+spanish"
+
+# Fast inference, filtered by category
+curl "https://api-production-fd71.up.railway.app/search?q=fast+inference&category=inference&limit=3"
+```
+
+Response includes `score` (0–100) and `reason` from Claude Haiku, with keyword fallback when the API key is absent.
+
 ## Use Wayforth from Claude Code
 
 Install the MCP server with one command:
