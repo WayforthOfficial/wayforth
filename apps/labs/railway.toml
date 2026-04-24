@@ -1,6 +1,6 @@
 [build]
 builder = "dockerfile"
-dockerfilePath = "apps/labs/Dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "uv run uvicorn main:app --host 0.0.0.0 --port $PORT"
