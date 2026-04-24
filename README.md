@@ -2,6 +2,16 @@
 
 The search engine and payment rail for AI agents — discover services and pay in USDC, powered by Base.
 
+## Install
+
+```bash
+# Python SDK
+pip install wayforth-sdk
+
+# MCP server (for Claude Code / Cursor)
+uvx wayforth-mcp
+```
+
 ## Quick Start
 
 **1. Start infrastructure**

@@ -2,6 +2,8 @@
 
 MCP server for [Wayforth](https://github.com/your-org/wayforth) — discover AI services from Claude Code, Cursor, or any MCP-compatible client.
 
+mcp-name: io.github.WayforthOfficial/wayforth
+
 ## Install (one command)
 
 ```bash

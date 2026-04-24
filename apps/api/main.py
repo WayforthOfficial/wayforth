@@ -19,10 +19,18 @@ _ASYNCPG_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ok = check_db()
-    logger.info(f"DB connection: {'ok' if ok else 'FAILED'}")
-    app.state.pool = await asyncpg.create_pool(_ASYNCPG_URL, min_size=2, max_size=10)
+    if not ok:
+        logger.warning("DB connection check failed — starting anyway")
+    app.state.db_ok = ok
+    try:
+        app.state.pool = await asyncpg.create_pool(_ASYNCPG_URL, min_size=2, max_size=10)
+        app.state.db_ok = True
+    except Exception as e:
+        logger.warning(f"DB pool creation failed: {e} — /services will be unavailable")
+        app.state.pool = None
     yield
-    await app.state.pool.close()
+    if app.state.pool:
+        await app.state.pool.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -30,7 +38,8 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "wayforth-api", "version": "0.1.0"}
+    db_status = "ok" if getattr(app.state, "db_ok", False) else "unavailable"
+    return {"status": "ok", "service": "wayforth-api", "version": "0.1.0", "db_status": db_status}
 
 
 @app.get("/services")

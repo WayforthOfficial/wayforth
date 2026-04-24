@@ -152,5 +152,9 @@ async def wayforth_status() -> str:
     )
 
 
-if __name__ == "__main__":
+def main():
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
