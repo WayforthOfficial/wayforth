@@ -43,9 +43,12 @@ def _format_ranked_service(idx: int, s: dict) -> str:
     price_str = f"${float(price):.4f}" if price is not None else "$0"
     score = s.get("score", 0)
     reason = s.get("reason", "")
+    service_id = s.get("service_id", "")
+    sid_line = f"\n   Service ID: {service_id} (use with wayforth_pay)" if service_id else ""
     return (
         f"{idx}. {s['name']} (score: {score}) — Reason: {reason}\n"
         f"   Tier: {tier} | Price: {price_str} | Endpoint: {s.get('endpoint_url', 'N/A')}"
+        f"{sid_line}"
     )
 
 
@@ -89,6 +92,54 @@ async def wayforth_search(intent: str, category: str = None, limit: int = 3) -> 
     lines = [f"Top {len(results)} result(s) for \"{intent}\":\n"]
     lines += [_format_ranked_service(i + 1, s) for i, s in enumerate(results)]
     return "\n\n".join(lines)
+
+
+@mcp.tool()
+async def wayforth_pay(
+    service_id: str,
+    service_owner: str,
+    amount_usdc: float,
+) -> str:
+    """
+    Get payment calldata to route USDC through Wayforth Escrow.
+    Returns two transactions to broadcast: approve USDC, then routePayment.
+
+    Args:
+        service_id: bytes32 service identifier from wayforth_search
+        service_owner: Ethereum address of the service owner
+        amount_usdc: Amount in USDC (e.g. 1.0 for 1 USDC)
+    """
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            response = await client.post(
+                f"{API_BASE}/pay",
+                json={
+                    "service_id": service_id,
+                    "service_owner": service_owner,
+                    "amount_usdc": amount_usdc,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            steps = data["steps"]
+            summary = data["summary"]
+
+            return (
+                f"Payment calldata for {summary['gross_usdc']} USDC "
+                f"(fee: {summary['fee_usdc']} USDC, net: {summary['net_usdc']} USDC):\n\n"
+                f"Step 1 — Approve USDC:\n"
+                f"  To: {steps[0]['to']}\n"
+                f"  Calldata: {steps[0]['calldata']}\n\n"
+                f"Step 2 — Route Payment:\n"
+                f"  To: {steps[1]['to']}\n"
+                f"  Calldata: {steps[1]['calldata']}\n\n"
+                f"Network: {summary['network']} | "
+                f"Fee: {summary['fee_pct']}% | "
+                f"USDC decimals: {summary['usdc_decimals']}"
+            )
+        except Exception as e:
+            return f"Payment calldata error: {str(e)}"
 
 
 @mcp.tool()

@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -97,6 +98,7 @@ async def search_services(
             "category": s.get("category"),
             "endpoint_url": s.get("endpoint_url"),
             "pricing_usdc": s.get("pricing_usdc"),
+            "service_id": "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest(),
             "payment": PAYMENT_INFO,
         }
         for s in top
