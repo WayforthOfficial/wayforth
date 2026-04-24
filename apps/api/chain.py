@@ -36,6 +36,19 @@ REGISTRY_ABI = [
     },
 ]
 
+USDC_ABI = [
+    {
+        "name": "approve",
+        "type": "function",
+        "inputs": [
+            {"name": "spender", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "nonpayable",
+    }
+]
+
 ESCROW_ABI = [
     {
         "name": "FEE_BPS",
@@ -79,6 +92,52 @@ def get_registry():
 def get_escrow():
     w3 = get_web3()
     return w3.eth.contract(address=ESCROW_ADDRESS, abi=ESCROW_ABI)
+
+
+def build_payment_calldata(service_id: str, service_owner: str, amount_usdc: float) -> dict:
+    w3 = get_web3()
+    usdc = w3.eth.contract(address=USDC_ADDRESS, abi=USDC_ABI)
+    escrow = w3.eth.contract(address=ESCROW_ADDRESS, abi=ESCROW_ABI)
+
+    amount_units = int(amount_usdc * 10**6)
+    fee_units = (amount_units * 150) // 10000
+    net_units = amount_units - fee_units
+
+    service_id_bytes = bytes.fromhex(service_id.removeprefix("0x"))
+
+    approve_calldata = usdc.encode_abi("approve", args=[ESCROW_ADDRESS, amount_units])
+    route_calldata = escrow.encode_abi(
+        "routePayment", args=[service_id_bytes, service_owner, amount_units]
+    )
+
+    return {
+        "steps": [
+            {
+                "step": 1,
+                "action": "approve",
+                "description": "Approve USDC spend to Wayforth Escrow",
+                "to": USDC_ADDRESS,
+                "calldata": approve_calldata,
+                "value": "0",
+            },
+            {
+                "step": 2,
+                "action": "routePayment",
+                "description": "Route payment through Wayforth Escrow (1.5% fee)",
+                "to": ESCROW_ADDRESS,
+                "calldata": route_calldata,
+                "value": "0",
+            },
+        ],
+        "summary": {
+            "gross_usdc": amount_usdc,
+            "fee_usdc": round(fee_units / 10**6, 6),
+            "net_usdc": round(net_units / 10**6, 6),
+            "fee_pct": 1.5,
+            "network": "base-sepolia",
+            "usdc_decimals": 6,
+        },
+    }
 
 
 def get_chain_stats() -> dict:
