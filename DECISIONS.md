@@ -271,3 +271,37 @@ After this change: `wayforth_search("fast cheap inference for coding tasks")` re
 - Hardcoded seed pricing requires manual updates; acceptable for Phase 1 where seeds are reference anchors, not live pricing feeds.
 - Keyword pre-filter for Haiku means a service with zero keyword overlap with the query won't appear in results even if semantically relevant. Mitigated by broad keyword sets in descriptions and deferred to Phase 3 when embeddings replace the pre-filter.
 - GitHub repo URLs from awesome-mcp will always fail the Tier 0→1 probe (they serve HTML, not JSON). These services remain permanently at Tier 0 — effectively a searchable index rather than validated endpoints.
+
+---
+
+## ADR-009: Python SDK — REST Wrapper with Client-Side Keyword Ranking
+
+**Date:** 2026-04-23  
+**Status:** Accepted
+
+### Decision
+
+A standalone `packages/sdk-python/` uv project (`wayforth-sdk`) provides synchronous Python access to the Wayforth catalog via plain `httpx` calls. Three public methods mirror the MCP server's three tools:
+
+| Method | API Call | Notes |
+|---|---|---|
+| `search(intent, category, limit)` | `GET /services?category=` | keyword ranking client-side |
+| `list_services(category, tier, limit)` | `GET /services?category=` | `tier` filter client-side |
+| `status()` | `GET /health` | returns parsed JSON |
+
+`search()` ranks results using the same token-overlap scorer from `packages/mcp-server/server.py`. Semantic ranking (Haiku) stays in the MCP server layer only.
+
+### Rationale
+
+**Synchronous httpx:** SDK users are typically scripting or notebook contexts where async is overhead. The MCP server is async because FastMCP requires it; the SDK has no such constraint.
+
+**Client-side keyword ranking:** `/services` has no sort/relevance parameter. Sending 2,345 service descriptions to Haiku per SDK call would cost ~$0.10 and add 2–5s latency — inappropriate for a lightweight SDK. Token overlap is fast, zero-cost, and sufficient for filtering by obvious terms.
+
+**Semantic ranking stays in MCP:** Claude agents using the MCP server benefit from Haiku's quality. Direct SDK users get speed and simplicity; the two layers serve different callers.
+
+**No ORM/Pydantic:** `Service` dataclass in `models.py` is available for callers who want typed objects, but all three public methods return `list[dict]` by default — no import required for the common case.
+
+### Trade-offs
+
+- Keyword ranking misses semantically related terms ("LLM inference" vs "language model"). Acceptable for v0.1; Phase 2 can add an optional `semantic=True` flag that proxies to Haiku.
+- API `LIMIT 100` is invisible to the caller. If a category grows past 100 entries, `list_services()` silently truncates. Will need pagination when the catalog exceeds 1,000 per category.
