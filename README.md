@@ -6,102 +6,81 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![API](https://img.shields.io/badge/API-Live-green)](https://api-production-fd71.up.railway.app/docs)
 
-The search engine and payment rail for AI agents — discover services and pay in USDC, powered by Base.
+The search engine and payment rail for AI agents.
 
 ## Install
 
 ```bash
-# Python SDK
-pip install wayforth-sdk
-
-# MCP server (for Claude Code / Cursor)
-uvx wayforth-mcp
+uvx wayforth-mcp  # MCP server — works in Claude Code, Cursor, Windsurf
+pip install wayforth-sdk  # Python SDK
 ```
 
-## Quick Start
+## What it does
 
-**1. Start infrastructure**
+One endpoint where AI agents discover services and pay for them in USDC.
+
+- **2,346 services** across inference, data, and translation
+- **9 Tier 2** services — verified, executable, always up
+- **Semantic search** powered by Claude Haiku
+- **Coverage tiers** 0-3 signal which services are actually transactable
+
+## Quick start (MCP)
+
+Add to Claude Code:
 ```bash
-docker compose -f infra/docker/docker-compose.dev.yml up -d
+claude mcp add wayforth -- uvx wayforth-mcp
 ```
 
-**2. Set up environment**
-```bash
-cp .env.example .env
-```
+Then ask Claude: "find me a fast inference API for coding tasks"
 
-**3. Start the API**
-```bash
-cd apps/api
-uv run uvicorn main:app --reload --port 8000
-```
-
-**4. Verify**
-```bash
-curl http://localhost:8000/health
-# {"status":"ok","service":"wayforth-api","version":"0.1.0"}
-```
-
-## Production API
-
-**Base URL:** `https://api-production-fd71.up.railway.app`
+## Quick start (REST API)
 
 ```bash
-curl https://api-production-fd71.up.railway.app/health
-curl "https://api-production-fd71.up.railway.app/services?category=inference"
+# Semantic search
+curl "https://api-production-fd71.up.railway.app/search?q=translate+to+spanish&limit=3"
+
+# Catalog stats
+curl "https://api-production-fd71.up.railway.app/stats"
+
+# Browse services
+curl "https://api-production-fd71.up.railway.app/services?category=inference&limit=10"
 ```
 
-Swagger UI: `https://api-production-fd71.up.railway.app/docs`
+## Quick start (Python SDK)
 
-## Semantic Search
+```python
+from wayforth import WayforthClient
 
-Search 2,345+ AI services by natural language via the REST API — no MCP server required:
-
-```bash
-# Translate English to Spanish
-curl "https://api-production-fd71.up.railway.app/search?q=translate+english+to+spanish"
-
-# Fast inference, filtered by category
-curl "https://api-production-fd71.up.railway.app/search?q=fast+inference&category=inference&limit=3"
+client = WayforthClient()
+results = client.search("fast inference for coding")
+for r in results["results"]:
+    print(r["name"], r["score"], r["endpoint_url"])
 ```
 
-Response includes `score` (0–100) and `reason` from Claude Haiku, with keyword fallback when the API key is absent.
-
-## Use Wayforth from Claude Code
-
-Install the MCP server with one command:
-
-```bash
-claude mcp add wayforth -- uv run --directory ~/Code/wayforth/packages/mcp-server python server.py
-```
-
-Then ask Claude anything like:
-- *"Search Wayforth for translation services"*
-- *"List all inference services on Wayforth"*
-- *"What's in the Wayforth catalog?"*
-
-See [`packages/mcp-server/README.md`](packages/mcp-server/README.md) for full install docs.
-
-## Docs
-
-- [Architecture Decisions](DECISIONS.md)
-- MCP server: [`packages/mcp-server/`](packages/mcp-server/)
-- API docs: `http://localhost:8000/docs` (local) or `https://api-production-fd71.up.railway.app/docs` (production)
-
-## Structure
+## Architecture
 
 ```
-wayforth/
-├── apps/
-│   ├── api/        # FastAPI service
-│   └── crawler/    # Service crawler
-├── packages/
-│   ├── sdk-python/     # Python SDK
-│   ├── sdk-typescript/ # TypeScript/JavaScript SDK
-│   ├── mcp-server/     # MCP server (Claude Code / Cursor integration)
-│   └── schema/         # Shared schemas
-├── contracts/
-│   └── base/       # Solidity contracts — Foundry (Phase 2)
-└── infra/
-    └── docker/     # Dev infrastructure
+apps/api/          FastAPI + semantic search + Postgres
+apps/crawler/      Crawls MCP registries, promotes tiers daily
+apps/labs/         5 first-party Tier 2 services
+packages/mcp-server/   wayforth-mcp (uvx wayforth-mcp)
+packages/sdk-python/   wayforth-sdk (pip install wayforth-sdk)
+packages/sdk-typescript/ TypeScript SDK
+contracts/base/    Smart contracts (coming Month 2)
 ```
+
+## Coverage tiers
+
+- **Tier 0** — Discovered (indexed, not verified)
+- **Tier 1** — Testnet (passed test transaction)
+- **Tier 2** — Executable (99%+ uptime, verified end-to-end) ← default results
+- **Tier 3** — Verified (KYB complete, SLA signed)
+
+Spec: https://wayforth.io/spec/coverage-tiers/v1
+
+## Links
+
+- Website: https://wayforth.io
+- API: https://api-production-fd71.up.railway.app
+- API docs: https://api-production-fd71.up.railway.app/docs
+- Coverage tier spec: https://wayforth.io/spec/coverage-tiers/v1
