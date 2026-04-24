@@ -210,3 +210,30 @@ Same reasoning as ADR-002 for the crawler: isolated dependencies, independent de
 - MyMemory 1000 req/day quota is per-IP; shared dev environments may exhaust it (HTTP 429 returned). MyMemory also rejects `"auto"` as a source language — the service defaults `source_language="auto"` to `"en"` at the API call boundary.
 - DDG Instant Answer returns empty results for most general web queries — it is an entity/disambiguation API, not a web search index. Named-entity lookups work best.
 - `endpoint_url` values are `http://localhost:8001/...`. Re-run `seed_services.py` with the deployed host URL before any cloud deployment.
+
+---
+
+## ADR-007: Tier Promotion Pipeline Architecture
+
+**Date:** 2026-04-23
+**Status:** Accepted
+
+### Decision
+
+A standalone promotion cycle (`apps/crawler/promoter.py`) graduates services through coverage tiers on each run. Tier 0→1 requires a successful HTTP probe (2xx/3xx) returning valid JSON. Tier 1→2 requires 90% uptime over 7 days, `last_tested_at` within 48 hours, and `schema_validated=TRUE`. Probe history is persisted in the new `service_probes` table (migration `002_probes.sql`). Concurrency is bounded by `asyncio.Semaphore(10)` over `asyncpg.Pool(max_size=10)`.
+
+### Rationale
+
+**90% uptime threshold for Phase 1:** We need Tier 2 services quickly for agents to find working endpoints. 90% (9 days up out of 10) is lenient enough that a briefly flaky service can still graduate. The threshold is a named constant (`_UPTIME_THRESHOLD`) and will be tightened to 99% post-seed when catalog depth makes selectivity practical.
+
+**Semaphore(10) — polite to external services:** Without a semaphore, 50 concurrent HTTP requests would hit 50 different hosts simultaneously, risking IP-based rate limiting from Cloudflare and similar protections. Capping at 10 inflight requests is respectful to external services. The semaphore size intentionally equals `Pool(max_size=10)` so each inflight task holds exactly one semaphore slot and one pool connection — neither resource is over-subscribed.
+
+**Simulated `payment_tested`:** Setting `payment_tested=TRUE` during Tier 1→2 promotion is a Phase 1 placeholder. The column represents "has this service's x402 payment flow been validated?" Phase 2 will make an actual micro-payment to the service's x402 endpoint via a Base Sepolia smart contract call and only set the flag on confirmed on-chain transactions. The column is added now so Phase 2 has a clear migration target.
+
+**asyncpg pool over single connection:** `main.py` uses `asyncpg.connect()` because crawl functions run sequentially. `promoter.py` uses `asyncio.gather` for concurrent tasks; each task needs its own isolated connection. `asyncpg.Pool` is the standard pattern (same config as `apps/api/main.py`).
+
+### Trade-offs
+
+- A brand-new Tier 1 service has no probe history → `uptime_7d=NULL` → cannot be promoted to Tier 2 until at least one full cycle completes after initial Tier 0→1 promotion.
+- Re-fetching the service row after `update_uptime_stats` (so `promote_tier1_to_tier2` sees fresh data) adds one extra SELECT per Tier-1 service per cycle — acceptable at O(100) scale.
+- `payment_tested=TRUE` is set unconditionally in Phase 1. Phase 2 must either add a pre-UPDATE payment verification step, or migrate existing Tier-2 rows back to `FALSE` and re-promote through the real flow.
