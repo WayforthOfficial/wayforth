@@ -1,0 +1,13 @@
+[project]
+name = "wayforth-labs"
+version = "0.1.0"
+description = "Wayforth Labs — 5 first-party Tier 2 services"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.136.1",
+    "uvicorn[standard]>=0.46.0",
+    "httpx>=0.28.1",
+    "python-dotenv>=1.2.2",
+    "asyncpg>=0.31.0",
+]

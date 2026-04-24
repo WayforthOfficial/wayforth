@@ -170,3 +170,43 @@ Crawl the first 100 entries from mcp-get.com and one page (10) from Glama per ru
 - The 100-entry cap on mcp-get keeps each crawl run fast (<5 s) but leaves 15,800+ entries unprocessed; increase `_MCP_GET_LIMIT` or add pagination when the catalog needs to grow
 - Keyword inference misclassifies packages with ambiguous names (e.g. a "language server" that's not about human language translation); acceptable at Phase 1 scale
 - Glama returns only 10 entries per page; future multi-page support requires cursor-based pagination using `pageInfo.endCursor`
+
+---
+
+## ADR-006: Wayforth Labs — First-Party Tier 2 Service Layer
+
+**Date:** 2026-04-23
+**Status:** Accepted
+
+### Decision
+
+Add `apps/labs/` as a standalone `uv` FastAPI project on port 8001 exposing five first-party services, all seeded into `services` with `coverage_tier=2` and `source="wayforth_labs"`:
+
+| Path | Category | Upstream |
+|---|---|---|
+| POST /translate | translation | MyMemory free API (1000 req/day, no key) |
+| GET /weather | data | wttr.in JSON API (no key) |
+| GET /stock | data | Yahoo Finance v8 chart (no key) |
+| POST /summarize | inference | Pure Python extractive (no external call) |
+| GET /search | data | ddg-api.herokuapp.com → DuckDuckGo Instant Answer fallback |
+
+Each service is a `router = APIRouter()` in its own file under `services/`. All five are mounted in `main.py` via `include_router`. A `seed_services.py` script upserts all five into the `services` table using the same `ON CONFLICT (endpoint_url) DO UPDATE ... RETURNING (xmax = 0) AS inserted` pattern as the crawler.
+
+### Rationale
+
+- **Cold-start**: without Labs, the catalog has zero guaranteed-uptime services. An agent searching for "translation" might get no results or flaky Tier 0/1 entries.
+- **Tier 2 from day one**: we control the endpoints, so uptime is under our SLA. Labs services are the reference baseline for evaluating Tier 0/1 entries.
+- **Demo reliability**: demos and integration tests need at least one working service per category that will never 404. Labs provides this without mocking.
+- **Reference implementations**: new providers onboarding to the catalog can inspect Labs code to see the expected request/response contract for each category.
+
+### Why a separate `apps/labs/` project
+
+Same reasoning as ADR-002 for the crawler: isolated dependencies, independent deployment, independent failure domain. Labs has zero production DB reads at runtime — adding it to `apps/api/` would couple two very different operational profiles (DB-backed REST catalog vs. external-API proxy).
+
+### Trade-offs
+
+- All free-tier upstreams (MyMemory, wttr.in, Yahoo Finance, DDG) have undocumented rate limits and may change response shapes without notice. Labs is explicitly demo-tier and not suitable as production dependencies.
+- Yahoo Finance v8 is an unofficial endpoint; may require a paid provider long-term.
+- MyMemory 1000 req/day quota is per-IP; shared dev environments may exhaust it (HTTP 429 returned). MyMemory also rejects `"auto"` as a source language — the service defaults `source_language="auto"` to `"en"` at the API call boundary.
+- DDG Instant Answer returns empty results for most general web queries — it is an entity/disambiguation API, not a web search index. Named-entity lookups work best.
+- `endpoint_url` values are `http://localhost:8001/...`. Re-run `seed_services.py` with the deployed host URL before any cloud deployment.
