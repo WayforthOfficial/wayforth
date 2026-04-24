@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 import asyncpg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -243,3 +245,11 @@ async def get_service(request: Request, service_id: str):
     if row is None:
         raise HTTPException(status_code=404, detail="Service not found")
     return dict(row)
+
+
+@app.get("/demo")
+async def demo():
+    return FileResponse("static/demo.html")
+
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
