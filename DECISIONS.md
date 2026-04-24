@@ -359,3 +359,56 @@ Expose a `GET /search?q=&category=&tier=&limit=` endpoint directly on the REST A
 
 - Breaking change to `/services` response format. Both SDKs must be updated atomically with the API; any caller that expects a plain array will break. Mitigated by shipping all three changes in a single commit.
 - `GET /stats` runs 5 sequential queries. At the current catalog size this is negligible; add caching (Redis TTL ~60s) if the endpoint is hit frequently in Phase 2.
+
+---
+
+## ADR-012: Smart Contract Architecture — Registry + Non-Custodial Escrow
+
+**Date:** 2026-04-24
+**Status:** Accepted
+
+### Decision
+
+Two Foundry-built Solidity contracts in `contracts/base/src/`, targeting Base Sepolia first and Base mainnet once audited:
+
+| Contract | Role |
+|---|---|
+| `WayforthRegistry` | On-chain mirror of the service catalog: owner, name, endpoint URL, category, coverage tier, active flag. Two-step admin rotation. |
+| `WayforthEscrow` | Non-custodial USDC payment rail. Pulls gross from payer, forwards 98.5% to service owner and 1.5% to fee recipient in one atomic `routePayment`. Immutable USDC address. Two-step admin rotation. |
+
+Full Foundry test suite in `contracts/base/test/` (39 tests, 256-run fuzz on the split arithmetic).
+
+### Rationale
+
+**Non-custodial by construction — the Escrow never holds funds.** `routePayment` performs three token transfers in one transaction (`transferFrom` payer → contract, then `transfer` → serviceOwner, then `transfer` → feeRecipient). If any leg reverts, the whole tx reverts and the payer keeps their USDC. The contract has no withdraw function and no persistent balance. This eliminates the largest class of smart-contract risk: theft of pooled user funds. It also removes us from the regulatory surface of money transmission and custody — we are not holding customer funds, even for microseconds of logical state.
+
+**Basis points (1.5% = 150 bps / 10000) for fee precision.** The standard unit for on-chain fee math. Expressed as two named constants (`FEE_BPS`, `BPS_DENOMINATOR`) with no admin setter, so the fee cannot be raised by a compromised admin key — changing the fee requires deploying a new Escrow at a new address and migrating callers. Integer division floors, so `feeAmount = (amount * 150) / 10000` can round to zero for small amounts (any amount ≤ 66 base units, i.e. $0.000066 USDC). Left unchecked this is a dust-attack fee-avoidance vector; the contract requires `feeAmount > 0`, blocking sub-cent dust and ensuring `feeAmount + netAmount == amount` exactly in every valid call.
+
+**USDC address is `immutable`.** Set once in the constructor and cannot be changed — not by admin, not by upgrade. This means an admin-key compromise cannot swap the USDC reference for a malicious token that behaves like USDC on balance checks but drains on transfer. Immutable state costs nothing at runtime and closes the highest-impact admin-capture vector.
+
+**Admin key for tier updates and fee-recipient rotation.** Coverage tier is a curatorial judgment (see ADR-007) that cannot be derived on-chain, so a trusted role has to apply it; the admin key is that role. Service owners can still deactivate their own services unilaterally; admin cannot seize, transfer, or rename a service. Fee recipient is mutable because Treasury wallets rotate for operational reasons (multisig migrations, custody changes). Both admin powers use a two-step handoff (`transferAdmin` → `acceptAdmin`): a compromised admin can only *nominate* a new admin, not claim the role — giving a detection window to revoke before the attacker accepts from a different key. Phase 3 will migrate admin to a `WAY` token governance contract; the two-step pattern is already the upgrade path.
+
+**Coupled Escrow → Registry is deferred to Phase 2.** The current `routePayment` accepts `serviceOwner` as a caller-supplied argument rather than reading it from `Registry.getService(serviceId)`. This keeps the Escrow deployable and testable in isolation and lets it serve off-Registry services too. The trade-off is that a malicious off-chain router could show an agent service X and pay service Y's owner; the `serviceId` field in `PaymentRouted` provides on-chain audit so this can be detected post-hoc. Phase 2 introduces `routePaymentViaRegistry(serviceId, amount)` that reads `serviceOwner` from Registry, eliminating the spoofing class for agents that opt into the stricter path.
+
+### Security review findings (all fixed)
+
+| Severity | Finding | Fix |
+|---|---|---|
+| MED | Dust amounts (≤ 66 units) round fee to zero | `require(feeAmount > 0)` |
+| MED | No admin rotation path | Two-step `transferAdmin` / `acceptAdmin` |
+| LOW | Reentrancy defence-in-depth | `nonReentrant` guard on `routePayment` |
+| LOW | `serviceId` collision on same-block re-register | `serviceCount` added to preimage; existence check on write |
+| LOW | `abi.encodePacked(string, …)` string-concat ambiguity | switched to `abi.encode` |
+| LOW | Empty `name` / `endpointUrl` accepted | `require(bytes(...).length > 0)` |
+| LOW | `updateTier` / `deactivateService` on nonexistent id | existence check |
+| LOW | Self-payment / fee recipient = `address(this)` | explicit rejection |
+| LOW | Missing events on fee-recipient and admin changes | added `FeeRecipientUpdated`, `AdminTransferStarted/Transferred` |
+
+No reentrancy, no overflow (Solidity 0.8 checked arithmetic + realistic amounts far below uint256), no unbounded loops in a privileged path, no signature-based auth, no oracle, no upgradability — so the class of bugs we still carry is limited to the accepted trust model below.
+
+### Trade-offs
+
+- **Admin-key fee redirect:** if the admin key is compromised, the attacker can nominate a new fee recipient. Impact is capped at *future* fees (principal is never at risk because Escrow is non-custodial), two-step rotation gives a detection window, and the immutable USDC address prevents token swaps. Operational mitigation: admin key is a multisig.
+- **Off-chain `serviceOwner` spoofing:** documented above; detectable via `PaymentRouted` events, closed in Phase 2.
+- **`ownerServices[]` array grows without bound:** deactivated services stay in each owner's array. No privileged path loops over it, so no DoS. Cleanup is a Phase 3 concern.
+- **No pause:** intentional — no custody, nothing worth pausing for. A latent bug would require a redeploy at a new address, which is fine because the Registry serviceId → owner mapping is stable across Escrow versions.
