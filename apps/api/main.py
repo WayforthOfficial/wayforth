@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 import os
@@ -39,6 +40,18 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("wayforth")
+
+
+async def log_query(pool, service_id: str, query_text: str, score: int):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO service_queries (service_id, query_text, score) VALUES ($1, $2, $3)",
+                service_id, query_text[:200], score,
+            )
+    except Exception as e:
+        logger.error(f"Query log error: {e}")
+
 
 _DB_URL = os.environ.get("DATABASE_URL", "postgresql://wayforth:wayforth_dev@localhost:5432/wayforth")
 _ASYNCPG_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
@@ -147,6 +160,9 @@ async def search_services(
     services = [dict(r) for r in rows]
     ranked = await rank_services(q, services)
     top = ranked[:limit]
+    pool = app.state.pool
+    if ranked and pool:
+        asyncio.create_task(log_query(pool, str(ranked[0]["id"]), q, ranked[0].get("score", 0)))
     logger.info(f"search q={q!r} results={len(top)}")
     results = [
         {
@@ -240,6 +256,63 @@ async def get_stats(request: Request):
         "by_category": by_category,
         "tier2_services": tier2_services,
         "last_updated": last_updated_str,
+    }
+
+
+@app.get("/leaderboard")
+@limiter.limit("20/minute")
+async def leaderboard(
+    request: Request,
+    limit: int = Query(default=10, ge=1, le=50),
+    period: str = Query(default="7d", description="Time window: 1d, 7d, 30d"),
+):
+    days = 7
+    if period.endswith("d"):
+        try:
+            days = max(1, min(int(period[:-1]), 90))
+        except ValueError:
+            pass
+
+    try:
+        async with app.state.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT s.id, s.name, s.category, s.coverage_tier, s.endpoint_url,
+                       COUNT(q.id)            AS query_count,
+                       ROUND(AVG(q.score), 1) AS avg_score
+                FROM services s
+                JOIN service_queries q ON s.id = q.service_id
+                WHERE q.queried_at > NOW() - ($2 * INTERVAL '1 day')
+                GROUP BY s.id
+                ORDER BY query_count DESC
+                LIMIT $1
+                """,
+                limit,
+                days,
+            )
+            total_queries = await conn.fetchval(
+                "SELECT COUNT(*) FROM service_queries WHERE queried_at > NOW() - ($1 * INTERVAL '1 day')",
+                days,
+            )
+    except Exception as e:
+        logger.error(f"DB error: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    return {
+        "period": period,
+        "total_queries": total_queries,
+        "leaderboard": [
+            {
+                "rank": i + 1,
+                "name": r["name"],
+                "query_count": r["query_count"],
+                "avg_score": r["avg_score"],
+                "category": r["category"],
+                "coverage_tier": r["coverage_tier"],
+                "endpoint_url": r["endpoint_url"],
+            }
+            for i, r in enumerate(rows)
+        ],
     }
 
 
