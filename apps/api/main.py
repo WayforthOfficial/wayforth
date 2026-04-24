@@ -92,7 +92,7 @@ def chain_info(request: Request):
         "Falls back to keyword scoring when ANTHROPIC_API_KEY is not set."
     ),
 )
-@limiter.limit("5/minute")
+@limiter.limit("10/minute")
 async def search_services(
     request: Request,
     q: str = Query(description="Natural language query, e.g. 'fast cheap inference for coding'"),
