@@ -1,6 +1,10 @@
 import json
+import logging
 import os
+import traceback
 from anthropic import AsyncAnthropic
+
+logger = logging.getLogger(__name__)
 
 _client: AsyncAnthropic | None = None
 
@@ -14,6 +18,7 @@ _SYSTEM = (
 
 def _get_client() -> AsyncAnthropic | None:
     key = os.getenv("ANTHROPIC_API_KEY")
+    logger.info("[ranker] ANTHROPIC_API_KEY present=%s prefix=%s", bool(key), key[:8] if key else "")
     if not key:
         return None
     global _client
@@ -60,7 +65,7 @@ async def rank_services(intent: str, services: list[dict]) -> list[dict]:
             messages=[{"role": "user", "content": f"Intent: {intent}\n\nServices:\n{json.dumps(slim)}"}],
         )
         text = msg.content[0].text
-        print(f"[DEBUG ranker] Haiku raw: {text[:500]!r}")
+        logger.info("[ranker] Haiku raw: %r", text[:500])
         text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         ranked_slim = json.loads(text)
         name_to_meta = {item["name"]: item for item in ranked_slim}
@@ -75,5 +80,5 @@ async def rank_services(intent: str, services: list[dict]) -> list[dict]:
 
         return sorted(result, key=lambda x: x["score"], reverse=True)
     except Exception as exc:
-        print(f"[DEBUG ranker] Haiku ranking failed ({exc!r}), falling back to keyword ranking")
+        logger.error("[ranker] Haiku ranking failed: %r\n%s", exc, traceback.format_exc())
         return _keyword_rank(intent, candidates)

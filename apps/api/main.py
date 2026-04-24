@@ -37,6 +37,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+@app.get("/debug/env")
+def debug_env():
+    key = os.getenv("ANTHROPIC_API_KEY", "")
+    return {"anthropic_key_present": bool(key), "key_prefix": key[:8]}
+
+
 @app.get("/health")
 def health():
     db_status = "ok" if getattr(app.state, "db_ok", False) else "unavailable"
