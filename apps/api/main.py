@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from web3 import Web3
 
@@ -46,6 +47,13 @@ app = FastAPI(lifespan=lifespan)
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+
+@app.get("/test-limit")
+@limiter.limit("3/minute")
+def test_limit(request: Request):
+    return {"status": "ok", "message": "rate limit not hit"}
 
 
 @app.get("/debug/env")
