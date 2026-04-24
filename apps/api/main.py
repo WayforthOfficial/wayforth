@@ -322,6 +322,15 @@ class PayRequest(BaseModel):
     amount_usdc: float
 
 
+class SubmitRequest(BaseModel):
+    name: str
+    description: str
+    endpoint_url: str
+    category: str
+    pricing_usdc: float = 0.0
+    contact_email: str | None = None
+
+
 @app.post("/pay")
 @limiter.limit("20/minute")
 async def pay(request: Request, req: PayRequest):
@@ -340,6 +349,46 @@ async def pay(request: Request, req: PayRequest):
         )
     logger.info(f"pay amount={req.amount_usdc} service={req.service_id[:10]}")
     return build_payment_calldata(req.service_id, req.service_owner, req.amount_usdc)
+
+
+@app.post("/submit")
+@limiter.limit("5/minute")
+async def submit_service(request: Request, req: SubmitRequest):
+    if not req.endpoint_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="endpoint_url must start with https://")
+    if req.category not in ("inference", "data", "translation"):
+        raise HTTPException(status_code=400, detail="category must be one of: inference, data, translation")
+    if len(req.name) > 100:
+        raise HTTPException(status_code=400, detail="name must be 100 characters or fewer")
+    if len(req.description) > 500:
+        raise HTTPException(status_code=400, detail="description must be 500 characters or fewer")
+    if app.state.pool is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        async with app.state.pool.acquire() as conn:
+            service_id = await conn.fetchval(
+                """INSERT INTO services (name, description, endpoint_url, category, pricing_usdc, source, coverage_tier)
+                   VALUES ($1, $2, $3, $4, $5, 'submitted', 0) RETURNING id""",
+                req.name, req.description, req.endpoint_url, req.category, req.pricing_usdc,
+            )
+            await conn.execute(
+                """INSERT INTO service_submissions (service_id, contact_email, ip_address)
+                   VALUES ($1, $2, $3)""",
+                service_id, req.contact_email, get_real_ip(request),
+            )
+        logger.info(f"submit name={req.name!r} category={req.category}")
+        return {
+            "id": str(service_id),
+            "name": req.name,
+            "coverage_tier": 0,
+            "message": "Service submitted successfully. Our crawler will verify it within 24 hours. You'll start at Tier 0 and be promoted automatically as uptime data accumulates.",
+            "basescan": "https://sepolia.basescan.org/address/0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7",
+        }
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail="A service with this endpoint URL already exists")
+    except Exception as e:
+        logger.error(f"Submit error: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
 
 @app.get("/services/{service_id}")
