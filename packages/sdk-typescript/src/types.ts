@@ -26,3 +26,18 @@ export interface HealthResponse {
   version: string;
   db_status: string;
 }
+
+export interface ServicesResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  results: Service[];
+}
+
+export interface StatsResponse {
+  total_services: number;
+  by_tier: Record<string, number>;
+  by_category: Record<string, number>;
+  tier2_services: string[];
+  last_updated: string | null;
+}

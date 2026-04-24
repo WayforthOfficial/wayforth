@@ -15,11 +15,30 @@ class WayforthClient:
 
         return sorted(services, key=_score, reverse=True)[:limit]
 
-    def list_services(self, category: str = None, tier: int = None, limit: int = 100) -> list[dict]:
-        services = self._get_services(category=category)
-        if tier is not None:
-            services = [s for s in services if s.get("coverage_tier") == tier]
-        return services[:limit]
+    def list_services(
+        self, category: str = None, tier: int = None, limit: int = 20, offset: int = 0
+    ) -> list[dict]:
+        return self._get_services(category=category, tier=tier, limit=limit, offset=offset)
+
+    def get_service(self, id: str) -> dict | None:
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                r = client.get(f"{self._base_url}/services/{id}")
+                if r.status_code == 404:
+                    return None
+                r.raise_for_status()
+                return r.json()
+        except Exception:
+            return None
+
+    def stats(self) -> dict:
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                r = client.get(f"{self._base_url}/stats")
+                r.raise_for_status()
+                return r.json()
+        except Exception:
+            return {}
 
     def status(self) -> dict:
         try:
@@ -30,14 +49,18 @@ class WayforthClient:
         except Exception:
             return {"status": "error"}
 
-    def _get_services(self, category: str = None) -> list[dict]:
+    def _get_services(
+        self, category: str = None, tier: int = None, limit: int = 20, offset: int = 0
+    ) -> list[dict]:
         try:
-            params = {}
+            params: dict = {"limit": limit, "offset": offset}
             if category is not None:
                 params["category"] = category
+            if tier is not None:
+                params["tier"] = tier
             with httpx.Client(timeout=10.0) as client:
                 r = client.get(f"{self._base_url}/services", params=params)
                 r.raise_for_status()
-                return r.json()
+                return r.json()["results"]
         except Exception:
             return []

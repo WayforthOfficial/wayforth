@@ -332,3 +332,30 @@ Expose a `GET /search?q=&category=&tier=&limit=` endpoint directly on the REST A
 - Haiku adds ~1–2 s latency per `/search` call. Keyword fallback fires immediately if `ANTHROPIC_API_KEY` is absent, so the endpoint is never broken.
 - `ranker.py` is duplicated in two locations. If the ranking prompt or fence-stripping logic changes, both copies must be updated.
 - `/search` fetches all matching rows from the DB before ranking (no pre-limit). At 2,345 services this is fine; revisit if the catalog grows past ~50,000 rows.
+
+---
+
+## ADR-011: Pagination on GET /services, GET /stats, and GET /services/{id}
+
+**Date:** 2026-04-23  
+**Status:** Accepted
+
+### Decision
+
+- `GET /services` now accepts `limit` (default 20, max 100), `offset` (default 0), `category`, and `tier` query params. Response changes from a plain array to `{ "total": N, "offset": 0, "limit": 20, "results": [...] }`.
+- New `GET /stats` endpoint returns catalog-wide counts broken down by tier and category, the list of Tier 2 service names, and `last_updated`.
+- New `GET /services/{id}` endpoint returns a single service by UUID; 404 if not found.
+- Python SDK and TypeScript SDK updated in the same commit to handle the breaking response format change.
+
+### Rationale
+
+**Offset/limit over cursor-based pagination:** Cursor pagination (opaque continuation tokens) is superior for large, frequently-mutating datasets because it avoids the "skipped row" problem when items are inserted between pages. At <10K services with a daily-batch crawl cadence, this problem does not occur. Offset/limit is simpler to implement, allows random-access page jumps, and is immediately understood by any HTTP client. Switch to cursor pagination when the catalog exceeds 10K entries or real-time inserts are introduced.
+
+**`/stats` as a developer trust signal:** When developers evaluate a new data API, one of the first things they check is whether the catalog is real and structured. Returning `by_tier` and `by_category` breakdowns (not just a total count) proves the data has been classified, maintained, and promoted through the tier pipeline. It also enables dashboard widgets and SDK introspection without fetching the full service list.
+
+**`/services/{id}` for SDK round-trips:** Without a single-item lookup, clients that receive a service UUID from a search result or external reference have no way to hydrate the full record without fetching all pages. The endpoint is a prerequisite for any UI that links to individual service detail pages.
+
+### Trade-offs
+
+- Breaking change to `/services` response format. Both SDKs must be updated atomically with the API; any caller that expects a plain array will break. Mitigated by shipping all three changes in a single commit.
+- `GET /stats` runs 5 sequential queries. At the current catalog size this is negligible; add caching (Redis TTL ~60s) if the endpoint is hit frequently in Phase 2.

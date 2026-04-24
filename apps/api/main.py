@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 
 from db import check_db
 from ranker import rank_services
@@ -95,17 +95,83 @@ async def search_services(
 
 
 @app.get("/services")
-async def list_services(category: str | None = Query(default=None)):
+async def list_services(
+    category: str | None = Query(default=None),
+    tier: int | None = Query(default=None, description="Filter by coverage tier (0=free, 1=basic, 2=standard, 3=premium)"),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
     async with app.state.pool.acquire() as conn:
+        total = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM services
+            WHERE ($1::text IS NULL OR category = $1)
+              AND ($2::int IS NULL OR coverage_tier = $2)
+            """,
+            category,
+            tier,
+        )
         rows = await conn.fetch(
             """
             SELECT id, name, description, endpoint_url, category,
                    coverage_tier, pricing_usdc, source, created_at
             FROM services
             WHERE ($1::text IS NULL OR category = $1)
+              AND ($2::int IS NULL OR coverage_tier = $2)
             ORDER BY created_at DESC
-            LIMIT 100
+            LIMIT $3 OFFSET $4
             """,
             category,
+            tier,
+            limit,
+            offset,
         )
-    return [dict(r) for r in rows]
+    return {"total": total, "offset": offset, "limit": limit, "results": [dict(r) for r in rows]}
+
+
+@app.get("/stats")
+async def get_stats():
+    async with app.state.pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM services")
+        tier_rows = await conn.fetch(
+            "SELECT coverage_tier, COUNT(*) AS cnt FROM services GROUP BY coverage_tier"
+        )
+        category_rows = await conn.fetch(
+            "SELECT category, COUNT(*) AS cnt FROM services GROUP BY category"
+        )
+        tier2_rows = await conn.fetch(
+            "SELECT name FROM services WHERE coverage_tier = 2 ORDER BY name"
+        )
+        last_updated = await conn.fetchval("SELECT MAX(created_at) FROM services")
+
+    by_tier = {str(t): 0 for t in range(4)}
+    for r in tier_rows:
+        by_tier[str(r["coverage_tier"])] = r["cnt"]
+
+    by_category = {r["category"]: r["cnt"] for r in category_rows}
+    tier2_services = [r["name"] for r in tier2_rows]
+    last_updated_str = last_updated.isoformat() + "Z" if last_updated else None
+
+    return {
+        "total_services": total,
+        "by_tier": by_tier,
+        "by_category": by_category,
+        "tier2_services": tier2_services,
+        "last_updated": last_updated_str,
+    }
+
+
+@app.get("/services/{service_id}")
+async def get_service(service_id: str):
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, name, description, endpoint_url, category,
+                   coverage_tier, pricing_usdc, source, created_at
+            FROM services WHERE id = $1
+            """,
+            service_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Service not found")
+    return dict(row)
