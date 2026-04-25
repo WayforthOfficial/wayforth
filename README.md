@@ -1,87 +1,118 @@
 # Wayforth
 
-[![PyPI wayforth-sdk](https://img.shields.io/pypi/v/wayforth-sdk?label=wayforth-sdk&color=blue)](https://pypi.org/project/wayforth-sdk/)
-[![PyPI wayforth-mcp](https://img.shields.io/pypi/v/wayforth-mcp?label=wayforth-mcp&color=blue)](https://pypi.org/project/wayforth-mcp/)
-[![MCP Registry](https://img.shields.io/badge/MCP-Registry-purple)](https://registry.modelcontextprotocol.io)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![API](https://img.shields.io/badge/API-Live-green)](https://api-production-fd71.up.railway.app/docs)
-
-The search engine and payment rail for AI agents.
-
-## Install
+**The search engine and payment rail for AI agents.**
 
 ```bash
-uvx wayforth-mcp  # MCP server — works in Claude Code, Cursor, Windsurf
-pip install wayforth-sdk  # Python SDK
-npm install wayforth-sdk  # TypeScript/JavaScript SDK
+uvx wayforth-mcp
 ```
 
-## What it does
+Works with Claude Code, Cursor, Windsurf, and any MCP-compatible runtime.
 
-One endpoint where AI agents discover services and pay for them in USDC.
-
-- **2,346 services** across inference, data, and translation
-- **9 Tier 2** services — verified, executable, always up
-- **Semantic search** powered by Claude Haiku
-- **Coverage tiers** 0-3 signal which services are actually transactable
-
-## Quick start (MCP)
-
-Add to Claude Code:
-```bash
-claude mcp add wayforth -- uvx wayforth-mcp
-```
-
-Then ask Claude: "find me a fast inference API for coding tasks"
-
-## Quick start (REST API)
-
-```bash
-# Semantic search
-curl "https://api-production-fd71.up.railway.app/search?q=translate+to+spanish&limit=3"
-
-# Catalog stats
-curl "https://api-production-fd71.up.railway.app/stats"
-
-# Browse services
-curl "https://api-production-fd71.up.railway.app/services?category=inference&limit=10"
-```
-
-## Quick start (Python SDK)
+## What It Does
 
 ```python
-from wayforth import WayforthClient
+# Find the best service for your need
+wayforth_search("translate text to Spanish")
+# → DeepL API (score: 98, wri: 82), Azure Translator (96), LibreTranslate (90)
 
-client = WayforthClient()
-results = client.search("fast inference for coding")
-for r in results["results"]:
-    print(r["name"], r["score"], r["endpoint_url"])
+# Pay non-custodially on Base
+wayforth_pay(service_id, owner_address, amount_usdc)
+# → Returns approve + routePayment calldata
+# → Settles in ~2 seconds. 1.5% routing fee. Agent signs, Wayforth routes.
 ```
 
-## Architecture
+## What's Live
 
+- **2,354+ services indexed** — MCP servers, REST APIs, x402-enabled services
+- **9 Tier 2 verified** — automated 90%+ uptime, probed every 6 hours, auto-demoted on failure
+- **WayforthRank** — proprietary multi-signal ranking engine
+- **WayforthQL** — declarative query language for structured service discovery
+- **Coverage tiers 0–3** — the only automated reliability verification system in any agent registry
+- **Non-custodial payments** — smart contracts on Base Sepolia (39 tests, 256-run fuzz)
+- **API keys** — free tier included, paid tiers at wayforth.io/pricing
+
+## MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `wayforth_search` | Semantic search — ranked results 0–100 with WRI scores |
+| `wayforth_pay` | Non-custodial payment calldata for any service |
+| `wayforth_list` | Browse catalog with filters |
+| `wayforth_stats` | Catalog statistics |
+| `wayforth_status` | API health check |
+| `wayforth_remember` | Save a service to agent memory |
+| `wayforth_recall` | Retrieve saved services |
+| `wayforth_similar` | Services co-used with a given service |
+
+## WayforthQL
+
+```http
+POST https://api-production-fd71.up.railway.app/query
+Content-Type: application/json
+
+{
+  "query": "fast inference for coding",
+  "tier_min": 2,
+  "protocol": "x402",
+  "sort_by": "wri",
+  "limit": 5
+}
 ```
-apps/api/          FastAPI + semantic search + Postgres
-apps/crawler/      Crawls MCP registries, promotes tiers daily
-apps/labs/         5 first-party Tier 2 services
-packages/mcp-server/   wayforth-mcp (uvx wayforth-mcp)
-packages/sdk-python/   wayforth-sdk (pip install wayforth-sdk)
-packages/sdk-typescript/ TypeScript SDK
-contracts/base/    Smart contracts (coming Month 2)
+
+Full spec: https://api-production-fd71.up.railway.app/wayforthql-spec
+
+## Coverage Tiers
+
+| Tier | Name | Criteria |
+|------|------|----------|
+| 0 | Discovered | Indexed, not yet verified |
+| 1 | Tested | Endpoint responds |
+| 2 | Executable | 90%+ uptime, 7-day verified — default search results |
+| 3 | Verified | KYB complete, SLA signed |
+
+Verification runs automatically every 6 hours. No manual review. No paid placement. Ever.
+
+## REST API
+
+Base URL: `https://api-production-fd71.up.railway.app`
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /search?q=...` | Semantic search |
+| `POST /query` | WayforthQL structured query |
+| `POST /pay` | Payment calldata |
+| `GET /stats` | Catalog stats |
+| `GET /leaderboard` | Most searched by agents |
+| `GET /services/similar/{id}` | Co-usage recommendations |
+| `GET /services/{id}/history` | WRI trend over time |
+| `POST /memory` | Save agent memory |
+| `POST /webhooks/register` | Register tier change webhooks |
+| `POST /tier3/apply` | Apply for Tier 3 verification |
+| `GET /keys/tiers` | API key tier limits |
+
+Full docs: https://api-production-fd71.up.railway.app/docs
+
+## SDKs
+
+```bash
+pip install wayforth-sdk       # Python
+npm install wayforth-sdk       # TypeScript / JavaScript
+uvx wayforth-mcp               # MCP server
 ```
 
-## Coverage tiers
+## Smart Contracts (Base Sepolia)
 
-- **Tier 0** — Discovered (indexed, not verified)
-- **Tier 1** — Testnet (passed test transaction)
-- **Tier 2** — Executable (99%+ uptime, verified end-to-end) ← default results
-- **Tier 3** — Verified (KYB complete, SLA signed)
+| Contract | Address |
+|----------|---------|
+| WayforthRegistry | `0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7` |
+| WayforthEscrow | `0xC9945621CfefD9a15972D3f3d33e2D6f0cc3E320` |
 
-Spec: https://wayforth.io/spec/coverage-tiers/v1
+39 Foundry tests passing. 256-run fuzz suite. Mainnet deployment follows independent security audit.
 
-## Links
+## License
 
-- Website: https://wayforth.io
-- API: https://api-production-fd71.up.railway.app
-- API docs: https://api-production-fd71.up.railway.app/docs
-- Coverage tier spec: https://wayforth.io/spec/coverage-tiers/v1
+Core: BSL 1.1 — source visible, no competing use for 4 years. OpenAPI spec + contract ABIs: MIT.
+
+---
+
+[wayforth.io](https://wayforth.io) · [docs](https://api-production-fd71.up.railway.app/docs) · hello@wayforth.io
