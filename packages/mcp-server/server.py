@@ -246,42 +246,72 @@ async def wayforth_status() -> str:
 
 
 @mcp.tool()
-async def wayforth_remember(service_id: str, service_name: str, note: str = "") -> str:
+async def wayforth_remember(service_id: str, service_name: str, note: str = "", agent_id: str = "") -> str:
     """Save a service to agent memory for quick access later.
 
     Args:
         service_id: The service ID or wayforth:// identifier
         service_name: Human-readable service name
         note: Optional note about why you saved this service
+        agent_id: Agent identifier (wallet address or session ID) for cross-session persistence
     """
-    mem = _load_memory()
-    mem["services"] = [s for s in mem["services"] if s["service_id"] != service_id]
-    mem["services"].append({
-        "service_id": service_id,
-        "service_name": service_name,
-        "note": note,
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-    })
-    _save_memory(mem)
-    return f"Saved '{service_name}' to memory. You have {len(mem['services'])} saved service(s)."
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{API_BASE}/memory",
+                json={"service_id": service_id, "service_name": service_name, "note": note, "agent_id": agent_id},
+            )
+            r.raise_for_status()
+            data = r.json()
+            return f"Saved '{data['service_name']}' to memory (persisted in Wayforth DB)."
+    except Exception:
+        # Fallback to local file if API unavailable
+        mem = _load_memory()
+        mem["services"] = [s for s in mem["services"] if s["service_id"] != service_id]
+        mem["services"].append({
+            "service_id": service_id,
+            "service_name": service_name,
+            "note": note,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        })
+        _save_memory(mem)
+        return f"Saved '{service_name}' to local memory (API unavailable). You have {len(mem['services'])} saved service(s)."
 
 
 @mcp.tool()
-async def wayforth_recall(query: str = "") -> str:
+async def wayforth_recall(query: str = "", agent_id: str = "") -> str:
     """Recall services previously saved to memory.
 
     Args:
         query: Optional filter — search saved services by name or note
+        agent_id: Agent identifier used when saving — required to retrieve cross-session memories
     """
-    mem = _load_memory()
-    services = mem["services"]
-    if query:
-        q = query.lower()
-        services = [s for s in services if q in s["service_name"].lower() or q in s.get("note", "").lower()]
-    if not services:
-        return "No saved services found. Use wayforth_search to find services and wayforth_remember to save them."
-    lines = [f"- {s['service_name']} ({s['service_id']}) — {s.get('note', 'no note')}" for s in services]
-    return f"Your saved services ({len(services)}):\n" + "\n".join(lines)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            params: dict = {}
+            if agent_id:
+                params["agent_id"] = agent_id
+            if query:
+                params["q"] = query
+            r = await client.get(f"{API_BASE}/memory", params=params)
+            r.raise_for_status()
+            data = r.json()
+            services = data.get("services", [])
+            if not services:
+                return "No saved services found. Use wayforth_search to find services and wayforth_remember to save them."
+            lines = [f"- {s['service_name']} ({s['service_id']}) — {s.get('note', 'no note')}" for s in services]
+            return f"Your saved services ({len(services)}):\n" + "\n".join(lines)
+    except Exception:
+        # Fallback to local file if API unavailable
+        mem = _load_memory()
+        services = mem["services"]
+        if query:
+            q = query.lower()
+            services = [s for s in services if q in s["service_name"].lower() or q in s.get("note", "").lower()]
+        if not services:
+            return "No saved services found. Use wayforth_search to find services and wayforth_remember to save them."
+        lines = [f"- {s['service_name']} ({s['service_id']}) — {s.get('note', 'no note')}" for s in services]
+        return f"Your saved services ({len(services)}) [local fallback]:\n" + "\n".join(lines)
 
 
 def main():
