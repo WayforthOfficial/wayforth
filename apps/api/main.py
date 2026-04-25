@@ -228,11 +228,100 @@ async def search_services(
             "pricing_usdc": s.get("pricing_usdc"),
             "payment_protocol": s.get("payment_protocol", "wayforth"),
             "service_id": "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest(),
+            "wayforth_id": f"wayforth://{s.get('name','').lower().replace(' ','_').replace('/','_')[:30]}/{hashlib.sha256(s.get('endpoint_url','').encode()).hexdigest()[:8]}",
             "payment": PAYMENT_INFO,
         }
         for s in top
     ]
     return {"query": q, "total_results": len(top), "results": results}
+
+
+class WayforthQLQuery(BaseModel):
+    query: str
+    tier_min: int | None = 2
+    price_max: float | None = None
+    uptime_min: float | None = None  # reserved — no column yet
+    category: str | None = None
+    limit: int | None = 5
+    with_payment_calldata: bool | None = False
+
+
+@app.post("/query")
+@limiter.limit("10/minute")
+async def wayforthql(request: Request, body: WayforthQLQuery):
+    """WayforthQL — declarative query language for agent service discovery."""
+    conditions = ["coverage_tier >= $1"]
+    params: list = [body.tier_min if body.tier_min is not None else 0]
+    idx = 2
+
+    if body.price_max is not None:
+        conditions.append(f"(pricing_usdc IS NULL OR pricing_usdc <= ${idx})")
+        params.append(body.price_max)
+        idx += 1
+
+    if body.category:
+        conditions.append(f"category = ${idx}")
+        params.append(body.category)
+        idx += 1
+
+    where = " AND ".join(conditions)
+    limit = min(body.limit or 5, 20)
+
+    try:
+        async with request.app.state.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT id, name, description, endpoint_url, category,
+                       pricing_usdc, coverage_tier, source, payment_protocol
+                FROM services
+                WHERE {where}
+                ORDER BY coverage_tier DESC
+                LIMIT {limit * 4}
+                """,
+                *params,
+            )
+    except Exception as e:
+        logger.error(f"DB error in /query: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    if not rows:
+        return {"query": body.query, "results": [], "total": 0, "protocol": "WayforthQL/1.0"}
+
+    candidates = [dict(r) for r in rows]
+    ranked = await rank_services(body.query, candidates)
+    results_raw = ranked[:limit]
+
+    results = []
+    for s in results_raw:
+        service_id = "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest()
+        name_slug = s.get("name", "").lower().replace(" ", "_").replace("/", "_")[:30]
+        entry = {
+            "name": s.get("name"),
+            "score": s.get("score", 0),
+            "reason": s.get("reason", ""),
+            "coverage_tier": s.get("coverage_tier"),
+            "category": s.get("category"),
+            "endpoint_url": s.get("endpoint_url"),
+            "pricing_usdc": s.get("pricing_usdc"),
+            "payment_protocol": s.get("payment_protocol", "wayforth"),
+            "service_id": service_id,
+            "wayforth_id": f"wayforth://{name_slug}/{service_id[2:10]}",
+        }
+        if body.with_payment_calldata:
+            entry["payment"] = PAYMENT_INFO
+        results.append(entry)
+
+    return {
+        "query": body.query,
+        "results": results,
+        "total": len(results),
+        "protocol": "WayforthQL/1.0",
+        "filters_applied": {
+            "tier_min": body.tier_min,
+            "price_max": body.price_max,
+            "category": body.category,
+        },
+    }
 
 
 @app.get("/services")

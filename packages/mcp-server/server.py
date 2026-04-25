@@ -1,5 +1,7 @@
+import json
 import os
 import httpx
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
@@ -10,6 +12,20 @@ API_BASE = os.getenv("WAYFORTH_API_URL", "https://api-production-fd71.up.railway
 mcp = FastMCP("wayforth")
 
 TIER_LABELS = {0: "free", 1: "basic", 2: "standard", 3: "premium"}
+
+MEMORY_FILE = os.path.expanduser("~/.wayforth_memory.json")
+
+
+def _load_memory() -> dict:
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE) as f:
+            return json.load(f)
+    return {"services": []}
+
+
+def _save_memory(data: dict) -> None:
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 async def _fetch_services(category: str = None) -> list[dict] | None:
@@ -227,6 +243,45 @@ async def wayforth_status() -> str:
         f"By category:\n{cat_lines}\n\n"
         f"By tier:\n{tier_lines}"
     )
+
+
+@mcp.tool()
+async def wayforth_remember(service_id: str, service_name: str, note: str = "") -> str:
+    """Save a service to agent memory for quick access later.
+
+    Args:
+        service_id: The service ID or wayforth:// identifier
+        service_name: Human-readable service name
+        note: Optional note about why you saved this service
+    """
+    mem = _load_memory()
+    mem["services"] = [s for s in mem["services"] if s["service_id"] != service_id]
+    mem["services"].append({
+        "service_id": service_id,
+        "service_name": service_name,
+        "note": note,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    })
+    _save_memory(mem)
+    return f"Saved '{service_name}' to memory. You have {len(mem['services'])} saved service(s)."
+
+
+@mcp.tool()
+async def wayforth_recall(query: str = "") -> str:
+    """Recall services previously saved to memory.
+
+    Args:
+        query: Optional filter — search saved services by name or note
+    """
+    mem = _load_memory()
+    services = mem["services"]
+    if query:
+        q = query.lower()
+        services = [s for s in services if q in s["service_name"].lower() or q in s.get("note", "").lower()]
+    if not services:
+        return "No saved services found. Use wayforth_search to find services and wayforth_remember to save them."
+    lines = [f"- {s['service_name']} ({s['service_id']}) — {s.get('note', 'no note')}" for s in services]
+    return f"Your saved services ({len(services)}):\n" + "\n".join(lines)
 
 
 def main():
