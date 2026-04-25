@@ -1,4 +1,4 @@
-import { Service, SearchResponse, ServicesResponse, StatsResponse, HealthResponse } from "./types";
+import { Service, SearchResponse, ServicesResponse, StatsResponse, HealthResponse, AgentIdentity, WayforthQLQuery, SimilarResponse, TiersResponse } from "./types";
 
 const DEFAULT_BASE_URL = "https://api-production-fd71.up.railway.app";
 
@@ -7,6 +7,26 @@ export class WayforthClient {
 
   constructor(baseUrl: string = DEFAULT_BASE_URL) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+  }
+
+  private async get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
+    const url = new URL(`${this.baseUrl}${path}`);
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
+    }
+    const res = await fetch(url.toString());
+    if (!res.ok) throw new Error(`Wayforth API error: ${res.status}`);
+    return res.json() as Promise<T>;
+  }
+
+  private async post<T>(path: string, body: unknown): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Wayforth API error: ${res.status}`);
+    return res.json() as Promise<T>;
   }
 
   async search(
@@ -55,5 +75,28 @@ export class WayforthClient {
     const res = await fetch(`${this.baseUrl}/health`);
     if (!res.ok) throw new Error(`Wayforth API error: ${res.status}`);
     return res.json() as Promise<HealthResponse>;
+  }
+
+  async getIdentity(agentId: string): Promise<AgentIdentity> {
+    return this.get<AgentIdentity>(`/identity/${agentId}`);
+  }
+
+  async registerIdentity(agentId: string, displayName?: string): Promise<AgentIdentity> {
+    return this.post<AgentIdentity>('/identity/register', {
+      agent_id: agentId,
+      display_name: displayName || ''
+    });
+  }
+
+  async query(params: WayforthQLQuery): Promise<SearchResponse> {
+    return this.post<SearchResponse>('/query', params);
+  }
+
+  async getSimilar(serviceId: string, limit = 5): Promise<SimilarResponse> {
+    return this.get<SimilarResponse>(`/services/similar/${serviceId}`, { limit });
+  }
+
+  async getTiers(): Promise<TiersResponse> {
+    return this.get<TiersResponse>('/keys/tiers');
   }
 }
