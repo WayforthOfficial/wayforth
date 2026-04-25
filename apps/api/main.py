@@ -257,6 +257,38 @@ async def get_stats(request: Request):
     }
 
 
+@app.get("/health-report")
+@limiter.limit("10/minute")
+async def health_report(request: Request):
+    try:
+        async with app.state.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT name, consecutive_failures, last_tested_at
+                FROM services WHERE coverage_tier = 2
+                ORDER BY name
+                """
+            )
+    except Exception as e:
+        logger.error(f"DB error: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    services = [
+        {
+            "name": r["name"],
+            "status": "up" if (r["consecutive_failures"] or 0) == 0 else "degraded",
+            "consecutive_failures": r["consecutive_failures"] or 0,
+            "last_checked": r["last_tested_at"].isoformat() if r["last_tested_at"] else None,
+        }
+        for r in rows
+    ]
+    return {
+        "tier2_services": services,
+        "total_tier2": len(services),
+        "all_healthy": all(s["status"] == "up" for s in services),
+    }
+
+
 @app.get("/leaderboard")
 @limiter.limit("20/minute")
 async def leaderboard(

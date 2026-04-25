@@ -1,0 +1,1 @@
+ALTER TABLE services ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER DEFAULT 0;
