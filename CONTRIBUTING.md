@@ -1,56 +1,33 @@
 # Contributing to Wayforth
 
-Thanks for your interest in contributing. Here's how to get a change in.
+## What's Open for Contribution
 
-## Workflow
+- MCP server (`packages/mcp-server/`)
+- Python SDK (`packages/sdk-python/`)
+- TypeScript SDK (`packages/sdk-typescript/`)
+- Smart contracts (`contracts/base/`)
+- Crawler sources (`apps/crawler/`)
 
-**1. Fork the repo**
+## What's Closed
 
-Click **Fork** on GitHub to create your own copy, then clone it locally:
+The WayforthRank ranking engine is proprietary closed-source. The `ranker_client.py` interface is open — the implementation is not.
 
-```bash
-git clone https://github.com/<your-username>/wayforth.git
-cd wayforth
-```
+## How to Contribute
 
-**2. Create a feature branch**
+1. Fork the repo
+2. Create a feature branch: `git checkout -b feat/your-feature`
+3. Make changes with tests
+4. For contracts: `cd contracts/base && forge test`
+5. Open a PR with a clear description
 
-Branch off `main` with a short, descriptive name:
+## Code Style
 
-```bash
-git checkout -b feat/your-feature-name
-```
+- Python: follow existing patterns, type hints required
+- TypeScript: strict mode, no `any`
+- Solidity: NatSpec comments on all public functions
 
-**3. Make your changes**
+## License
 
-Set up the dev environment (requires Python 3.12+ and [uv](https://github.com/astral-sh/uv)):
+By contributing, you agree your contributions are licensed under BSL 1.1.
 
-```bash
-cp .env.example .env          # fill in your values
-docker compose -f infra/docker/docker-compose.dev.yml up -d
-cd apps/api && uv run uvicorn main:app --reload
-```
-
-Each app (`apps/api`, `apps/crawler`, `apps/labs`) and the MCP server (`packages/mcp-server`) are standalone `uv` projects — run `uv sync` inside each one you touch.
-
-**4. Open a pull request**
-
-Push your branch and open a PR against `main`:
-
-```bash
-git push -u origin feat/your-feature-name
-```
-
-In the PR description, explain:
-- **What** you changed (a brief summary of the diff)
-- **Why** you changed it (the problem you're solving or the improvement you're making)
-- **How to test it** (any steps a reviewer should follow to verify the change works)
-
-Keep PRs focused — one logical change per PR makes review faster and history cleaner.
-
-## Guidelines
-
-- Follow the existing code style (Python type hints, asyncpg for DB, httpx for HTTP).
-- New crawler sources go in `apps/crawler/main.py`; follow the `crawl_*` function pattern.
-- Significant architecture decisions belong in `DECISIONS.md` as a new ADR.
-- Don't commit `.env` or any file containing secrets.
+Questions? hello@wayforth.io
