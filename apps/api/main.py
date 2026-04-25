@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 import sentry_sdk
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -157,7 +157,15 @@ async def add_request_id(request: Request, call_next):
     request_id = str(uuid.uuid4())
     response = await call_next(request)
     response.headers["X-Wayforth-Request-ID"] = request_id
+    response.headers["X-Wayforth-Version"] = "1.0.0"
+    response.headers["X-RateLimit-Tier"] = str(getattr(request.state, "rate_limit_tier", "anonymous"))
+    response.headers["X-RateLimit-Limit"] = str(getattr(request.state, "rate_limit_rpm", "10"))
     return response
+
+
+async def get_db(request: Request):
+    async with request.app.state.pool.acquire() as conn:
+        yield conn
 
 
 @app.get("/health")
@@ -1316,3 +1324,132 @@ async def delete_webhook(request: Request, webhook_id: str):
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+# ── API Key System ──────────────────────────────────────────────────────────
+
+TIER_LIMITS = {
+    "free":       {"rpm": 10,  "monthly": 1_000},
+    "starter":    {"rpm": 30,  "monthly": 10_000},
+    "pro":        {"rpm": 100, "monthly": 100_000},
+    "enterprise": {"rpm": 500, "monthly": -1},  # unlimited
+}
+
+
+class ApiKeyRequest(BaseModel):
+    email: str
+    tier: str = "free"
+    admin_key: str = ""  # Required to create non-free keys
+
+
+async def get_api_key(request: Request, db=Depends(get_db)):
+    """
+    Optional API key auth. If provided, validates and tracks usage.
+    If not provided, falls back to IP-based rate limiting.
+    Returns tier info for the request.
+    """
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not raw_key:
+        request.state.rate_limit_tier = "anonymous"
+        request.state.rate_limit_rpm = 10
+        return {"tier": "anonymous", "rpm": 10, "quota": None}
+
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key = await db.fetchrow("""
+        SELECT id, tier, rate_limit_per_minute, monthly_quota, usage_this_month,
+               quota_reset_at, active
+        FROM api_keys WHERE key_hash = $1
+    """, key_hash)
+
+    if not key or not key["active"]:
+        raise HTTPException(status_code=401, detail="Invalid or inactive API key")
+
+    if key["monthly_quota"] > 0 and key["usage_this_month"] >= key["monthly_quota"]:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Monthly quota of {key['monthly_quota']} requests exceeded. Resets {key['quota_reset_at'].strftime('%Y-%m-%d')}",
+        )
+
+    await db.execute("""
+        UPDATE api_keys
+        SET usage_this_month = usage_this_month + 1, last_used_at = NOW()
+        WHERE id = $1
+    """, key["id"])
+
+    request.state.rate_limit_tier = key["tier"]
+    request.state.rate_limit_rpm = key["rate_limit_per_minute"]
+    return {"tier": key["tier"], "rpm": key["rate_limit_per_minute"], "key_id": str(key["id"])}
+
+
+@app.post("/keys/create")
+@limiter.limit("5/minute")
+async def create_api_key(request: Request, body: ApiKeyRequest, db=Depends(get_db)):
+    if body.tier != "free" and body.admin_key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Admin key required for non-free tiers")
+
+    if body.tier not in TIER_LIMITS:
+        raise HTTPException(status_code=400, detail=f"Invalid tier. Must be one of: {', '.join(TIER_LIMITS)}")
+
+    existing = await db.fetchval("""
+        SELECT COUNT(*) FROM api_keys WHERE owner_email = $1 AND active = TRUE
+    """, body.email)
+    if existing >= 3:
+        raise HTTPException(status_code=429, detail="Maximum 3 active keys per email")
+
+    raw_key = f"wf_{'live' if body.tier != 'free' else 'free'}_{secrets.token_hex(24)}"
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_prefix = raw_key[:12]
+    limits = TIER_LIMITS[body.tier]
+
+    await db.execute("""
+        INSERT INTO api_keys
+        (key_hash, key_prefix, owner_email, tier, rate_limit_per_minute, monthly_quota)
+        VALUES ($1, $2, $3, $4, $5, $6)
+    """, key_hash, key_prefix, body.email, body.tier, limits["rpm"], limits["monthly"])
+
+    return {
+        "api_key": raw_key,
+        "key_prefix": key_prefix,
+        "tier": body.tier,
+        "rate_limit_per_minute": limits["rpm"],
+        "monthly_quota": limits["monthly"],
+        "message": "Store this key securely — it will not be shown again.",
+        "usage": f"Add header: X-Wayforth-API-Key: {raw_key}",
+    }
+
+
+@app.get("/keys/usage")
+@limiter.limit("10/minute")
+async def key_usage(request: Request, db=Depends(get_db)):
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not raw_key:
+        raise HTTPException(status_code=401, detail="X-Wayforth-API-Key header required")
+
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key = await db.fetchrow("""
+        SELECT key_prefix, tier, rate_limit_per_minute, monthly_quota,
+               usage_this_month, quota_reset_at, created_at, last_used_at
+        FROM api_keys WHERE key_hash = $1 AND active = TRUE
+    """, key_hash)
+
+    if not key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    quota_pct = (
+        round(key["usage_this_month"] / key["monthly_quota"] * 100, 1)
+        if key["monthly_quota"] > 0
+        else 0
+    )
+
+    return {
+        "key_prefix": key["key_prefix"],
+        "tier": key["tier"],
+        "rate_limit_per_minute": key["rate_limit_per_minute"],
+        "monthly_quota": key["monthly_quota"],
+        "usage_this_month": key["usage_this_month"],
+        "quota_remaining": max(0, key["monthly_quota"] - key["usage_this_month"]),
+        "quota_used_pct": quota_pct,
+        "quota_resets_at": key["quota_reset_at"].isoformat(),
+        "created_at": key["created_at"].isoformat(),
+        "last_used_at": key["last_used_at"].isoformat() if key["last_used_at"] else None,
+    }
