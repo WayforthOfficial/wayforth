@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pricing — Wayforth</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0F172A;
+    color: #E2E8F0;
+    min-height: 100vh;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  a { color: inherit; text-decoration: none; }
+
+  /* NAV */
+  nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 40px;
+    border-bottom: 1px solid #1E293B;
+  }
+  .logo {
+    font-size: 20px;
+    font-weight: 800;
+    color: #4F46E5;
+    letter-spacing: -0.02em;
+  }
+  .logo span { color: #E2E8F0; }
+  .nav-links {
+    display: flex;
+    gap: 28px;
+    font-size: 13px;
+    color: #94A3B8;
+  }
+  .nav-links a:hover { color: #E2E8F0; }
+
+  /* HERO */
+  .hero {
+    text-align: center;
+    padding: 72px 40px 48px;
+    max-width: 680px;
+    margin: 0 auto;
+  }
+  .hero-label {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #4F46E5;
+    background: rgba(79,70,229,0.12);
+    border: 1px solid rgba(79,70,229,0.3);
+    border-radius: 99px;
+    padding: 4px 12px;
+    margin-bottom: 20px;
+  }
+  .hero h1 {
+    font-size: 40px;
+    font-weight: 800;
+    line-height: 1.15;
+    letter-spacing: -0.03em;
+    margin-bottom: 16px;
+  }
+  .hero p {
+    font-size: 16px;
+    color: #94A3B8;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+
+  /* PRICING GRID */
+  .pricing-section {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 24px 80px;
+  }
+  .pricing-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    align-items: start;
+  }
+  .tier-card {
+    background: #1E293B;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 28px 24px 24px;
+    position: relative;
+    transition: border-color 0.15s;
+  }
+  .tier-card:hover { border-color: #475569; }
+  .tier-card.featured {
+    border-color: #4F46E5;
+  }
+  .tier-card.featured:hover { border-color: #6366F1; }
+  .popular-badge {
+    position: absolute;
+    top: -11px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #4F46E5;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 3px 10px;
+    border-radius: 99px;
+    white-space: nowrap;
+  }
+  .tier-name {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #64748B;
+    margin-bottom: 12px;
+  }
+  .tier-price {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    margin-bottom: 4px;
+  }
+  .price-amount {
+    font-size: 36px;
+    font-weight: 800;
+    color: #E2E8F0;
+    line-height: 1;
+    letter-spacing: -0.02em;
+  }
+  .price-period {
+    font-size: 14px;
+    color: #64748B;
+  }
+  .price-sub {
+    font-size: 12px;
+    color: #64748B;
+    margin-bottom: 20px;
+    min-height: 18px;
+  }
+  .divider { border-top: 1px solid #334155; margin: 0 0 20px; }
+
+  /* STATS */
+  .tier-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+  }
+  .stat-label { color: #64748B; }
+  .stat-value { color: #E2E8F0; font-weight: 600; }
+
+  /* FEATURES */
+  .features-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #64748B;
+    margin-bottom: 10px;
+  }
+  .feature-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+  .feature-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 13px;
+    color: #CBD5E1;
+  }
+  .check { color: #6EE7B7; font-size: 13px; flex-shrink: 0; margin-top: 1px; }
+
+  /* CTA BUTTON */
+  .cta-btn {
+    display: block;
+    width: 100%;
+    text-align: center;
+    padding: 11px 16px;
+    background: #4F46E5;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    transition: background 0.15s;
+    text-decoration: none;
+  }
+  .cta-btn:hover { background: #4338CA; }
+  .cta-btn.outline {
+    background: transparent;
+    border: 1px solid #334155;
+    color: #94A3B8;
+  }
+  .cta-btn.outline:hover {
+    border-color: #475569;
+    color: #E2E8F0;
+    background: transparent;
+  }
+
+  /* FEE NOTE */
+  .fee-note {
+    text-align: center;
+    font-size: 13px;
+    font-style: italic;
+    color: #64748B;
+    margin-top: 32px;
+    padding: 16px;
+    border-top: 1px solid #1E293B;
+  }
+
+  /* FOOTER */
+  footer {
+    text-align: center;
+    padding: 32px 24px;
+    font-size: 12px;
+    color: #334155;
+    border-top: 1px solid #1E293B;
+  }
+  footer a { color: #4F46E5; }
+  footer a:hover { color: #6366F1; }
+
+  @media (max-width: 900px) {
+    .pricing-grid { grid-template-columns: repeat(2, 1fr); }
+    nav { padding: 16px 20px; }
+    .hero { padding: 48px 20px 32px; }
+    .hero h1 { font-size: 30px; }
+  }
+  @media (max-width: 560px) {
+    .pricing-grid { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 26px; }
+    .nav-links { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="https://wayforth.io" class="logo">Way<span>forth</span></a>
+  <div class="nav-links">
+    <a href="https://wayforth.io">Home</a>
+    <a href="/demo">Demo</a>
+    <a href="/roadmap">Roadmap</a>
+    <a href="/changelog">Changelog</a>
+    <a href="https://api-production-fd71.up.railway.app/docs">API Docs</a>
+  </div>
+</nav>
+
+<div class="hero">
+  <div class="hero-label">Pricing</div>
+  <h1>Simple, transparent pricing</h1>
+  <p>Start free. Scale as you grow. No hidden fees — just a flat 1.5% routing fee on payments.</p>
+</div>
+
+<div class="pricing-section">
+  <div class="pricing-grid">
+
+    <!-- FREE -->
+    <div class="tier-card">
+      <div class="tier-name">Free</div>
+      <div class="tier-price">
+        <span class="price-amount">$0</span>
+        <span class="price-period">/mo</span>
+      </div>
+      <div class="price-sub">No credit card required</div>
+      <div class="divider"></div>
+      <div class="tier-stats">
+        <div class="stat-row">
+          <span class="stat-label">Rate limit</span>
+          <span class="stat-value">10 req/min</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Monthly quota</span>
+          <span class="stat-value">1,000 req</span>
+        </div>
+      </div>
+      <div class="features-label">Includes</div>
+      <ul class="feature-list">
+        <li><span class="check">✓</span> Service search</li>
+        <li><span class="check">✓</span> WayforthQL queries</li>
+        <li><span class="check">✓</span> Payment routing</li>
+        <li><span class="check">✓</span> Service catalog</li>
+      </ul>
+      <a href="mailto:hello@wayforth.io?subject=Free API Key" class="cta-btn outline">Get Free Key →</a>
+    </div>
+
+    <!-- STARTER -->
+    <div class="tier-card">
+      <div class="tier-name">Starter</div>
+      <div class="tier-price">
+        <span class="price-amount">$29</span>
+        <span class="price-period">/mo</span>
+      </div>
+      <div class="price-sub">Billed monthly</div>
+      <div class="divider"></div>
+      <div class="tier-stats">
+        <div class="stat-row">
+          <span class="stat-label">Rate limit</span>
+          <span class="stat-value">30 req/min</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Monthly quota</span>
+          <span class="stat-value">10,000 req</span>
+        </div>
+      </div>
+      <div class="features-label">Everything in Free, plus</div>
+      <ul class="feature-list">
+        <li><span class="check">✓</span> Intelligence API</li>
+        <li><span class="check">✓</span> Webhooks</li>
+      </ul>
+      <a href="mailto:hello@wayforth.io?subject=Starter Plan" class="cta-btn">Get Started →</a>
+    </div>
+
+    <!-- PRO -->
+    <div class="tier-card featured">
+      <div class="popular-badge">Most Popular</div>
+      <div class="tier-name">Pro</div>
+      <div class="tier-price">
+        <span class="price-amount">$149</span>
+        <span class="price-period">/mo</span>
+      </div>
+      <div class="price-sub">Billed monthly</div>
+      <div class="divider"></div>
+      <div class="tier-stats">
+        <div class="stat-row">
+          <span class="stat-label">Rate limit</span>
+          <span class="stat-value">100 req/min</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Monthly quota</span>
+          <span class="stat-value">100,000 req</span>
+        </div>
+      </div>
+      <div class="features-label">Everything in Starter, plus</div>
+      <ul class="feature-list">
+        <li><span class="check">✓</span> Score history</li>
+        <li><span class="check">✓</span> Service graph</li>
+      </ul>
+      <a href="mailto:hello@wayforth.io?subject=Pro Plan" class="cta-btn">Get Started →</a>
+    </div>
+
+    <!-- ENTERPRISE -->
+    <div class="tier-card">
+      <div class="tier-name">Enterprise</div>
+      <div class="tier-price">
+        <span class="price-amount">Custom</span>
+      </div>
+      <div class="price-sub">Contact us for pricing</div>
+      <div class="divider"></div>
+      <div class="tier-stats">
+        <div class="stat-row">
+          <span class="stat-label">Rate limit</span>
+          <span class="stat-value">500 req/min</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Monthly quota</span>
+          <span class="stat-value">Unlimited</span>
+        </div>
+      </div>
+      <div class="features-label">Everything in Pro, plus</div>
+      <ul class="feature-list">
+        <li><span class="check">✓</span> SLA guarantee</li>
+        <li><span class="check">✓</span> Private catalog</li>
+        <li><span class="check">✓</span> Dedicated infrastructure</li>
+        <li><span class="check">✓</span> Custom probing</li>
+      </ul>
+      <a href="mailto:hello@wayforth.io?subject=Enterprise" class="cta-btn outline">Contact Us →</a>
+    </div>
+
+  </div>
+
+  <div class="fee-note">
+    1.5% routing fee on all payment transactions regardless of tier.
+  </div>
+</div>
+
+<footer>
+  &copy; 2026 Wayforth &mdash; <a href="https://wayforth.io/license">BSL 1.1</a> &mdash; <a href="mailto:hello@wayforth.io">hello@wayforth.io</a>
+</footer>
+
+</body>
+</html>
