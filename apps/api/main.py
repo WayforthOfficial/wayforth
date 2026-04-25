@@ -3,6 +3,7 @@ import hashlib
 import json as json_lib
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -678,6 +679,13 @@ class Tier3Application(BaseModel):
     sla_uptime_target: float = 99.9
 
 
+class WebhookRegistration(BaseModel):
+    service_id: str
+    webhook_url: str
+    contact_email: str
+    events: list[str] = ["tier_change", "health_alert"]
+
+
 @app.post("/pay")
 @limiter.limit("20/minute")
 async def pay(request: Request, req: PayRequest):
@@ -1232,6 +1240,79 @@ async def service_intelligence(request: Request, service_id: str, api_key: str =
         "rank_position_distribution": [dict(r) for r in rank_dist],
         "note": "Wayforth Intelligence API v1 — powered by real agent usage data",
     }
+
+
+@app.get("/services/{service_id}/history")
+@limiter.limit("20/minute")
+async def service_history(request: Request, service_id: str, days: int = Query(default=30, ge=1, le=90)):
+    """WRI score trend for a service over time. Powers reliability trend visualization."""
+    async with app.state.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT wri_score, tier, consecutive_failures, recorded_at
+            FROM service_score_history
+            WHERE service_id = $1
+              AND recorded_at > NOW() - ($2 * INTERVAL '1 day')
+            ORDER BY recorded_at ASC
+        """, service_id, days)
+
+    if not rows:
+        return {"service_id": service_id, "history": [], "trend": "insufficient_data"}
+
+    scores = [r["wri_score"] for r in rows]
+    trend = "stable"
+    if len(scores) >= 3:
+        recent_avg = sum(scores[-3:]) / 3
+        older_avg = sum(scores[:3]) / 3
+        if recent_avg > older_avg + 5:
+            trend = "improving"
+        elif recent_avg < older_avg - 5:
+            trend = "declining"
+
+    return {
+        "service_id": service_id,
+        "history": [{"wri": r["wri_score"], "tier": r["tier"], "at": r["recorded_at"].isoformat()} for r in rows],
+        "current_wri": scores[-1],
+        "avg_wri_30d": round(sum(scores) / len(scores), 1),
+        "trend": trend,
+        "data_points": len(scores),
+    }
+
+
+@app.post("/webhooks/register")
+@limiter.limit("5/minute")
+async def register_webhook(request: Request, body: WebhookRegistration):
+    """Register a webhook to receive tier change or health alert events for a service."""
+    if not body.webhook_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="webhook_url must use HTTPS")
+    secret = secrets.token_hex(32)
+    async with app.state.pool.acquire() as conn:
+        wh_id = await conn.fetchval("""
+            INSERT INTO provider_webhooks
+            (service_id, webhook_url, contact_email, events, secret_token)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (service_id, webhook_url) DO UPDATE
+            SET active = TRUE, updated_at = NOW()
+            RETURNING id
+        """, body.service_id, body.webhook_url, body.contact_email, body.events, secret)
+    return {
+        "webhook_id": str(wh_id),
+        "secret_token": secret,
+        "message": "Webhook registered. Store your secret_token — it won't be shown again.",
+        "events": body.events,
+    }
+
+
+@app.delete("/webhooks/{webhook_id}")
+@limiter.limit("10/minute")
+async def delete_webhook(request: Request, webhook_id: str):
+    """Deactivate a registered webhook."""
+    async with app.state.pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE provider_webhooks SET active = FALSE WHERE id = $1::uuid", webhook_id
+        )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {"webhook_id": webhook_id, "status": "deactivated"}
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
