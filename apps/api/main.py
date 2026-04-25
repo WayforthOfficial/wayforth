@@ -23,7 +23,7 @@ from web3 import Web3
 
 from chain import ESCROW_ADDRESS, PAYMENT_INFO, REGISTRY_ADDRESS, build_payment_calldata, get_chain_stats
 from db import check_db
-from notifications import send_submission_confirmation
+from notifications import send_submission_confirmation, send_tier3_application_notification
 from ranker_client import rank_services
 
 load_dotenv()
@@ -668,6 +668,16 @@ class MemoryItem(BaseModel):
     agent_id: str = ""
 
 
+class Tier3Application(BaseModel):
+    service_name: str
+    company_name: str
+    contact_email: str
+    website: str = ""
+    endpoint_url: str
+    monthly_volume_usdc: float = 0.0
+    sla_uptime_target: float = 99.9
+
+
 @app.post("/pay")
 @limiter.limit("20/minute")
 async def pay(request: Request, req: PayRequest):
@@ -1015,6 +1025,89 @@ async def get_memory(request: Request, agent_id: str = "anonymous", q: str = "")
                 agent_id,
             )
     return {"agent_id": agent_id, "services": [dict(r) for r in rows], "total": len(rows)}
+
+
+@app.post("/tier3/apply")
+@limiter.limit("5/minute")
+async def tier3_apply(request: Request, body: Tier3Application):
+    """Apply for Tier 3 verification — KYB + SLA. Institutional-grade. Manual review required."""
+    async with app.state.pool.acquire() as db:
+        existing = await db.fetchrow("""
+            SELECT id, kyb_status FROM tier3_applications
+            WHERE contact_email = $1 AND endpoint_url = $2
+        """, body.contact_email, body.endpoint_url)
+
+        if existing:
+            return {
+                "status": "already_applied",
+                "kyb_status": existing["kyb_status"],
+                "message": "Application already on file. We'll contact you at the email provided.",
+            }
+
+        app_id = await db.fetchval("""
+            INSERT INTO tier3_applications
+            (service_name, company_name, contact_email, website, endpoint_url,
+             monthly_volume_usdc, sla_uptime_target, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+            RETURNING id
+        """, body.service_name, body.company_name, body.contact_email,
+            body.website, body.endpoint_url, body.monthly_volume_usdc,
+            body.sla_uptime_target)
+
+    if os.getenv("RESEND_API_KEY"):
+        asyncio.create_task(asyncio.to_thread(
+            send_tier3_application_notification,
+            body.contact_email, body.service_name, body.company_name, str(app_id),
+        ))
+
+    return {
+        "status": "submitted",
+        "application_id": str(app_id),
+        "message": "Application received. Our team will review your KYB documentation and contact you within 2 business days.",
+        "next_steps": [
+            "We will email you a KYB documentation checklist",
+            "SLA terms will be negotiated based on your uptime target",
+            "Tier 3 badge appears on your service within 24h of approval",
+        ],
+    }
+
+
+@app.get("/tier3/status")
+@limiter.limit("10/minute")
+async def tier3_status(request: Request, email: str):
+    """Check Tier 3 application status by email."""
+    async with app.state.pool.acquire() as db:
+        apps = await db.fetch("""
+            SELECT id, service_name, company_name, kyb_status, created_at
+            FROM tier3_applications WHERE contact_email = $1
+            ORDER BY created_at DESC
+        """, email)
+    if not apps:
+        return {"status": "not_found", "message": "No application found for this email."}
+    return {
+        "applications": [dict(a) for a in apps],
+        "total": len(apps),
+    }
+
+
+@app.get("/tier3/admin")
+@limiter.limit("10/minute")
+async def tier3_admin(request: Request, key: str = "", status: str = "pending"):
+    """Admin view of Tier 3 applications filtered by KYB status."""
+    if not ADMIN_KEY or key != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with app.state.pool.acquire() as db:
+        apps = await db.fetch("""
+            SELECT id, service_name, company_name, contact_email, endpoint_url,
+                   monthly_volume_usdc, sla_uptime_target, kyb_status, created_at
+            FROM tier3_applications WHERE kyb_status = $1
+            ORDER BY created_at DESC
+        """, status)
+    return {
+        "status_filter": status,
+        "applications": [dict(a) for a in apps],
+        "total": len(apps),
+    }
 
 
 async def _get_similar_services(db, service_id: str, limit: int) -> dict:
