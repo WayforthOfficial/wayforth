@@ -7,6 +7,7 @@ export interface Service {
   coverage_tier: 0 | 1 | 2 | 3;
   pricing_usdc: number | null;
   source: string;
+  payment_protocol: 'wayforth' | 'x402';
 }
 
 export interface SearchResult extends Service {
