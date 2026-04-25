@@ -4,6 +4,7 @@ import json as json_lib
 import logging
 import os
 import secrets
+import uuid as uuid_lib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -59,7 +60,7 @@ async def log_query(pool, service_id: str, query_text: str, score: int):
         logger.error(f"Query log error: {e}")
 
 
-async def _record_search(pool, q, results, session_id=""):
+async def _record_search(pool, q, results, session_id="", query_id=""):
     try:
         async with pool.acquire() as conn:
             is_return = False
@@ -72,9 +73,10 @@ async def _record_search(pool, q, results, session_id=""):
 
             await conn.execute("""
                 INSERT INTO search_analytics
-                (query, results, top_result_id, result_count, rank_scores, session_id, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                (id, query, results, top_result_id, result_count, rank_scores, session_id, created_at)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, NOW())
             """,
+                query_id or str(uuid_lib.uuid4()),
                 q,
                 json_lib.dumps([{"id": str(r.get("service_id", "")), "score": r.get("score", 0)} for r in results[:10]]),
                 str(results[0].get("id", "")) if results else None,
@@ -99,6 +101,18 @@ async def _record_payment(pool, service_id, query_text=""):
             """, query_text, service_id)
     except Exception as e:
         logger.warning(f"search outcome write failed: {e}")
+
+
+async def _mark_search_converted(pool, query_id: str, service_id: str):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE search_analytics
+                SET led_to_payment = TRUE, payment_service_id = $2::uuid
+                WHERE id::text = $1
+            """, query_id, service_id)
+    except Exception as e:
+        logger.warning(f"Failed to mark search converted: {e}")
 
 
 async def _update_identity_search(pool, agent_id: str):
@@ -313,6 +327,7 @@ async def search_services(
     limit: int = Query(default=5, ge=1, le=20, description="Number of results to return (1–20)"),
     session_id: str = Query(default="", description="Optional agent session ID for return-visit tracking"),
     agent_id: str = Query(default="", description="Optional agent identity ID for reputation tracking"),
+    db=Depends(get_db),
 ):
     try:
         async with app.state.pool.acquire() as conn:
@@ -333,7 +348,7 @@ async def search_services(
         logger.error(f"DB error: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
     services = [dict(r) for r in rows]
-    ranked = await rank_services(q, services)
+    ranked = await rank_services(q, services, db=db)
     top = ranked[:limit]
 
     fallback_used = False
@@ -354,18 +369,19 @@ async def search_services(
                     f"%{q}%",
                 )
             if fb_rows:
-                fb_ranked = await rank_services(q, [dict(r) for r in fb_rows])
+                fb_ranked = await rank_services(q, [dict(r) for r in fb_rows], db=db)
                 top = fb_ranked[:limit]
                 fallback_used = True
                 fallback_reason = "No Tier 2 results — showing all tiers"
         except Exception:
             pass
 
+    query_id = str(uuid_lib.uuid4())
     pool = app.state.pool
     if ranked and pool:
         asyncio.create_task(log_query(pool, str(ranked[0]["id"]), q, ranked[0].get("score", 0)))
     if pool:
-        asyncio.create_task(_record_search(pool, q, ranked, session_id))
+        asyncio.create_task(_record_search(pool, q, ranked, session_id, query_id))
     if pool and agent_id:
         asyncio.create_task(_update_identity_search(pool, agent_id))
     popular_ids: dict = {}
@@ -403,11 +419,44 @@ async def search_services(
         for s in top
     ]
     return {
+        "query_id": query_id,
         "query": q,
         "total_results": len(top),
         "results": results,
         "fallback": fallback_used,
         "fallback_reason": fallback_reason,
+    }
+
+
+@app.get("/search/suggestions")
+@limiter.limit("30/minute")
+async def search_suggestions(request: Request, db=Depends(get_db)):
+    """Top queries from real agent usage — helps agents discover what's searchable."""
+    rows = await db.fetch("""
+        SELECT query, COUNT(*) as count
+        FROM search_analytics
+        WHERE created_at > NOW() - INTERVAL '7 days'
+        AND query IS NOT NULL AND query != ''
+        GROUP BY query ORDER BY count DESC LIMIT 20
+    """)
+    if not rows:
+        return {
+            "suggestions": [
+                "fast inference for coding",
+                "translate to spanish",
+                "real-time stock prices",
+                "web search for agents",
+                "image generation",
+                "weather data",
+                "text summarization",
+                "cryptocurrency prices"
+            ],
+            "source": "curated"
+        }
+    return {
+        "suggestions": [r['query'] for r in rows],
+        "source": "real_usage",
+        "period": "7d"
     }
 
 
@@ -733,6 +782,7 @@ class PayRequest(BaseModel):
     service_id: str
     service_owner: str
     amount_usdc: float
+    query_id: str = ""
     agent_id: str = ""
 
 
@@ -794,6 +844,8 @@ async def pay(request: Request, req: PayRequest):
     result = build_payment_calldata(req.service_id, req.service_owner, req.amount_usdc)
     if app.state.pool:
         asyncio.create_task(_record_payment(app.state.pool, req.service_id))
+    if app.state.pool and req.query_id:
+        asyncio.create_task(_mark_search_converted(app.state.pool, req.query_id, req.service_id))
     if app.state.pool and req.agent_id:
         asyncio.create_task(_update_identity_payment(app.state.pool, req.agent_id, req.amount_usdc))
     return result
