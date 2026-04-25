@@ -10,7 +10,7 @@ mcp-name: io.github.WayforthOfficial/wayforth
 claude mcp add wayforth -- uv run --directory ~/Code/wayforth/packages/mcp-server python server.py
 ```
 
-That's it. Claude Code will restart and the five Wayforth tools will be available immediately.
+That's it. Claude Code will restart and the eight Wayforth tools will be available immediately.
 
 ## Tools
 
@@ -19,8 +19,11 @@ That's it. Claude Code will restart and the five Wayforth tools will be availabl
 | `wayforth_search` | Search services by natural language intent, with optional category and tier filters |
 | `wayforth_list` | List all services, optionally filtered by category |
 | `wayforth_status` | Catalog stats (counts by tier and category) and API health |
-| `wayforth_remember` | Save a service to agent memory for quick access later |
+| `wayforth_stats` | Detailed catalog statistics by tier and category |
+| `wayforth_pay` | Generate payment calldata for USDC routing through Wayforth Escrow |
+| `wayforth_remember` | Save a service to agent memory (persisted to API) |
 | `wayforth_recall` | Recall services previously saved to memory, with optional filter |
+| `wayforth_similar` | Find services co-used alongside a given service |
 
 ## Prerequisites
 

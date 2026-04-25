@@ -1,6 +1,6 @@
 {
   "name": "wayforth-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript/JavaScript SDK for Wayforth — search engine and payment rail for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

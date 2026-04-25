@@ -173,6 +173,19 @@
     @keyframes spin { to { transform: rotate(360deg); } }
 
     .loading-msg { text-align: center; padding: 60px; color: #64748b; font-size: 15px; }
+
+    .wri-bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .wri-svc-name { font-size: 13px; color: #94a3b8; min-width: 160px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wri-bar-wrap { flex: 1; background: #0f172a; border-radius: 4px; height: 8px; overflow: hidden; }
+    .wri-bar { height: 100%; background: #4F46E5; border-radius: 4px; transition: width 0.4s; }
+    .wri-score { font-size: 13px; color: #e2e8f0; font-weight: 600; min-width: 40px; text-align: right; }
+
+    .graph-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px 24px; }
+    .graph-card-title { font-size: 13px; font-weight: 600; color: #a5b4fc; margin-bottom: 12px; }
+    .graph-rel-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #0f172a; font-size: 13px; }
+    .graph-rel-row:last-child { border-bottom: none; }
+    .graph-rel-name { color: #cbd5e1; }
+    .graph-rel-meta { color: #64748b; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -231,6 +244,8 @@
     document.getElementById('loading').style.display = 'none';
     document.getElementById('content').style.display = 'block';
     render(d, key);
+    loadAnalytics(key);
+    loadWRIDistribution();
   }
 
   function tier_color(t) {
@@ -384,6 +399,166 @@
         </div>
       </div>
     `;
+  }
+  async function loadAnalytics(key) {
+    const content = document.getElementById('content');
+
+    // Placeholder sections
+    const analyticsPlaceholder = document.createElement('div');
+    analyticsPlaceholder.id = 'analytics-section';
+    analyticsPlaceholder.innerHTML = `
+      <p class="section-title">Analytics (7d)</p>
+      <div style="color:#64748b;font-size:13px;padding:12px 0"><span class="spinner"></span>Loading analytics…</div>
+    `;
+    content.appendChild(analyticsPlaceholder);
+
+    const graphPlaceholder = document.createElement('div');
+    graphPlaceholder.id = 'graph-section';
+    graphPlaceholder.innerHTML = `
+      <p class="section-title">Service Graph — Top Co-used Services</p>
+      <div style="color:#64748b;font-size:13px;padding:12px 0"><span class="spinner"></span>Loading service graph…</div>
+    `;
+    content.appendChild(graphPlaceholder);
+
+    let analyticsData;
+    try {
+      const res = await fetch(`/analytics?key=${encodeURIComponent(key)}`);
+      if (!res.ok) { analyticsPlaceholder.innerHTML = '<p class="section-title">Analytics (7d)</p><div style="color:#f87171;font-size:13px">Failed to load analytics.</div>'; return; }
+      analyticsData = await res.json();
+    } catch(e) {
+      analyticsPlaceholder.innerHTML = '<p class="section-title">Analytics (7d)</p><div style="color:#f87171;font-size:13px">Analytics unavailable.</div>';
+      return;
+    }
+
+    const cr = analyticsData.conversion_rate != null ? analyticsData.conversion_rate.toFixed(1) + '%' : '—';
+    const statCards = `
+      <div class="grid grid-4">
+        <div class="card"><div class="card-label">Total Searches</div><div class="card-value">${(analyticsData.total_searches||0).toLocaleString()}</div><div class="card-sub">last 7 days</div></div>
+        <div class="card"><div class="card-label">Conversion Rate</div><div class="card-value">${cr}</div><div class="card-sub">payment / search</div></div>
+        <div class="card"><div class="card-label">Unique Sessions</div><div class="card-value">${(analyticsData.unique_sessions||0).toLocaleString()}</div><div class="card-sub">distinct agents</div></div>
+        <div class="card"><div class="card-label">Return Sessions</div><div class="card-value">${(analyticsData.return_sessions||0).toLocaleString()}</div><div class="card-sub">seen before</div></div>
+      </div>
+    `;
+
+    const queryRows = (analyticsData.top_queries||[]).slice(0,10).map(q => `
+      <tr>
+        <td>${q.query}</td>
+        <td>${q.count}</td>
+        <td>${q.payment_conversions ?? 0}</td>
+      </tr>
+    `).join('') || `<tr><td colspan="3" style="color:#64748b;text-align:center;padding:20px">No queries yet</td></tr>`;
+
+    const svcRows = (analyticsData.top_services_by_search||[]).slice(0,10).map((s,i) => `
+      <tr>
+        <td>${i+1}</td>
+        <td class="addr" style="font-size:12px">${String(s.top_result_id||'').slice(0,20)}…</td>
+        <td>${s.times_top_result}</td>
+      </tr>
+    `).join('') || `<tr><td colspan="3" style="color:#64748b;text-align:center;padding:20px">No data yet</td></tr>`;
+
+    document.getElementById('analytics-section').innerHTML = `
+      <p class="section-title">Analytics (7d)</p>
+      ${statCards}
+      <div class="grid grid-2" style="margin-top:16px">
+        <div class="card" style="padding:0;overflow:hidden">
+          <div style="padding:12px 16px;border-bottom:1px solid #334155;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em">Top Queries</div>
+          <table>
+            <thead><tr><th>Query</th><th>Count</th><th>Payments</th></tr></thead>
+            <tbody>${queryRows}</tbody>
+          </table>
+        </div>
+        <div class="card" style="padding:0;overflow:hidden">
+          <div style="padding:12px 16px;border-bottom:1px solid #334155;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em">Top Services by Appearance</div>
+          <table>
+            <thead><tr><th>#</th><th>Service ID</th><th>Times #1</th></tr></thead>
+            <tbody>${svcRows}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    // Load service graph for top 3
+    const topIds = (analyticsData.top_services_by_search||[]).slice(0,3).map(s => s.top_result_id).filter(Boolean);
+    if (!topIds.length) {
+      document.getElementById('graph-section').innerHTML = `
+        <p class="section-title">Service Graph — Top Co-used Services</p>
+        <div class="card" style="color:#64748b;font-size:13px">No service graph data yet — searches needed to build co-usage patterns.</div>
+      `;
+      return;
+    }
+
+    try {
+      const graphResults = await Promise.all(topIds.map(id => fetch(`/graph/${id}`).then(r => r.ok ? r.json() : null)));
+      const cards = graphResults.filter(Boolean).map(data => {
+        const related = (data.related_services||[]).slice(0,5);
+        const rows = related.map(r => `
+          <div class="graph-rel-row">
+            <span class="graph-rel-name">${r.name}</span>
+            <span class="graph-rel-meta"><span class="pill pill-blue" style="margin-right:4px">${r.category||''}</span>${r.co_search_count||0} co-searches</span>
+          </div>
+        `).join('') || '<div style="color:#64748b;font-size:13px;padding:8px 0">No related services found.</div>';
+        return `
+          <div class="graph-card">
+            <div class="graph-card-title">${String(data.service_id||'').slice(0,24)}…</div>
+            ${rows}
+          </div>
+        `;
+      }).join('');
+
+      document.getElementById('graph-section').innerHTML = `
+        <p class="section-title">Service Graph — Top Co-used Services</p>
+        <div class="grid grid-3">${cards}</div>
+      `;
+    } catch(e) {
+      document.getElementById('graph-section').innerHTML = `
+        <p class="section-title">Service Graph — Top Co-used Services</p>
+        <div class="card" style="color:#f87171;font-size:13px">Graph data unavailable.</div>
+      `;
+    }
+  }
+
+  async function loadWRIDistribution() {
+    const content = document.getElementById('content');
+    const section = document.createElement('div');
+    section.id = 'wri-section';
+    section.innerHTML = `
+      <p class="section-title">WRI Distribution — inference services</p>
+      <div style="color:#64748b;font-size:13px;padding:12px 0"><span class="spinner"></span>Loading WRI scores…</div>
+    `;
+    content.appendChild(section);
+
+    try {
+      const res = await fetch(`/search?q=inference&limit=20`);
+      if (!res.ok) throw new Error('search failed');
+      const data = await res.json();
+      const results = (data.results||[]).filter(r => r.wri != null).sort((a,b) => b.wri - a.wri);
+
+      if (!results.length) {
+        section.innerHTML = `
+          <p class="section-title">WRI Distribution — inference services</p>
+          <div class="card" style="color:#64748b;font-size:13px">No results with WRI scores yet.</div>
+        `;
+        return;
+      }
+
+      const bars = results.map(r => `
+        <div class="wri-bar-row">
+          <span class="wri-svc-name" title="${r.name}">${r.name}</span>
+          <div class="wri-bar-wrap"><div class="wri-bar" style="width:${r.wri}%"></div></div>
+          <span class="wri-score">${r.wri}</span>
+        </div>
+      `).join('');
+
+      section.innerHTML = `
+        <p class="section-title">WRI Distribution — inference services</p>
+        <div class="card">${bars}</div>
+      `;
+    } catch(e) {
+      section.innerHTML = `
+        <p class="section-title">WRI Distribution — inference services</p>
+        <div class="card" style="color:#f87171;font-size:13px">WRI data unavailable.</div>
+      `;
+    }
   }
 </script>
 

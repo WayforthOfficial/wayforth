@@ -314,6 +314,35 @@ async def wayforth_recall(query: str = "", agent_id: str = "") -> str:
         return f"Your saved services ({len(services)}) [local fallback]:\n" + "\n".join(lines)
 
 
+@mcp.tool()
+async def wayforth_similar(service_id: str) -> str:
+    """
+    Find services similar to or commonly used alongside a given service.
+    Returns co-usage patterns from real agent behavior.
+
+    Args:
+        service_id: The service ID or wayforth:// identifier to find similar services for
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{API_BASE}/graph/{service_id}")
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        return f"Could not fetch graph for {service_id}: {e}"
+
+    related = data.get("related_services", [])
+    if not related:
+        return f"No co-usage data found for service {service_id}."
+
+    lines = [f"Services co-used with {service_id}:"]
+    for svc in related:
+        lines.append(
+            f"  • {svc['name']} ({svc.get('category', '')}) — {svc.get('co_search_count', 0)} co-searches"
+        )
+    return "\n".join(lines)
+
+
 def main():
     mcp.run()
 

@@ -13,6 +13,8 @@ export interface Service {
 export interface SearchResult extends Service {
   score: number;
   reason: string;
+  wayforth_id?: string;
+  wri?: number;
 }
 
 export interface SearchResponse {
