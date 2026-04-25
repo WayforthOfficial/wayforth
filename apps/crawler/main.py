@@ -46,16 +46,17 @@ async def upsert_service(conn: asyncpg.Connection, svc: dict[str, Any]) -> str:
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO services (name, description, endpoint_url, category, source, pricing_usdc, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO services (name, description, endpoint_url, category, source, pricing_usdc, metadata, payment_protocol)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (endpoint_url) DO UPDATE
-                SET name        = EXCLUDED.name,
-                    description = EXCLUDED.description,
-                    category    = EXCLUDED.category,
-                    source      = EXCLUDED.source,
-                    pricing_usdc = EXCLUDED.pricing_usdc,
-                    metadata    = EXCLUDED.metadata,
-                    updated_at  = NOW()
+                SET name             = EXCLUDED.name,
+                    description      = EXCLUDED.description,
+                    category         = EXCLUDED.category,
+                    source           = EXCLUDED.source,
+                    pricing_usdc     = EXCLUDED.pricing_usdc,
+                    metadata         = EXCLUDED.metadata,
+                    payment_protocol = EXCLUDED.payment_protocol,
+                    updated_at       = NOW()
             RETURNING (xmax = 0) AS inserted
             """,
             svc["name"],
@@ -65,6 +66,7 @@ async def upsert_service(conn: asyncpg.Connection, svc: dict[str, Any]) -> str:
             svc.get("source"),
             svc.get("pricing_usdc"),
             json.dumps(svc.get("metadata", {})),
+            svc.get("payment_protocol", "wayforth"),
         )
         return "inserted" if row["inserted"] else "updated"
     except Exception as exc:
@@ -408,6 +410,85 @@ async def crawl_seeds(conn: asyncpg.Connection) -> tuple[int, int, int]:
 
 
 # ---------------------------------------------------------------------------
+# x402 ecosystem services
+# ---------------------------------------------------------------------------
+
+_X402_SERVICES = [
+    {
+        "name": "OpenAI via x402",
+        "description": "GPT-4o and o1 inference via x402 micropayments. Pay per call, no subscription.",
+        "endpoint_url": "https://api.openai.com/v1",
+        "category": "inference",
+        "pricing_usdc": 0.002,
+    },
+    {
+        "name": "Venice AI",
+        "description": "Privacy-preserving AI inference via x402. Uncensored models, no data retention.",
+        "endpoint_url": "https://api.venice.ai/api/v1",
+        "category": "inference",
+        "pricing_usdc": 0.0005,
+    },
+    {
+        "name": "Hyperbolic GPU Inference",
+        "description": "Pay-per-inference GPU compute via x402. H100 clusters, sub-second latency.",
+        "endpoint_url": "https://api.hyperbolic.xyz/v1",
+        "category": "inference",
+        "pricing_usdc": 0.0008,
+    },
+    {
+        "name": "CoinGecko via x402",
+        "description": "Real-time crypto prices, market data, and on-chain analytics via x402 micropayments.",
+        "endpoint_url": "https://api.coingecko.com/api/v3",
+        "category": "data",
+        "pricing_usdc": 0.001,
+    },
+    {
+        "name": "Bloomberg Data via x402",
+        "description": "Professional financial market data, news, and analytics via x402.",
+        "endpoint_url": "https://api.bloomberg.com/v1",
+        "category": "data",
+        "pricing_usdc": 0.01,
+    },
+    {
+        "name": "QuickNode RPC via x402",
+        "description": "Blockchain RPC endpoints for Ethereum, Base, Solana via x402 micropayments.",
+        "endpoint_url": "https://api.quicknode.com/v1",
+        "category": "data",
+        "pricing_usdc": 0.0002,
+    },
+    {
+        "name": "Alchemy Web3 API via x402",
+        "description": "Web3 infrastructure — enhanced APIs for Ethereum and Base via x402.",
+        "endpoint_url": "https://eth-mainnet.g.alchemy.com/v2",
+        "category": "data",
+        "pricing_usdc": 0.0001,
+    },
+    {
+        "name": "Exa Search via x402",
+        "description": "Neural web search for AI agents via x402. Semantic search across the web.",
+        "endpoint_url": "https://api.exa.ai/search",
+        "category": "data",
+        "pricing_usdc": 0.001,
+    },
+]
+
+
+async def crawl_x402_services(conn: asyncpg.Connection) -> tuple[int, int, int]:
+    inserted = updated = skipped = 0
+    for entry in _X402_SERVICES:
+        svc = {**entry, "source": "x402", "payment_protocol": "x402", "metadata": {}}
+        outcome = await upsert_service(conn, svc)
+        if outcome == "inserted":
+            inserted += 1
+        elif outcome == "updated":
+            updated += 1
+        else:
+            skipped += 1
+    logger.info("x402: inserted=%d updated=%d skipped=%d", inserted, updated, skipped)
+    return inserted, updated, skipped
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -419,6 +500,7 @@ async def _run() -> None:
         awesome_i, awesome_u, awesome_s = await crawl_awesome_mcp(conn)
         glama_i, glama_u, glama_s = await crawl_glama(conn)
         seed_i, seed_u, seed_s = await crawl_seeds(conn)
+        x402_i, x402_u, x402_s = await crawl_x402_services(conn)
 
         sample = await conn.fetch(
             "SELECT name FROM services WHERE source = 'seed' ORDER BY name LIMIT 5"
@@ -430,6 +512,7 @@ async def _run() -> None:
     print(f"--- Awesome MCP : inserted={awesome_i} updated={awesome_u} skipped={awesome_s}")
     print(f"--- Glama       : inserted={glama_i} updated={glama_u} skipped={glama_s}")
     print(f"--- Seeds       : inserted={seed_i} updated={seed_u} skipped={seed_s}")
+    print(f"--- x402        : inserted={x402_i} updated={x402_u} skipped={x402_s}")
     if sample:
         print("\nSample seed services:")
         for r in sample:

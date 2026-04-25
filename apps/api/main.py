@@ -21,6 +21,7 @@ from web3 import Web3
 
 from chain import ESCROW_ADDRESS, PAYMENT_INFO, REGISTRY_ADDRESS, build_payment_calldata, get_chain_stats
 from db import check_db
+from notifications import send_submission_confirmation
 from ranker import rank_services
 
 load_dotenv()
@@ -102,8 +103,22 @@ def health(request: Request):
 @app.get("/chain")
 @limiter.limit("10/minute")
 def chain_info(request: Request):
-    """On-chain contract addresses and stats"""
-    return get_chain_stats()
+    """On-chain contract addresses, stats, and supported payment protocols"""
+    chain = get_chain_stats()
+    return {
+        "wayforth_escrow": {
+            "address": chain.get("escrow"),
+            "fee_pct": chain.get("fee_pct"),
+            "use_for": "services without x402 support",
+            **{k: v for k, v in chain.items() if k not in ("escrow", "fee_pct")},
+        },
+        "x402": {
+            "protocol": "HTTP 402",
+            "fee_pct": 0,
+            "use_for": "services with native x402 support",
+            "docs": "https://x402.org",
+        },
+    }
 
 
 @app.get(
@@ -127,7 +142,7 @@ async def search_services(
             rows = await conn.fetch(
                 """
                 SELECT id, name, description, endpoint_url, category,
-                       coverage_tier, pricing_usdc, source, created_at
+                       coverage_tier, pricing_usdc, source, payment_protocol, created_at
                 FROM services
                 WHERE ($1::text IS NULL OR category = $1)
                   AND ($2::int IS NULL OR coverage_tier = $2)
@@ -155,6 +170,7 @@ async def search_services(
             "category": s.get("category"),
             "endpoint_url": s.get("endpoint_url"),
             "pricing_usdc": s.get("pricing_usdc"),
+            "payment_protocol": s.get("payment_protocol", "wayforth"),
             "service_id": "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest(),
             "payment": PAYMENT_INFO,
         }
@@ -359,6 +375,11 @@ async def submit_service(request: Request, req: SubmitRequest):
                 service_id, req.contact_email, get_real_ip(request),
             )
         logger.info(f"submit name={req.name!r} category={req.category}")
+        if req.contact_email:
+            asyncio.create_task(asyncio.to_thread(
+                send_submission_confirmation,
+                req.contact_email, req.name, str(service_id), req.endpoint_url,
+            ))
         return {
             "id": str(service_id),
             "name": req.name,
