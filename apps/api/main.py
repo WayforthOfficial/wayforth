@@ -101,6 +101,36 @@ async def _record_payment(pool, service_id, query_text=""):
         logger.warning(f"search outcome write failed: {e}")
 
 
+async def _update_identity_search(pool, agent_id: str):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO agent_identities (agent_id, total_searches, last_active_at)
+                VALUES ($1, 1, NOW())
+                ON CONFLICT (agent_id) DO UPDATE
+                SET total_searches = agent_identities.total_searches + 1,
+                    last_active_at = NOW()
+            """, agent_id)
+    except Exception as e:
+        logger.warning(f"Identity update failed: {e}")
+
+
+async def _update_identity_payment(pool, agent_id: str, amount_usdc: float):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO agent_identities (agent_id, total_payments, total_spend_usdc, last_active_at, trust_score)
+                VALUES ($1, 1, $2, NOW(), 55.0)
+                ON CONFLICT (agent_id) DO UPDATE
+                SET total_payments = agent_identities.total_payments + 1,
+                    total_spend_usdc = agent_identities.total_spend_usdc + $2,
+                    last_active_at = NOW(),
+                    trust_score = LEAST(100, agent_identities.trust_score + 0.5)
+            """, agent_id, amount_usdc)
+    except Exception as e:
+        logger.warning(f"Identity payment update failed: {e}")
+
+
 _DB_URL = os.environ.get("DATABASE_URL", "")
 _ASYNCPG_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 
@@ -282,6 +312,7 @@ async def search_services(
     tier: int | None = Query(default=None, description="Filter by exact coverage tier (0=free, 1=basic, 2=standard, 3=premium)"),
     limit: int = Query(default=5, ge=1, le=20, description="Number of results to return (1–20)"),
     session_id: str = Query(default="", description="Optional agent session ID for return-visit tracking"),
+    agent_id: str = Query(default="", description="Optional agent identity ID for reputation tracking"),
 ):
     try:
         async with app.state.pool.acquire() as conn:
@@ -335,6 +366,8 @@ async def search_services(
         asyncio.create_task(log_query(pool, str(ranked[0]["id"]), q, ranked[0].get("score", 0)))
     if pool:
         asyncio.create_task(_record_search(pool, q, ranked, session_id))
+    if pool and agent_id:
+        asyncio.create_task(_update_identity_search(pool, agent_id))
     popular_ids: dict = {}
     try:
         async with app.state.pool.acquire() as conn:
@@ -700,6 +733,7 @@ class PayRequest(BaseModel):
     service_id: str
     service_owner: str
     amount_usdc: float
+    agent_id: str = ""
 
 
 class SubmitRequest(BaseModel):
@@ -735,6 +769,11 @@ class WebhookRegistration(BaseModel):
     events: list[str] = ["tier_change", "health_alert"]
 
 
+class AgentIdentityRequest(BaseModel):
+    agent_id: str
+    display_name: str = ""
+
+
 @app.post("/pay")
 @limiter.limit("20/minute")
 async def pay(request: Request, req: PayRequest):
@@ -755,6 +794,8 @@ async def pay(request: Request, req: PayRequest):
     result = build_payment_calldata(req.service_id, req.service_owner, req.amount_usdc)
     if app.state.pool:
         asyncio.create_task(_record_payment(app.state.pool, req.service_id))
+    if app.state.pool and req.agent_id:
+        asyncio.create_task(_update_identity_payment(app.state.pool, req.agent_id, req.amount_usdc))
     return result
 
 
@@ -1536,5 +1577,100 @@ async def key_usage(request: Request, db=Depends(get_db)):
         "quota_resets_at": key["quota_reset_at"].isoformat(),
         "created_at": key["created_at"].isoformat(),
         "last_used_at": key["last_used_at"].isoformat() if key["last_used_at"] else None,
+    }
+
+
+@app.post("/identity/register")
+@limiter.limit("10/minute")
+async def register_identity(request: Request, body: AgentIdentityRequest, db=Depends(get_db)):
+    """Register an agent identity. Idempotent — safe to call multiple times."""
+    existing = await db.fetchrow("""
+        SELECT id, trust_score, total_searches, total_payments
+        FROM agent_identities WHERE agent_id = $1
+    """, body.agent_id)
+
+    if existing:
+        return {
+            "agent_id": body.agent_id,
+            "status": "existing",
+            "trust_score": existing["trust_score"],
+            "total_searches": existing["total_searches"],
+            "total_payments": existing["total_payments"],
+            "message": "Identity already registered.",
+        }
+
+    await db.execute("""
+        INSERT INTO agent_identities (agent_id, display_name, created_at, last_active_at)
+        VALUES ($1, $2, NOW(), NOW())
+    """, body.agent_id, body.display_name or body.agent_id[:12])
+
+    return {
+        "agent_id": body.agent_id,
+        "status": "registered",
+        "trust_score": 50.0,
+        "message": "Identity registered. Trust score starts at 50 and improves with activity.",
+    }
+
+
+@app.get("/identity/{agent_id}")
+@limiter.limit("30/minute")
+async def get_identity(request: Request, agent_id: str, db=Depends(get_db)):
+    """Get agent identity and reputation."""
+    identity = await db.fetchrow("""
+        SELECT agent_id, display_name, total_searches, total_payments,
+               total_spend_usdc, trust_score, created_at, last_active_at
+        FROM agent_identities WHERE agent_id = $1
+    """, agent_id)
+
+    if not identity:
+        raise HTTPException(status_code=404, detail="Agent identity not found. Register at POST /identity/register")
+
+    trust = identity["trust_score"]
+    if trust >= 90:
+        tier = "elite"
+    elif trust >= 75:
+        tier = "trusted"
+    elif trust >= 60:
+        tier = "established"
+    elif trust >= 40:
+        tier = "new"
+    else:
+        tier = "unknown"
+
+    return {
+        "agent_id": identity["agent_id"],
+        "display_name": identity["display_name"],
+        "trust_score": identity["trust_score"],
+        "reputation_tier": tier,
+        "total_searches": identity["total_searches"],
+        "total_payments": identity["total_payments"],
+        "total_spend_usdc": identity["total_spend_usdc"],
+        "member_since": identity["created_at"].isoformat(),
+        "last_active": identity["last_active_at"].isoformat(),
+    }
+
+
+@app.get("/identity/{agent_id}/history")
+@limiter.limit("20/minute")
+async def identity_history(request: Request, agent_id: str, db=Depends(get_db)):
+    """Agent's search and payment history."""
+    searches = await db.fetch("""
+        SELECT query, top_result_id, created_at
+        FROM search_analytics
+        WHERE session_id = $1
+        ORDER BY created_at DESC LIMIT 20
+    """, agent_id)
+
+    payments = await db.fetch("""
+        SELECT service_id, outcome_type, created_at
+        FROM search_outcomes
+        WHERE session_id = $1
+        ORDER BY created_at DESC LIMIT 20
+    """, agent_id)
+
+    return {
+        "agent_id": agent_id,
+        "recent_searches": [dict(r) for r in searches],
+        "recent_payments": [dict(r) for r in payments],
     }
 # s44 Sat Apr 25 12:29:13 PDT 2026
