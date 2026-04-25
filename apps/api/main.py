@@ -564,4 +564,9 @@ async def submit_page():
     return FileResponse("static/submit.html")
 
 
+@app.get("/agent-demo")
+async def agent_demo():
+    return FileResponse("static/agent-demo.html")
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
