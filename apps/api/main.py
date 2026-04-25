@@ -254,6 +254,32 @@ async def search_services(
     services = [dict(r) for r in rows]
     ranked = await rank_services(q, services)
     top = ranked[:limit]
+
+    fallback_used = False
+    fallback_reason = None
+    if not top:
+        try:
+            async with app.state.pool.acquire() as conn:
+                fb_rows = await conn.fetch(
+                    """
+                    SELECT id, name, description, endpoint_url, category,
+                           coverage_tier, pricing_usdc, source, payment_protocol,
+                           last_tested_at, consecutive_failures
+                    FROM services
+                    WHERE coverage_tier >= 0
+                      AND (name ILIKE $1 OR description ILIKE $1 OR category ILIKE $1)
+                    ORDER BY coverage_tier DESC LIMIT 50
+                    """,
+                    f"%{q}%",
+                )
+            if fb_rows:
+                fb_ranked = await rank_services(q, [dict(r) for r in fb_rows])
+                top = fb_ranked[:limit]
+                fallback_used = True
+                fallback_reason = "No Tier 2 results — showing all tiers"
+        except Exception:
+            pass
+
     pool = app.state.pool
     if ranked and pool:
         asyncio.create_task(log_query(pool, str(ranked[0]["id"]), q, ranked[0].get("score", 0)))
@@ -275,7 +301,7 @@ async def search_services(
     except Exception:
         pass
 
-    logger.info(f"search q={q!r} results={len(top)}")
+    logger.info(f"search q={q!r} results={len(top)} fallback={fallback_used}")
     results = [
         {
             "name": s.get("name"),
@@ -293,7 +319,13 @@ async def search_services(
         }
         for s in top
     ]
-    return {"query": q, "total_results": len(top), "results": results}
+    return {
+        "query": q,
+        "total_results": len(top),
+        "results": results,
+        "fallback": fallback_used,
+        "fallback_reason": fallback_reason,
+    }
 
 
 class WayforthQLQuery(BaseModel):
@@ -302,8 +334,12 @@ class WayforthQLQuery(BaseModel):
     price_max: float | None = None
     uptime_min: float | None = None  # reserved — no column yet
     category: str | None = None
+    protocol: str | None = None       # 'wayforth' | 'x402' | 'any'
+    exclude_ids: list[str] | None = []  # service_id SHA256 hashes to exclude
+    sort_by: str | None = "wri"       # 'wri' | 'score' | 'price' | 'tier'
     limit: int | None = 5
     with_payment_calldata: bool | None = False
+    with_similar: bool | None = False  # include similar services for top result
 
 
 @app.post("/query")
@@ -322,6 +358,11 @@ async def wayforthql(request: Request, body: WayforthQLQuery):
     if body.category:
         conditions.append(f"category = ${idx}")
         params.append(body.category)
+        idx += 1
+
+    if body.protocol and body.protocol != "any":
+        conditions.append(f"payment_protocol = ${idx}")
+        params.append(body.protocol)
         idx += 1
 
     where = " AND ".join(conditions)
@@ -350,7 +391,22 @@ async def wayforthql(request: Request, body: WayforthQLQuery):
 
     candidates = [dict(r) for r in rows]
     ranked = await rank_services(body.query, candidates)
-    results_raw = ranked[:limit]
+
+    # Secondary sort before slicing
+    if body.sort_by == "price":
+        ranked.sort(key=lambda s: (s.get("pricing_usdc") is None, s.get("pricing_usdc") or 0))
+    elif body.sort_by == "tier":
+        ranked.sort(key=lambda s: s.get("coverage_tier", 0), reverse=True)
+
+    # Exclude specific service IDs
+    if body.exclude_ids:
+        exclude_set = set(body.exclude_ids)
+        results_raw = [
+            s for s in ranked[:limit * 2]
+            if ("0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest()) not in exclude_set
+        ][:limit]
+    else:
+        results_raw = ranked[:limit]
 
     results = []
     for s in results_raw:
@@ -373,6 +429,40 @@ async def wayforthql(request: Request, body: WayforthQLQuery):
             entry["payment"] = PAYMENT_INFO
         results.append(entry)
 
+    # Attach similar services for top result when requested
+    if body.with_similar and results_raw:
+        top_id = str(results_raw[0].get("id", ""))
+        try:
+            async with request.app.state.pool.acquire() as conn:
+                graph_rows = await conn.fetch(
+                    """
+                    SELECT
+                        CASE WHEN service_a_id = $1 THEN service_b_id ELSE service_a_id END AS related_id,
+                        co_search_count
+                    FROM service_graph
+                    WHERE service_a_id = $1 OR service_b_id = $1
+                    ORDER BY co_search_count DESC LIMIT 5
+                    """,
+                    top_id,
+                )
+                similar = []
+                for gr in graph_rows:
+                    svc = await conn.fetchrow(
+                        "SELECT name, category, coverage_tier FROM services WHERE id::text = $1",
+                        gr["related_id"],
+                    )
+                    if svc:
+                        similar.append({
+                            "service_id": gr["related_id"],
+                            "name": svc["name"],
+                            "category": svc["category"],
+                            "tier": svc["coverage_tier"],
+                            "co_search_count": gr["co_search_count"],
+                        })
+            results[0]["similar_services"] = similar
+        except Exception as e:
+            logger.warning(f"with_similar failed: {e}")
+
     return {
         "query": body.query,
         "results": results,
@@ -382,6 +472,9 @@ async def wayforthql(request: Request, body: WayforthQLQuery):
             "tier_min": body.tier_min,
             "price_max": body.price_max,
             "category": body.category,
+            "protocol": body.protocol,
+            "sort_by": body.sort_by,
+            "exclude_ids": body.exclude_ids or [],
         },
     }
 
@@ -850,6 +943,35 @@ async def get_analytics(request: Request, key: str = ""):
     }
 
 
+@app.get("/competitive")
+@limiter.limit("10/minute")
+async def competitive_intelligence_endpoint(request: Request, key: str = ""):
+    """Admin: x402 ecosystem growth signals and competitive intelligence."""
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        async with app.state.pool.acquire() as conn:
+            latest = await conn.fetchrow("""
+                SELECT data, created_at FROM competitive_intelligence
+                WHERE source = 'x402_monitor'
+                ORDER BY created_at DESC LIMIT 1
+            """)
+            trend = await conn.fetch("""
+                SELECT created_at, (data->>'live_count')::int as live_count
+                FROM competitive_intelligence
+                WHERE source = 'x402_monitor'
+                ORDER BY created_at DESC LIMIT 30
+            """)
+    except Exception as e:
+        logger.error(f"Competitive intelligence DB error: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    return {
+        "latest": json_lib.loads(latest["data"]) if latest else None,
+        "last_checked": latest["created_at"].isoformat() if latest else None,
+        "trend": [{"date": r["created_at"].isoformat(), "live_count": r["live_count"]} for r in trend],
+    }
+
+
 @app.post("/memory")
 @limiter.limit("30/minute")
 async def save_memory(request: Request, body: MemoryItem):
@@ -895,47 +1017,44 @@ async def get_memory(request: Request, agent_id: str = "anonymous", q: str = "")
     return {"agent_id": agent_id, "services": [dict(r) for r in rows], "total": len(rows)}
 
 
-@app.get("/graph/{service_id}")
-@limiter.limit("20/minute")
-async def get_service_graph(request: Request, service_id: str, limit: int = 10):
-    """Return related services based on co-usage patterns."""
-    async with app.state.pool.acquire() as db:
-        internal_id = service_id
-        if service_id.startswith("0x"):
-            sha = service_id[2:]
-            row = await db.fetchrow(
-                "SELECT id FROM services WHERE encode(sha256(endpoint_url::bytea), 'hex') = $1", sha
-            )
-            if row:
-                internal_id = str(row["id"])
-
-        rows = await db.fetch(
-            """
-            SELECT
-                CASE WHEN service_a_id = $1 THEN service_b_id ELSE service_a_id END AS related_id,
-                co_search_count, co_payment_count
-            FROM service_graph
-            WHERE service_a_id = $1 OR service_b_id = $1
-            ORDER BY co_search_count DESC
-            LIMIT $2
-            """,
-            internal_id, limit,
+async def _get_similar_services(db, service_id: str, limit: int) -> dict:
+    """Shared helper: resolve service_id and return co-usage graph neighbours."""
+    internal_id = service_id
+    if service_id.startswith("0x"):
+        sha = service_id[2:]
+        row = await db.fetchrow(
+            "SELECT id FROM services WHERE encode(sha256(endpoint_url::bytea), 'hex') = $1", sha
         )
+        if row:
+            internal_id = str(row["id"])
 
-        related = []
-        for row in rows:
-            svc = await db.fetchrow(
-                "SELECT name, category, coverage_tier FROM services WHERE id::text = $1",
-                row["related_id"],
-            )
-            related.append({
-                "service_id": row["related_id"],
-                "name": svc["name"] if svc else "Unknown",
-                "category": svc["category"] if svc else None,
-                "tier": svc["coverage_tier"] if svc else None,
-                "co_search_count": row["co_search_count"],
-                "co_payment_count": row["co_payment_count"],
-            })
+    rows = await db.fetch(
+        """
+        SELECT
+            CASE WHEN service_a_id = $1 THEN service_b_id ELSE service_a_id END AS related_id,
+            co_search_count, co_payment_count
+        FROM service_graph
+        WHERE service_a_id = $1 OR service_b_id = $1
+        ORDER BY co_search_count DESC
+        LIMIT $2
+        """,
+        internal_id, limit,
+    )
+
+    related = []
+    for row in rows:
+        svc = await db.fetchrow(
+            "SELECT name, category, coverage_tier FROM services WHERE id::text = $1",
+            row["related_id"],
+        )
+        related.append({
+            "service_id": row["related_id"],
+            "name": svc["name"] if svc else "Unknown",
+            "category": svc["category"] if svc else None,
+            "tier": svc["coverage_tier"] if svc else None,
+            "co_search_count": row["co_search_count"],
+            "co_payment_count": row["co_payment_count"],
+        })
 
     return {
         "service_id": service_id,
@@ -943,6 +1062,22 @@ async def get_service_graph(request: Request, service_id: str, limit: int = 10):
         "total": len(related),
         "note": "Co-usage patterns from real agent search sessions",
     }
+
+
+@app.get("/graph/{service_id}")
+@limiter.limit("20/minute")
+async def get_service_graph(request: Request, service_id: str, limit: int = 10):
+    """Return related services based on co-usage patterns."""
+    async with app.state.pool.acquire() as db:
+        return await _get_similar_services(db, service_id, limit)
+
+
+@app.get("/services/similar/{service_id}")
+@limiter.limit("30/minute")
+async def similar_services(request: Request, service_id: str, limit: int = 5):
+    """Public endpoint. Returns services commonly used alongside this one."""
+    async with app.state.pool.acquire() as db:
+        return await _get_similar_services(db, service_id, limit)
 
 
 @app.get("/intelligence/{service_id}")

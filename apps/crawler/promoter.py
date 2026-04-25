@@ -7,6 +7,7 @@ from pathlib import Path
 
 from health_monitor import run_health_check
 from graph_builder import build_service_graph
+from x402_monitor import run_x402_monitor
 
 import asyncpg
 import httpx
@@ -251,6 +252,8 @@ async def run_promotion_cycle(db_url: str) -> None:
     await run_health_check(pool)
     await build_service_graph(pool)
     logger.info("Service graph updated")
+    await run_x402_monitor(pool)
+    logger.info("x402 monitor complete")
 
     await pool.close()
 
