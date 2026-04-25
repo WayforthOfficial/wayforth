@@ -343,6 +343,33 @@ async def wayforth_similar(service_id: str) -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+async def wayforth_identity(agent_id: str) -> str:
+    """
+    Get or create your agent identity on Wayforth.
+    Returns your trust score, reputation tier, and usage history.
+
+    Args:
+        agent_id: Your unique agent identifier (wallet address or any stable ID)
+    """
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"{API_BASE}/identity/{agent_id}")
+        if r.status_code == 200:
+            d = r.json()
+            return (
+                f"Agent Identity: {d['agent_id'][:16]}...\n"
+                f"Trust Score: {d['trust_score']}/100 ({d['reputation_tier']})\n"
+                f"Searches: {d['total_searches']} | Payments: {d['total_payments']}\n"
+                f"Member since: {d['member_since'][:10]}"
+            )
+        r2 = await client.post(
+            f"{API_BASE}/identity/register",
+            json={"agent_id": agent_id},
+        )
+        d2 = r2.json()
+        return f"New identity registered. Trust score: {d2['trust_score']}/100. Start searching to build reputation."
+
+
 def main():
     mcp.run()
 

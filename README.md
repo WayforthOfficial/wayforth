@@ -43,6 +43,7 @@ wayforth_pay(service_id, owner_address, amount_usdc)
 | `wayforth_remember` | Save a service to agent memory |
 | `wayforth_recall` | Retrieve saved services |
 | `wayforth_similar` | Services co-used with a given service |
+| `wayforth_identity` | Get or create agent identity with trust score and reputation tier |
 
 ## WayforthQL
 
