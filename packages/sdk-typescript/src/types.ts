@@ -44,3 +44,43 @@ export interface StatsResponse {
   tier2_services: string[];
   last_updated: string | null;
 }
+
+export interface AgentIdentity {
+  agent_id: string;
+  display_name: string;
+  trust_score: number;
+  reputation_tier: 'elite' | 'trusted' | 'established' | 'new' | 'unknown';
+  total_searches: number;
+  total_payments: number;
+  total_spend_usdc: number;
+  member_since: string;
+  last_active: string;
+}
+
+export interface WayforthQLQuery {
+  query: string;
+  tier_min?: number;
+  price_max?: number;
+  category?: string;
+  protocol?: 'wayforth' | 'x402' | 'any';
+  sort_by?: 'wri' | 'score' | 'price' | 'tier';
+  exclude_ids?: string[];
+  limit?: number;
+  with_similar?: boolean;
+  with_payment_calldata?: boolean;
+}
+
+export interface SimilarResponse {
+  service_id: string;
+  similar: SearchResult[];
+  total: number;
+}
+
+export interface TiersResponse {
+  tiers: Array<{
+    name: string;
+    monthly_usdc: number;
+    rpm: number;
+    features: string[];
+  }>;
+}

@@ -3,17 +3,19 @@ from typing import TypedDict
 
 
 class SearchResult(TypedDict, total=False):
+    service_id: str
     name: str
-    score: int
-    reason: str
-    wayforth_id: str
-    wri: float
-    category: str
+    description: str
     endpoint_url: str
+    category: str
+    coverage_tier: int
     pricing_usdc: float
     payment_protocol: str
-    service_id: str
-    coverage_tier: int
+    score: float
+    wri: float
+    wayforth_id: str
+    reason: str
+    source: str
 
 
 class WayforthClient:
@@ -64,6 +66,35 @@ class WayforthClient:
         except Exception:
             return {"status": "error"}
 
+    def get_identity(self, agent_id: str) -> dict:
+        """Get agent identity and trust score."""
+        return self._get(f"/identity/{agent_id}")
+
+    def register_identity(self, agent_id: str, display_name: str = "") -> dict:
+        """Register or retrieve an agent identity."""
+        return self._post("/identity/register", {
+            "agent_id": agent_id,
+            "display_name": display_name
+        })
+
+    def query(self, query: str, tier_min: int = 2, protocol: str = None,
+              sort_by: str = "wri", limit: int = 5, **kwargs) -> dict:
+        """WayforthQL structured query."""
+        payload = {"query": query, "tier_min": tier_min,
+                   "sort_by": sort_by, "limit": limit}
+        if protocol:
+            payload["protocol"] = protocol
+        payload.update(kwargs)
+        return self._post("/query", payload)
+
+    def get_similar(self, service_id: str, limit: int = 5) -> dict:
+        """Get services co-used with a given service."""
+        return self._get(f"/services/similar/{service_id}", params={"limit": limit})
+
+    def get_tiers(self) -> dict:
+        """Get available API key tiers and pricing."""
+        return self._get("/keys/tiers")
+
     def _get_services(
         self, category: str = None, tier: int = None, limit: int = 20, offset: int = 0
     ) -> list[dict]:
@@ -79,3 +110,15 @@ class WayforthClient:
                 return r.json()["results"]
         except Exception:
             return []
+
+    def _get(self, path: str, params: dict = None) -> dict:
+        with httpx.Client(timeout=10.0) as client:
+            r = client.get(f"{self._base_url}{path}", params=params)
+            r.raise_for_status()
+            return r.json()
+
+    def _post(self, path: str, payload: dict = None) -> dict:
+        with httpx.Client(timeout=10.0) as client:
+            r = client.post(f"{self._base_url}{path}", json=payload)
+            r.raise_for_status()
+            return r.json()

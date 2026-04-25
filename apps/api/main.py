@@ -176,7 +176,7 @@ Add `X-Wayforth-API-Key: wf_free_...` header for higher limits.
 uvx wayforth-mcp
 ```
 """,
-    version="0.1.4",
+    version="0.1.5",
     contact={"name": "Wayforth", "url": "https://wayforth.io", "email": "hello@wayforth.io"},
     license_info={"name": "BSL 1.1", "url": "https://wayforth.io/license"},
     lifespan=lifespan,
@@ -229,7 +229,7 @@ async def get_db(request: Request):
 @limiter.limit("60/minute")
 def health(request: Request):
     db_status = "ok" if getattr(app.state, "db_ok", False) else "unavailable"
-    return {"status": "ok", "service": "wayforth-api", "version": "0.1.4", "db_status": db_status}
+    return {"status": "ok", "service": "wayforth-api", "version": "0.1.5", "db_status": db_status}
 
 
 @app.get("/status", tags=["System"])
@@ -238,7 +238,7 @@ async def system_status(db=Depends(get_db)):
     stats = await db.fetchrow("SELECT COUNT(*) as total FROM services WHERE coverage_tier >= 2")
     return {
         "status": "operational",
-        "version": "0.1.4",
+        "version": "0.1.5",
         "tier2_services": stats["total"],
         "api": "operational",
         "database": "operational",
