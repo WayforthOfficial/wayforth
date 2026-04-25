@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json as json_lib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -23,7 +24,7 @@ from web3 import Web3
 from chain import ESCROW_ADDRESS, PAYMENT_INFO, REGISTRY_ADDRESS, build_payment_calldata, get_chain_stats
 from db import check_db
 from notifications import send_submission_confirmation
-from ranker import rank_services
+from ranker_client import rank_services
 
 load_dotenv()
 
@@ -54,6 +55,36 @@ async def log_query(pool, service_id: str, query_text: str, score: int):
             )
     except Exception as e:
         logger.error(f"Query log error: {e}")
+
+
+async def _record_search(pool, q, results):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO search_analytics
+                (query, results, top_result_id, result_count, rank_scores, created_at)
+                VALUES ($1, $2, $3, $4, $5, NOW())
+            """,
+                q,
+                json_lib.dumps([{"id": str(r.get("service_id", "")), "score": r.get("score", 0)} for r in results[:10]]),
+                str(results[0].get("service_id", "")) if results else None,
+                len(results),
+                json_lib.dumps({str(r.get("service_id", "")): r.get("score", 0) for r in results[:10]}),
+            )
+    except Exception as e:
+        logger.warning(f"search analytics write failed: {e}")
+
+
+async def _record_payment(pool, service_id, query_text=""):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO search_outcomes
+                (query_text, service_id, outcome_type, created_at)
+                VALUES ($1, $2, 'payment_initiated', NOW())
+            """, query_text, service_id)
+    except Exception as e:
+        logger.warning(f"search outcome write failed: {e}")
 
 
 _DB_URL = os.environ.get("DATABASE_URL", "")
@@ -105,6 +136,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    import uuid
+    request_id = str(uuid.uuid4())
+    response = await call_next(request)
+    response.headers["X-Wayforth-Request-ID"] = request_id
+    return response
 
 
 @app.get("/health")
@@ -174,6 +214,8 @@ async def search_services(
     pool = app.state.pool
     if ranked and pool:
         asyncio.create_task(log_query(pool, str(ranked[0]["id"]), q, ranked[0].get("score", 0)))
+    if pool:
+        asyncio.create_task(_record_search(pool, q, ranked))
     logger.info(f"search q={q!r} results={len(top)}")
     results = [
         {
@@ -392,7 +434,10 @@ async def pay(request: Request, req: PayRequest):
             detail="service_id must be a valid bytes32 hex string (0x + 64 hex chars)",
         )
     logger.info(f"pay amount={req.amount_usdc} service={req.service_id[:10]}")
-    return build_payment_calldata(req.service_id, req.service_owner, req.amount_usdc)
+    result = build_payment_calldata(req.service_id, req.service_owner, req.amount_usdc)
+    if app.state.pool:
+        asyncio.create_task(_record_payment(app.state.pool, req.service_id))
+    return result
 
 
 @app.post("/submit")
@@ -581,6 +626,44 @@ async def submit_page():
 @app.get("/agent-demo")
 async def agent_demo():
     return FileResponse("static/agent-demo.html")
+
+
+@app.get("/analytics")
+@limiter.limit("10/minute")
+async def get_analytics(request: Request, key: str = ""):
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        async with app.state.pool.acquire() as conn:
+            top_queries = await conn.fetch("""
+                SELECT query, COUNT(*) as count,
+                       AVG(result_count) as avg_results,
+                       SUM(CASE WHEN led_to_payment THEN 1 ELSE 0 END) as payment_conversions
+                FROM search_analytics
+                WHERE created_at > NOW() - INTERVAL '7 days'
+                GROUP BY query ORDER BY count DESC LIMIT 20
+            """)
+            stats = await conn.fetchrow("""
+                SELECT
+                    COUNT(*) as total_searches,
+                    SUM(CASE WHEN led_to_payment THEN 1 ELSE 0 END) as paid_searches,
+                    COUNT(DISTINCT service_id) as services_paid_for
+                FROM search_analytics sa
+                LEFT JOIN search_outcomes so ON so.query_text = sa.query
+                WHERE sa.created_at > NOW() - INTERVAL '7 days'
+            """)
+    except Exception as e:
+        logger.error(f"Analytics DB error: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    return {
+        "period": "7d",
+        "top_queries": [dict(r) for r in top_queries],
+        "total_searches": stats["total_searches"],
+        "payment_conversions": stats["paid_searches"],
+        "conversion_rate": round((stats["paid_searches"] or 0) / max(stats["total_searches"] or 1, 1) * 100, 2),
+        "services_paid_for": stats["services_paid_for"],
+    }
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")

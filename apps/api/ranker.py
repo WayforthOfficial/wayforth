@@ -44,7 +44,7 @@ def _keyword_rank(intent: str, services: list[dict]) -> list[dict]:
 _HAIKU_CANDIDATE_LIMIT = 20  # pre-filter before sending to Haiku
 
 
-async def rank_services(intent: str, services: list[dict]) -> list[dict]:
+async def rank_services_local(intent: str, services: list[dict]) -> list[dict]:
     """Rank services by semantic relevance using Claude Haiku; falls back to keyword ranking."""
     client = _get_client()
     if not client or not services:
