@@ -57,20 +57,32 @@ async def log_query(pool, service_id: str, query_text: str, score: int):
         logger.error(f"Query log error: {e}")
 
 
-async def _record_search(pool, q, results):
+async def _record_search(pool, q, results, session_id=""):
     try:
         async with pool.acquire() as conn:
+            is_return = False
+            if session_id:
+                prev = await conn.fetchval("""
+                    SELECT COUNT(*) FROM search_analytics
+                    WHERE session_id = $1 AND created_at < NOW() - INTERVAL '1 hour'
+                """, session_id)
+                is_return = prev > 0
+
             await conn.execute("""
                 INSERT INTO search_analytics
-                (query, results, top_result_id, result_count, rank_scores, created_at)
-                VALUES ($1, $2, $3, $4, $5, NOW())
+                (query, results, top_result_id, result_count, rank_scores, session_id, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW())
             """,
                 q,
                 json_lib.dumps([{"id": str(r.get("service_id", "")), "score": r.get("score", 0)} for r in results[:10]]),
                 str(results[0].get("service_id", "")) if results else None,
                 len(results),
                 json_lib.dumps({str(r.get("service_id", "")): r.get("score", 0) for r in results[:10]}),
+                session_id or None,
             )
+
+            if is_return:
+                logger.info(f"Return session: {session_id[:8]}")
     except Exception as e:
         logger.warning(f"search analytics write failed: {e}")
 
@@ -175,6 +187,32 @@ def chain_info(request: Request):
     }
 
 
+def compute_wri(service: dict, rank_score: float) -> float:
+    """WRI v1 — composite reliability score. Range: 0-100."""
+    score = rank_score * 0.5
+    tier = service.get("coverage_tier", 0)
+    if tier >= 2:
+        score += 20
+    elif tier >= 1:
+        score += 5
+    last_tested = service.get("last_tested_at")
+    if last_tested:
+        from datetime import datetime, timezone, timedelta
+        try:
+            if isinstance(last_tested, str):
+                from dateutil import parser as dateutil_parser
+                last_tested = dateutil_parser.parse(last_tested)
+            if last_tested > datetime.now(timezone.utc) - timedelta(hours=24):
+                score += 10
+        except Exception:
+            pass
+    if service.get("consecutive_failures", 1) == 0:
+        score += 10
+    if service.get("payment_protocol") == "x402":
+        score += 5
+    return round(min(score, 100), 1)
+
+
 @app.get(
     "/search",
     summary="Semantic service search",
@@ -190,13 +228,15 @@ async def search_services(
     category: str | None = Query(default=None, description="Filter by category: inference, data, translation, …"),
     tier: int | None = Query(default=None, description="Filter by exact coverage tier (0=free, 1=basic, 2=standard, 3=premium)"),
     limit: int = Query(default=5, ge=1, le=20, description="Number of results to return (1–20)"),
+    session_id: str = Query(default="", description="Optional agent session ID for return-visit tracking"),
 ):
     try:
         async with app.state.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT id, name, description, endpoint_url, category,
-                       coverage_tier, pricing_usdc, source, payment_protocol, created_at
+                       coverage_tier, pricing_usdc, source, payment_protocol, created_at,
+                       last_tested_at, consecutive_failures
                 FROM services
                 WHERE ($1::text IS NULL OR category = $1)
                   AND ($2::int IS NULL OR coverage_tier = $2)
@@ -215,12 +255,13 @@ async def search_services(
     if ranked and pool:
         asyncio.create_task(log_query(pool, str(ranked[0]["id"]), q, ranked[0].get("score", 0)))
     if pool:
-        asyncio.create_task(_record_search(pool, q, ranked))
+        asyncio.create_task(_record_search(pool, q, ranked, session_id))
     logger.info(f"search q={q!r} results={len(top)}")
     results = [
         {
             "name": s.get("name"),
             "score": s.get("score", 0),
+            "wri": compute_wri(s, s.get("score", 0)),
             "reason": s.get("reason", ""),
             "coverage_tier": s.get("coverage_tier"),
             "category": s.get("category"),
@@ -272,7 +313,8 @@ async def wayforthql(request: Request, body: WayforthQLQuery):
             rows = await conn.fetch(
                 f"""
                 SELECT id, name, description, endpoint_url, category,
-                       pricing_usdc, coverage_tier, source, payment_protocol
+                       pricing_usdc, coverage_tier, source, payment_protocol,
+                       last_tested_at, consecutive_failures
                 FROM services
                 WHERE {where}
                 ORDER BY coverage_tier DESC
@@ -298,6 +340,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery):
         entry = {
             "name": s.get("name"),
             "score": s.get("score", 0),
+            "wri": compute_wri(s, s.get("score", 0)),
             "reason": s.get("reason", ""),
             "coverage_tier": s.get("coverage_tier"),
             "category": s.get("category"),
@@ -741,6 +784,29 @@ async def get_analytics(request: Request, key: str = ""):
                 LEFT JOIN search_outcomes so ON so.query_text = sa.query
                 WHERE sa.created_at > NOW() - INTERVAL '7 days'
             """)
+            return_sessions = await conn.fetchval("""
+                SELECT COUNT(DISTINCT session_id) FROM search_analytics
+                WHERE session_id IS NOT NULL
+                AND session_id IN (
+                    SELECT session_id FROM search_analytics
+                    WHERE created_at > NOW() - INTERVAL '7 days'
+                    GROUP BY session_id HAVING COUNT(*) > 1
+                )
+            """)
+            unique_sessions = await conn.fetchval("""
+                SELECT COUNT(DISTINCT session_id) FROM search_analytics
+                WHERE session_id IS NOT NULL
+                AND created_at > NOW() - INTERVAL '7 days'
+            """)
+            top_services = await conn.fetch("""
+                SELECT top_result_id, COUNT(*) as times_top_result
+                FROM search_analytics
+                WHERE top_result_id IS NOT NULL
+                AND created_at > NOW() - INTERVAL '7 days'
+                GROUP BY top_result_id
+                ORDER BY times_top_result DESC
+                LIMIT 10
+            """)
     except Exception as e:
         logger.error(f"Analytics DB error: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -752,6 +818,9 @@ async def get_analytics(request: Request, key: str = ""):
         "payment_conversions": stats["paid_searches"],
         "conversion_rate": round((stats["paid_searches"] or 0) / max(stats["total_searches"] or 1, 1) * 100, 2),
         "services_paid_for": stats["services_paid_for"],
+        "return_sessions": return_sessions,
+        "unique_sessions": unique_sessions,
+        "top_services_by_search": [dict(r) for r in top_services],
     }
 
 
