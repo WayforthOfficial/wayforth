@@ -117,13 +117,14 @@
           return;
         }
 
+        const esc = s => s?.toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') ?? '';
         const rankColors = ['rank-1', 'rank-2', 'rank-3'];
         body.innerHTML = lb.leaderboard.map((s, i) => `
           <tr>
             <td class="rank ${rankColors[i] || ''}">${s.rank}</td>
-            <td class="service-name">${s.name}</td>
+            <td class="service-name">${esc(s.name)}</td>
             <td><span class="tier-badge tier-${s.coverage_tier}">Tier ${s.coverage_tier}</span></td>
-            <td><span class="category">${s.category}</span></td>
+            <td><span class="category">${esc(s.category)}</span></td>
             <td class="searches">${s.query_count}</td>
             <td class="score">${s.avg_score}</td>
           </tr>
