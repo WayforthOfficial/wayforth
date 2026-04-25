@@ -1,5 +1,5 @@
 FROM python:3.12-slim
-ARG BUILD_DATE=unknown
+ARG BUILD_DATE=1777145569
 RUN echo "Cache bust: $BUILD_DATE" && date
 WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
