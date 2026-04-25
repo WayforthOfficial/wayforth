@@ -554,4 +554,14 @@ async def demo():
     return FileResponse("static/demo.html")
 
 
+@app.get("/leaderboard-page")
+async def leaderboard_page():
+    return FileResponse("static/leaderboard.html")
+
+
+@app.get("/submit-page")
+async def submit_page():
+    return FileResponse("static/submit.html")
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")

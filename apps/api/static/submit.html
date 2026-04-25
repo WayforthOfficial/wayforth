@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>List Your Service on Wayforth</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0F172A; color: #E2E8F0; min-height: 100vh;
+      padding: 48px 24px;
+    }
+    .header { max-width: 600px; margin: 0 auto 40px; }
+    .logo { font-size: 20px; font-weight: 800; color: #4F46E5; margin-bottom: 4px; }
+    .back { display: block; margin-bottom: 24px; color: #64748B; font-size: 14px; text-decoration: none; }
+    .back:hover { color: #E2E8F0; }
+    h1 { font-size: 28px; font-weight: 800; margin-bottom: 12px; }
+    .subtitle { color: #64748B; font-size: 15px; line-height: 1.6; }
+    .highlight { color: #4F46E5; font-weight: 600; }
+    .card {
+      max-width: 600px; margin: 0 auto;
+      background: #1E293B; border: 1px solid #334155;
+      border-radius: 12px; padding: 32px;
+    }
+    .field { margin-bottom: 18px; }
+    label { display: block; font-size: 13px; color: #94A3B8; margin-bottom: 6px; font-weight: 500; }
+    input, select, textarea {
+      width: 100%; padding: 10px 14px;
+      background: #0F172A; border: 1px solid #334155;
+      color: #F1F5F9; border-radius: 8px; font-size: 14px;
+      font-family: inherit; outline: none;
+    }
+    input:focus, select:focus, textarea:focus { border-color: #4F46E5; }
+    textarea { resize: vertical; min-height: 80px; line-height: 1.5; }
+    select option { background: #1E293B; }
+    .hint { font-size: 12px; color: #475569; margin-top: 4px; }
+    button {
+      width: 100%; padding: 14px; background: #4F46E5; color: white;
+      border: none; border-radius: 8px; cursor: pointer;
+      font-size: 15px; font-weight: 600; margin-top: 8px;
+    }
+    button:hover { background: #4338CA; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #submit-result { margin-top: 16px; font-size: 14px; min-height: 20px; line-height: 1.5; }
+    .benefits {
+      max-width: 600px; margin: 32px auto 0;
+      display: flex; gap: 16px; flex-wrap: wrap;
+    }
+    .benefit {
+      flex: 1; min-width: 160px;
+      background: #1E293B; border: 1px solid #334155;
+      border-radius: 10px; padding: 16px;
+    }
+    .benefit-icon { font-size: 20px; margin-bottom: 8px; }
+    .benefit-title { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+    .benefit-desc { font-size: 12px; color: #64748B; line-height: 1.5; }
+    a { color: #4F46E5; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">Wayforth</div>
+    <a href="/demo" class="back">← Back to search</a>
+    <h1>List Your Service on Wayforth</h1>
+    <p class="subtitle">
+      Get discovered by AI agents searching for capabilities.
+      <span class="highlight">2,354 services</span> indexed —
+      agents pay in USDC via x402, no accounts or API keys required.
+    </p>
+  </div>
+
+  <div class="benefits">
+    <div class="benefit">
+      <div class="benefit-icon">🤖</div>
+      <div class="benefit-title">Agent-native discovery</div>
+      <div class="benefit-desc">AI agents find your service when they need it, automatically.</div>
+    </div>
+    <div class="benefit">
+      <div class="benefit-icon">⚡</div>
+      <div class="benefit-title">Instant payments</div>
+      <div class="benefit-desc">x402 protocol — agents pay USDC per request, no billing setup.</div>
+    </div>
+    <div class="benefit">
+      <div class="benefit-icon">✓</div>
+      <div class="benefit-title">Tier 2 verification</div>
+      <div class="benefit-desc">Pass health checks to earn the Tier 2 badge — higher search ranking.</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top: 32px;">
+    <div class="field">
+      <label for="s-name">Service name</label>
+      <input id="s-name" placeholder="e.g. FastTranslate API" />
+    </div>
+    <div class="field">
+      <label for="s-desc">Description</label>
+      <textarea id="s-desc" placeholder="What does your service do? What problems does it solve for AI agents?"></textarea>
+      <div class="hint">Max 500 characters. Be specific — this is what agents read when deciding to use your service.</div>
+    </div>
+    <div class="field">
+      <label for="s-url">Endpoint URL</label>
+      <input id="s-url" placeholder="https://your-api.com/v1" />
+      <div class="hint">Must start with https://</div>
+    </div>
+    <div class="field">
+      <label for="s-cat">Category</label>
+      <select id="s-cat">
+        <option value="inference">Inference</option>
+        <option value="data">Data</option>
+        <option value="translation">Translation</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="s-price">Price per request (USDC)</label>
+      <input id="s-price" type="number" step="0.000001" min="0" placeholder="0" />
+      <div class="hint">Enter 0 for free. Agents pay this amount per call via x402.</div>
+    </div>
+    <div class="field">
+      <label for="s-email">Contact email <span style="color:#475569;font-weight:400">(optional)</span></label>
+      <input id="s-email" type="email" placeholder="you@example.com" />
+      <div class="hint">We'll send you a confirmation and notify you of health check results.</div>
+    </div>
+    <button onclick="submitService()" id="submit-btn">List My Service</button>
+    <div id="submit-result"></div>
+  </div>
+
+  <script>
+    const API = 'https://api-production-fd71.up.railway.app';
+
+    async function submitService() {
+      const btn = document.getElementById('submit-btn');
+      const result = document.getElementById('submit-result');
+
+      const body = {
+        name: document.getElementById('s-name').value.trim(),
+        description: document.getElementById('s-desc').value.trim(),
+        endpoint_url: document.getElementById('s-url').value.trim(),
+        category: document.getElementById('s-cat').value,
+        pricing_usdc: parseFloat(document.getElementById('s-price').value) || 0,
+      };
+      const email = document.getElementById('s-email').value.trim();
+      if (email) body.contact_email = email;
+
+      if (!body.name || !body.description || !body.endpoint_url) {
+        result.innerHTML = '<span style="color:#F87171">Please fill in name, description, and endpoint URL.</span>';
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Submitting...';
+      result.textContent = '';
+
+      try {
+        const r = await fetch(`${API}/submit`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (r.ok) {
+          result.innerHTML = `<span style="color:#34D399">✓ ${d.message}</span>`;
+          btn.textContent = 'Submitted!';
+        } else {
+          result.innerHTML = `<span style="color:#F87171">Error: ${d.detail}</span>`;
+          btn.disabled = false;
+          btn.textContent = 'List My Service';
+        }
+      } catch(e) {
+        result.innerHTML = `<span style="color:#F87171">Error: ${e.message}</span>`;
+        btn.disabled = false;
+        btn.textContent = 'List My Service';
+      }
+    }
+  </script>
+</body>
+</html>
