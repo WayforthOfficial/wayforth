@@ -44,7 +44,11 @@ def _keyword_rank(intent: str, services: list[dict]) -> list[dict]:
 _HAIKU_CANDIDATE_LIMIT = 20  # pre-filter before sending to Haiku
 
 
-async def rank_services_local(intent: str, services: list[dict]) -> list[dict]:
+def compute_wri(service: dict, base_score: float, popularity_boost: float = 0.0) -> float:
+    return base_score + popularity_boost
+
+
+async def rank_services_local(intent: str, services: list[dict], popularity_signals: dict = None) -> list[dict]:
     """Rank services by semantic relevance using Claude Haiku; falls back to keyword ranking."""
     client = _get_client()
     if not client or not services:
@@ -76,6 +80,8 @@ async def rank_services_local(intent: str, services: list[dict]) -> list[dict]:
             meta = name_to_meta.get(s.get("name"), {})
             s_copy["score"] = int(meta.get("score", 0))
             s_copy["reason"] = meta.get("reason", "")
+            boost = (popularity_signals or {}).get(str(s_copy.get('service_id', '')), 0.0)
+            s_copy['wri'] = compute_wri(s_copy, s_copy["score"], popularity_boost=boost)
             result.append(s_copy)
 
         return sorted(result, key=lambda x: x["score"], reverse=True)

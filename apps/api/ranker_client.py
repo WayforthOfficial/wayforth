@@ -8,7 +8,24 @@ logger = logging.getLogger("wayforth")
 
 RANK_SERVICE_URL = os.getenv("RANK_SERVICE_URL", "")
 
-async def rank_services(query: str, candidates: list[dict]) -> list[dict]:
+async def rank_services(query: str, candidates: list[dict], db=None) -> list[dict]:
+    popularity_signals = {}
+    if db and not RANK_SERVICE_URL:
+        try:
+            rows = await db.fetch("""
+                SELECT top_result_id::text, COUNT(*) as c
+                FROM search_analytics
+                WHERE created_at > NOW() - INTERVAL '7 days'
+                AND top_result_id IS NOT NULL
+                GROUP BY top_result_id
+                ORDER BY c DESC LIMIT 100
+            """)
+            if rows:
+                max_c = max(r['c'] for r in rows)
+                popularity_signals = {r['top_result_id']: (r['c'] / max_c) * 5.0 for r in rows}
+        except Exception as e:
+            logger.warning(f"Popularity signal fetch failed: {e}")
+
     if RANK_SERVICE_URL:
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
@@ -20,5 +37,6 @@ async def rank_services(query: str, candidates: list[dict]) -> list[dict]:
                 return r.json()["results"]
         except Exception as e:
             logger.warning(f"WayforthRank service unavailable, using local: {e}")
+
     from ranker import rank_services_local
-    return await rank_services_local(query, candidates)
+    return await rank_services_local(query, candidates, popularity_signals)
