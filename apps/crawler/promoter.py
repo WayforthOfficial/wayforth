@@ -5,6 +5,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from health_monitor import run_health_check
+
 import asyncpg
 import httpx
 from dotenv import load_dotenv
@@ -237,8 +239,6 @@ async def run_promotion_cycle(db_url: str) -> None:
             *[_do_tier1(s) for s in tier1], return_exceptions=True
         )
 
-    await pool.close()
-
     tier0_promoted = sum(1 for r in t0_results if r is True)
     tier1_promoted = sum(1 for r in t1_results if r is True)
     failed = (
@@ -248,6 +248,10 @@ async def run_promotion_cycle(db_url: str) -> None:
     print(
         f"Cycle complete: {tier0_promoted} Tier0→1, {tier1_promoted} Tier1→2, {failed} failed probes"
     )
+
+    await run_health_check(pool)
+
+    await pool.close()
 
 
 if __name__ == "__main__":
