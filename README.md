@@ -13,6 +13,7 @@ The search engine and payment rail for AI agents.
 ```bash
 uvx wayforth-mcp  # MCP server — works in Claude Code, Cursor, Windsurf
 pip install wayforth-sdk  # Python SDK
+npm install wayforth-sdk  # TypeScript/JavaScript SDK
 ```
 
 ## What it does

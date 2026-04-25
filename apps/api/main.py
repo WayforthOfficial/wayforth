@@ -202,7 +202,7 @@ async def list_services(
             rows = await conn.fetch(
                 """
                 SELECT id, name, description, endpoint_url, category,
-                       coverage_tier, pricing_usdc, source, created_at
+                       coverage_tier, pricing_usdc, source, payment_protocol, created_at
                 FROM services
                 WHERE ($1::text IS NULL OR category = $1)
                   AND ($2::int IS NULL OR coverage_tier = $2)
@@ -402,7 +402,7 @@ async def get_service(request: Request, service_id: str):
             row = await conn.fetchrow(
                 """
                 SELECT id, name, description, endpoint_url, category,
-                       coverage_tier, pricing_usdc, source, created_at
+                       coverage_tier, pricing_usdc, source, payment_protocol, created_at
                 FROM services WHERE id = $1
                 """,
                 service_id,
