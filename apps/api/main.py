@@ -549,6 +549,13 @@ class SubmitRequest(BaseModel):
     contact_email: str | None = None
 
 
+class MemoryItem(BaseModel):
+    service_id: str
+    service_name: str
+    note: str = ""
+    agent_id: str = ""
+
+
 @app.post("/pay")
 @limiter.limit("20/minute")
 async def pay(request: Request, req: PayRequest):
@@ -821,6 +828,162 @@ async def get_analytics(request: Request, key: str = ""):
         "return_sessions": return_sessions,
         "unique_sessions": unique_sessions,
         "top_services_by_search": [dict(r) for r in top_services],
+    }
+
+
+@app.post("/memory")
+@limiter.limit("30/minute")
+async def save_memory(request: Request, body: MemoryItem):
+    """Save a service to agent memory."""
+    async with app.state.pool.acquire() as db:
+        await db.execute(
+            """
+            INSERT INTO agent_memory (agent_id, service_id, service_name, note, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, NOW(), NOW())
+            ON CONFLICT (agent_id, service_id)
+            DO UPDATE SET note=$4, updated_at=NOW()
+            """,
+            body.agent_id or "anonymous", body.service_id, body.service_name, body.note,
+        )
+    return {"status": "saved", "service_id": body.service_id, "service_name": body.service_name}
+
+
+@app.get("/memory")
+@limiter.limit("30/minute")
+async def get_memory(request: Request, agent_id: str = "anonymous", q: str = ""):
+    """Retrieve agent's saved services."""
+    async with app.state.pool.acquire() as db:
+        if q:
+            rows = await db.fetch(
+                """
+                SELECT service_id, service_name, note, created_at
+                FROM agent_memory
+                WHERE agent_id = $1
+                AND (LOWER(service_name) LIKE $2 OR LOWER(note) LIKE $2)
+                ORDER BY created_at DESC LIMIT 20
+                """,
+                agent_id, f"%{q.lower()}%",
+            )
+        else:
+            rows = await db.fetch(
+                """
+                SELECT service_id, service_name, note, created_at
+                FROM agent_memory WHERE agent_id = $1
+                ORDER BY created_at DESC LIMIT 20
+                """,
+                agent_id,
+            )
+    return {"agent_id": agent_id, "services": [dict(r) for r in rows], "total": len(rows)}
+
+
+@app.get("/graph/{service_id}")
+@limiter.limit("20/minute")
+async def get_service_graph(request: Request, service_id: str, limit: int = 10):
+    """Return related services based on co-usage patterns."""
+    async with app.state.pool.acquire() as db:
+        internal_id = service_id
+        if service_id.startswith("0x"):
+            sha = service_id[2:]
+            row = await db.fetchrow(
+                "SELECT id FROM services WHERE encode(sha256(endpoint_url::bytea), 'hex') = $1", sha
+            )
+            if row:
+                internal_id = str(row["id"])
+
+        rows = await db.fetch(
+            """
+            SELECT
+                CASE WHEN service_a_id = $1 THEN service_b_id ELSE service_a_id END AS related_id,
+                co_search_count, co_payment_count
+            FROM service_graph
+            WHERE service_a_id = $1 OR service_b_id = $1
+            ORDER BY co_search_count DESC
+            LIMIT $2
+            """,
+            internal_id, limit,
+        )
+
+        related = []
+        for row in rows:
+            svc = await db.fetchrow(
+                "SELECT name, category, coverage_tier FROM services WHERE id::text = $1",
+                row["related_id"],
+            )
+            related.append({
+                "service_id": row["related_id"],
+                "name": svc["name"] if svc else "Unknown",
+                "category": svc["category"] if svc else None,
+                "tier": svc["coverage_tier"] if svc else None,
+                "co_search_count": row["co_search_count"],
+                "co_payment_count": row["co_payment_count"],
+            })
+
+    return {
+        "service_id": service_id,
+        "related_services": related,
+        "total": len(related),
+        "note": "Co-usage patterns from real agent search sessions",
+    }
+
+
+@app.get("/intelligence/{service_id}")
+@limiter.limit("10/minute")
+async def service_intelligence(request: Request, service_id: str, api_key: str = ""):
+    """Wayforth Intelligence API — market data for service providers."""
+    if not ADMIN_KEY or api_key != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Intelligence API key required. Contact hello@wayforth.io")
+
+    async with app.state.pool.acquire() as db:
+        internal_id = service_id
+        if service_id.startswith("0x"):
+            sha = service_id[2:]
+            row = await db.fetchrow(
+                "SELECT id FROM services WHERE encode(sha256(endpoint_url::bytea), 'hex') = $1", sha
+            )
+            if row:
+                internal_id = str(row["id"])
+
+        volume = await db.fetchrow(
+            """
+            SELECT COUNT(*) AS appearances, AVG((elem->>'score')::float) AS avg_score
+            FROM search_analytics, jsonb_array_elements(results) AS elem
+            WHERE elem->>'id' = $1
+            AND created_at > NOW() - INTERVAL '7 days'
+            """,
+            internal_id,
+        )
+
+        rank_dist = await db.fetch(
+            """
+            SELECT position, COUNT(*) AS count FROM (
+                SELECT ordinality - 1 AS position
+                FROM search_analytics,
+                     jsonb_array_elements(results) WITH ORDINALITY AS elem
+                WHERE elem->>'id' = $1
+                AND created_at > NOW() - INTERVAL '7 days'
+            ) t GROUP BY position ORDER BY position
+            """,
+            internal_id,
+        )
+
+        conversions = await db.fetchval(
+            """
+            SELECT COUNT(*) FROM search_outcomes
+            WHERE service_id::text = $1
+            AND outcome_type = 'payment_initiated'
+            AND created_at > NOW() - INTERVAL '7 days'
+            """,
+            internal_id,
+        )
+
+    return {
+        "service_id": service_id,
+        "period": "7d",
+        "search_appearances": volume["appearances"] or 0,
+        "avg_rank_score": round(volume["avg_score"] or 0, 1),
+        "payment_conversions": conversions or 0,
+        "rank_position_distribution": [dict(r) for r in rank_dist],
+        "note": "Wayforth Intelligence API v1 — powered by real agent usage data",
     }
 
 

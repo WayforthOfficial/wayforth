@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from health_monitor import run_health_check
+from graph_builder import build_service_graph
 
 import asyncpg
 import httpx
@@ -248,6 +249,8 @@ async def run_promotion_cycle(db_url: str) -> None:
     )
 
     await run_health_check(pool)
+    await build_service_graph(pool)
+    logger.info("Service graph updated")
 
     await pool.close()
 
