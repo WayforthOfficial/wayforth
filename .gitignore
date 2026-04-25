@@ -13,6 +13,10 @@ build/
 
 # Environment
 .env
+.env.*
+*.env
+*.pem
+*.key
 
 # Node
 node_modules/

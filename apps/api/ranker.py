@@ -18,7 +18,7 @@ _SYSTEM = (
 
 def _get_client() -> AsyncAnthropic | None:
     key = os.getenv("ANTHROPIC_API_KEY")
-    logger.info("[ranker] ANTHROPIC_API_KEY present=%s prefix=%s", bool(key), key[:8] if key else "")
+    logger.info("[ranker] ANTHROPIC_API_KEY present=%s", bool(key))
     if not key:
         return None
     global _client

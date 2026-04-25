@@ -12,9 +12,7 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("seed_services")
 
-_DB_URL = os.environ.get(
-    "DATABASE_URL", "postgresql://wayforth:wayforth_dev@localhost:5432/wayforth"
-)
+_DB_URL = os.environ.get("DATABASE_URL", "")
 _ASYNCPG_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 _BASE_URL = os.environ.get("LABS_BASE_URL", "http://localhost:8001")

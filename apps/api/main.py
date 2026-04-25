@@ -56,7 +56,7 @@ async def log_query(pool, service_id: str, query_text: str, score: int):
         logger.error(f"Query log error: {e}")
 
 
-_DB_URL = os.environ.get("DATABASE_URL", "postgresql://wayforth:wayforth_dev@localhost:5432/wayforth")
+_DB_URL = os.environ.get("DATABASE_URL", "")
 _ASYNCPG_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 
