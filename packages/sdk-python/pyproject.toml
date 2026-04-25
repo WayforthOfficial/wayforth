@@ -1,6 +1,6 @@
 [project]
 name = "wayforth-sdk"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python SDK for Wayforth — search engine and payment rail for AI agents"
 readme = "README.md"
 license = {text = "MIT"}

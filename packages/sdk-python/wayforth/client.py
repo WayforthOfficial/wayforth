@@ -1,11 +1,26 @@
 import httpx
+from typing import TypedDict
+
+
+class SearchResult(TypedDict, total=False):
+    name: str
+    score: int
+    reason: str
+    wayforth_id: str
+    wri: float
+    category: str
+    endpoint_url: str
+    pricing_usdc: float
+    payment_protocol: str
+    service_id: str
+    coverage_tier: int
 
 
 class WayforthClient:
     def __init__(self, base_url: str = "https://api-production-fd71.up.railway.app"):
         self._base_url = base_url.rstrip("/")
 
-    def search(self, intent: str, category: str = None, limit: int = 5) -> list[dict]:
+    def search(self, intent: str, category: str = None, limit: int = 5) -> list[SearchResult]:
         services = self._get_services(category=category)
         tokens = intent.lower().split()
 

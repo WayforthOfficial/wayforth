@@ -75,7 +75,7 @@ async def _record_search(pool, q, results, session_id=""):
             """,
                 q,
                 json_lib.dumps([{"id": str(r.get("service_id", "")), "score": r.get("score", 0)} for r in results[:10]]),
-                str(results[0].get("service_id", "")) if results else None,
+                str(results[0].get("id", "")) if results else None,
                 len(results),
                 json_lib.dumps({str(r.get("service_id", "")): r.get("score", 0) for r in results[:10]}),
                 session_id or None,
@@ -187,8 +187,8 @@ def chain_info(request: Request):
     }
 
 
-def compute_wri(service: dict, rank_score: float) -> float:
-    """WRI v1 — composite reliability score. Range: 0-100."""
+def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0) -> float:
+    """WRI v2 — composite reliability score with popularity signal. Range: 0-100."""
     score = rank_score * 0.5
     tier = service.get("coverage_tier", 0)
     if tier >= 2:
@@ -200,8 +200,10 @@ def compute_wri(service: dict, rank_score: float) -> float:
         from datetime import datetime, timezone, timedelta
         try:
             if isinstance(last_tested, str):
-                from dateutil import parser as dateutil_parser
-                last_tested = dateutil_parser.parse(last_tested)
+                from dateutil.parser import parse
+                last_tested = parse(last_tested)
+            if last_tested.tzinfo is None:
+                last_tested = last_tested.replace(tzinfo=timezone.utc)
             if last_tested > datetime.now(timezone.utc) - timedelta(hours=24):
                 score += 10
         except Exception:
@@ -210,6 +212,7 @@ def compute_wri(service: dict, rank_score: float) -> float:
         score += 10
     if service.get("payment_protocol") == "x402":
         score += 5
+    score += min(popularity_boost, 5.0)
     return round(min(score, 100), 1)
 
 
@@ -256,12 +259,28 @@ async def search_services(
         asyncio.create_task(log_query(pool, str(ranked[0]["id"]), q, ranked[0].get("score", 0)))
     if pool:
         asyncio.create_task(_record_search(pool, q, ranked, session_id))
+    popular_ids: dict = {}
+    try:
+        async with app.state.pool.acquire() as conn:
+            pop_rows = await conn.fetch("""
+                SELECT top_result_id, COUNT(*) as c
+                FROM search_analytics
+                WHERE created_at > NOW() - INTERVAL '7 days'
+                  AND top_result_id IS NOT NULL
+                GROUP BY top_result_id
+                ORDER BY c DESC LIMIT 50
+            """)
+            max_count = max((r["c"] for r in pop_rows), default=1)
+            popular_ids = {str(r["top_result_id"]): (r["c"] / max_count) * 5 for r in pop_rows}
+    except Exception:
+        pass
+
     logger.info(f"search q={q!r} results={len(top)}")
     results = [
         {
             "name": s.get("name"),
             "score": s.get("score", 0),
-            "wri": compute_wri(s, s.get("score", 0)),
+            "wri": compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0)),
             "reason": s.get("reason", ""),
             "coverage_tier": s.get("coverage_tier"),
             "category": s.get("category"),
