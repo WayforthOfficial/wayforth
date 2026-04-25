@@ -961,6 +961,16 @@ async def changelog_page():
     return FileResponse("static/changelog.html")
 
 
+@app.get("/pricing", include_in_schema=False)
+async def pricing_page():
+    return FileResponse("static/pricing.html")
+
+
+@app.get("/intelligence-demo", include_in_schema=False)
+async def intelligence_demo():
+    return FileResponse("static/intelligence-demo.html")
+
+
 @app.get("/analytics")
 @limiter.limit("10/minute")
 async def get_analytics(request: Request, key: str = ""):
@@ -1435,6 +1445,24 @@ async def get_api_key(request: Request, db=Depends(get_db)):
     request.state.rate_limit_tier = key["tier"]
     request.state.rate_limit_rpm = key["rate_limit_per_minute"]
     return {"tier": key["tier"], "rpm": key["rate_limit_per_minute"], "key_id": str(key["id"])}
+
+
+@app.get("/keys/tiers", tags=["Keys"])
+async def key_tiers():
+    return {
+        "tiers": [
+            {"tier": "free", "price_monthly_usd": 0, "rpm": 10, "monthly_quota": 1000,
+             "features": ["search", "query", "pay", "services"]},
+            {"tier": "starter", "price_monthly_usd": 29, "rpm": 30, "monthly_quota": 10000,
+             "features": ["search", "query", "pay", "services", "intelligence", "webhooks"]},
+            {"tier": "pro", "price_monthly_usd": 149, "rpm": 100, "monthly_quota": 100000,
+             "features": ["search", "query", "pay", "services", "intelligence", "webhooks", "history", "graph"]},
+            {"tier": "enterprise", "price_monthly_usd": None, "rpm": 500, "monthly_quota": -1,
+             "features": ["everything", "sla", "private_catalog", "dedicated_infra", "custom_probing"]},
+        ],
+        "routing_fee_pct": 1.5,
+        "note": "1.5% routing fee applies to all payment transactions regardless of tier."
+    }
 
 
 @app.post("/keys/create")

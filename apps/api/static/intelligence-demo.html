@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Intelligence API — Wayforth</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0F172A;
+    color: #E2E8F0;
+    min-height: 100vh;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  a { color: inherit; text-decoration: none; }
+
+  /* NAV */
+  nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 40px;
+    border-bottom: 1px solid #1E293B;
+  }
+  .logo {
+    font-size: 20px;
+    font-weight: 800;
+    color: #4F46E5;
+    letter-spacing: -0.02em;
+  }
+  .logo span { color: #E2E8F0; }
+  .nav-links {
+    display: flex;
+    gap: 28px;
+    font-size: 13px;
+    color: #94A3B8;
+  }
+  .nav-links a:hover { color: #E2E8F0; }
+
+  /* HERO */
+  .hero {
+    text-align: center;
+    padding: 72px 40px 56px;
+    max-width: 700px;
+    margin: 0 auto;
+  }
+  .hero-label {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #4F46E5;
+    background: rgba(79,70,229,0.12);
+    border: 1px solid rgba(79,70,229,0.3);
+    border-radius: 99px;
+    padding: 4px 12px;
+    margin-bottom: 20px;
+  }
+  .hero h1 {
+    font-size: 40px;
+    font-weight: 800;
+    line-height: 1.15;
+    letter-spacing: -0.03em;
+    margin-bottom: 16px;
+  }
+  .hero h1 em {
+    font-style: normal;
+    color: #4F46E5;
+  }
+  .hero p {
+    font-size: 16px;
+    color: #94A3B8;
+    max-width: 520px;
+    margin: 0 auto;
+  }
+
+  /* MAIN CONTENT */
+  .content {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 24px 80px;
+  }
+
+  /* SECTION HEADER */
+  .section-header {
+    margin-bottom: 20px;
+  }
+  .section-title {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #64748B;
+    margin-bottom: 4px;
+  }
+  .section-desc {
+    font-size: 13px;
+    color: #475569;
+  }
+
+  /* DEMO FRAME */
+  .demo-frame {
+    background: #1E293B;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 32px;
+  }
+  .demo-frame-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid #334155;
+    background: #162032;
+  }
+  .demo-frame-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #94A3B8;
+  }
+  .demo-badge {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    background: rgba(79,70,229,0.15);
+    color: #818CF8;
+    border: 1px solid rgba(79,70,229,0.3);
+    border-radius: 99px;
+    padding: 2px 8px;
+  }
+  .demo-body { padding: 20px; }
+
+  /* STATS GRID */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat-card {
+    background: #0F172A;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .stat-label {
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #64748B;
+    margin-bottom: 8px;
+  }
+  .stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: #E2E8F0;
+    line-height: 1;
+    letter-spacing: -0.02em;
+  }
+  .stat-value.accent { color: #4F46E5; }
+  .stat-delta {
+    font-size: 11px;
+    color: #6EE7B7;
+    margin-top: 6px;
+  }
+
+  /* CHART */
+  .chart-section {
+    margin-top: 4px;
+  }
+  .chart-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #64748B;
+    margin-bottom: 14px;
+  }
+  .bar-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .bar-label {
+    font-size: 12px;
+    color: #94A3B8;
+    width: 48px;
+    flex-shrink: 0;
+  }
+  .bar-track {
+    flex: 1;
+    background: #0F172A;
+    border-radius: 4px;
+    height: 8px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: #4F46E5;
+    border-radius: 4px;
+    transition: width 0.4s ease;
+  }
+  .bar-count {
+    font-size: 12px;
+    color: #64748B;
+    width: 32px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  /* FEATURES LIST */
+  .features-section {
+    margin-bottom: 48px;
+  }
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 16px;
+  }
+  .feature-card {
+    background: #1E293B;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .feature-icon {
+    font-size: 18px;
+    margin-bottom: 10px;
+  }
+  .feature-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: #E2E8F0;
+    margin-bottom: 6px;
+  }
+  .feature-desc {
+    font-size: 13px;
+    color: #64748B;
+    line-height: 1.5;
+  }
+
+  /* CTA */
+  .cta-section {
+    text-align: center;
+    padding: 56px 24px;
+    background: #1E293B;
+    border: 1px solid #334155;
+    border-radius: 12px;
+  }
+  .cta-section h2 {
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    margin-bottom: 12px;
+  }
+  .cta-section p {
+    font-size: 15px;
+    color: #94A3B8;
+    margin-bottom: 28px;
+    max-width: 440px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .cta-btn {
+    display: inline-block;
+    padding: 13px 28px;
+    background: #4F46E5;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 8px;
+    transition: background 0.15s;
+  }
+  .cta-btn:hover { background: #4338CA; }
+
+  /* FOOTER */
+  footer {
+    text-align: center;
+    padding: 32px 24px;
+    font-size: 12px;
+    color: #334155;
+    border-top: 1px solid #1E293B;
+  }
+  footer a { color: #4F46E5; }
+  footer a:hover { color: #6366F1; }
+
+  @media (max-width: 900px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .features-grid { grid-template-columns: repeat(2, 1fr); }
+    nav { padding: 16px 20px; }
+    .hero { padding: 48px 20px 40px; }
+    .hero h1 { font-size: 30px; }
+  }
+  @media (max-width: 560px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .features-grid { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 26px; }
+    .nav-links { display: none; }
+    .cta-section h2 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="https://wayforth.io" class="logo">Way<span>forth</span></a>
+  <div class="nav-links">
+    <a href="https://wayforth.io">Home</a>
+    <a href="/demo">Demo</a>
+    <a href="/pricing">Pricing</a>
+    <a href="https://api-production-fd71.up.railway.app/docs">API Docs</a>
+  </div>
+</nav>
+
+<div class="hero">
+  <div class="hero-label">Intelligence API</div>
+  <h1>Know exactly how agents<br><em>find your service</em></h1>
+  <p>Real-time visibility into search appearances, ranking position, and payment conversions — built for service providers in the Wayforth catalog.</p>
+</div>
+
+<div class="content">
+
+  <!-- DEMO DASHBOARD -->
+  <div class="section-header">
+    <div class="section-title">Live Dashboard Preview</div>
+    <div class="section-desc">Hardcoded demo data — your actual metrics will vary.</div>
+  </div>
+
+  <div class="demo-frame">
+    <div class="demo-frame-header">
+      <span class="demo-frame-title">Intelligence Dashboard &mdash; ExampleService</span>
+      <span class="demo-badge">Demo</span>
+    </div>
+    <div class="demo-body">
+
+      <!-- STATS -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Search Appearances (7d)</div>
+          <div class="stat-value">847</div>
+          <div class="stat-delta">+12% vs prev week</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Avg WRI Score</div>
+          <div class="stat-value accent">94.2</div>
+          <div class="stat-delta">Tier 2 verified</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Payment Conversions (7d)</div>
+          <div class="stat-value">23</div>
+          <div class="stat-delta">+4 vs prev week</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Conversion Rate</div>
+          <div class="stat-value">2.7%</div>
+          <div class="stat-delta">847 appearances</div>
+        </div>
+      </div>
+
+      <!-- BAR CHART -->
+      <div class="chart-section">
+        <div class="chart-title">Rank Position Distribution (7d)</div>
+        <div class="bar-row">
+          <span class="bar-label">Top 1</span>
+          <div class="bar-track"><div class="bar-fill" style="width: 100%"></div></div>
+          <span class="bar-count">342</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Top 3</span>
+          <div class="bar-track"><div class="bar-fill" style="width: 79%"></div></div>
+          <span class="bar-count">271</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Top 5</span>
+          <div class="bar-track"><div class="bar-fill" style="width: 48%"></div></div>
+          <span class="bar-count">164</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Top 10</span>
+          <div class="bar-track"><div class="bar-fill" style="width: 20%"></div></div>
+          <span class="bar-count">70</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- FEATURES -->
+  <div class="features-section">
+    <div class="section-header">
+      <div class="section-title">What you get</div>
+    </div>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">🔍</div>
+        <div class="feature-name">Search Visibility</div>
+        <div class="feature-desc">See how often your service appears in agent queries, broken down by keyword and time range.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📊</div>
+        <div class="feature-name">WRI Score History</div>
+        <div class="feature-desc">Track your Wayforth Reliability Index over time and understand what drives ranking changes.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">💳</div>
+        <div class="feature-name">Conversion Analytics</div>
+        <div class="feature-desc">Measure how many search appearances lead to actual payment transactions through Wayforth.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📍</div>
+        <div class="feature-name">Rank Distribution</div>
+        <div class="feature-desc">Understand your position in search results — how often you rank #1 vs. top 3, 5, or 10.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔔</div>
+        <div class="feature-name">Webhooks</div>
+        <div class="feature-desc">Get notified in real-time when your WRI score changes or a payment is routed to your service.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔑</div>
+        <div class="feature-name">API Access</div>
+        <div class="feature-desc">Pull all intelligence data programmatically. Integrate with your own dashboards and alerting systems.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CTA -->
+  <div class="cta-section">
+    <h2>Ready to grow your service?</h2>
+    <p>Intelligence API is available on Starter and Pro plans. Contact us to get access and start tracking your performance.</p>
+    <a href="mailto:hello@wayforth.io?subject=Intelligence API Access" class="cta-btn">Get access for your service →</a>
+  </div>
+
+</div>
+
+<footer>
+  &copy; 2026 Wayforth &mdash; <a href="/pricing">Pricing</a> &mdash; <a href="https://wayforth.io/license">BSL 1.1</a> &mdash; <a href="mailto:hello@wayforth.io">hello@wayforth.io</a>
+</footer>
+
+</body>
+</html>
