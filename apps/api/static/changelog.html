@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wayforth — Changelog</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0F172A; color: #E2E8F0; min-height: 100vh;
+      padding: 48px 24px;
+    }
+    .nav {
+      max-width: 680px; margin: 0 auto 48px;
+      display: flex; align-items: center; gap: 24px;
+    }
+    .logo { font-size: 20px; font-weight: 800; color: #4F46E5; text-decoration: none; }
+    .nav-links { display: flex; gap: 20px; margin-left: auto; }
+    .nav-links a { color: #64748B; font-size: 14px; text-decoration: none; }
+    .nav-links a:hover { color: #E2E8F0; }
+    .container { max-width: 680px; margin: 0 auto; }
+    .page-header { margin-bottom: 40px; }
+    .page-title { font-size: 28px; font-weight: 800; margin-bottom: 8px; }
+    .page-subtitle { color: #94A3B8; font-size: 15px; }
+    .version-card {
+      background: #1E293B; border: 1px solid #334155;
+      border-radius: 12px; padding: 24px; margin-bottom: 16px;
+    }
+    .version-header {
+      display: flex; align-items: center; gap: 16px; margin-bottom: 16px;
+      padding-bottom: 14px; border-bottom: 1px solid #334155;
+    }
+    .version-num {
+      font-size: 14px; font-weight: 700;
+      background: #4F46E5; color: white;
+      padding: 4px 12px; border-radius: 6px;
+      font-family: 'SF Mono', monospace;
+    }
+    .version-date { color: #64748B; font-size: 13px; }
+    .change-list { list-style: none; }
+    .change-list li {
+      padding: 8px 0; font-size: 14px; color: #E2E8F0;
+      border-bottom: 1px solid #0F172A;
+      display: flex; align-items: flex-start; gap: 10px; line-height: 1.5;
+    }
+    .change-list li:last-child { border-bottom: none; padding-bottom: 0; }
+    .change-list li::before {
+      content: "·"; color: #4F46E5; font-weight: 700; flex-shrink: 0; font-size: 18px; line-height: 1.2;
+    }
+    .footer {
+      max-width: 680px; margin: 60px auto 0;
+      padding-top: 24px; border-top: 1px solid #334155;
+      display: flex; gap: 24px; color: #64748B; font-size: 13px;
+    }
+    .footer a { color: #64748B; text-decoration: none; }
+    .footer a:hover { color: #E2E8F0; }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <a href="/demo" class="logo">Wayforth</a>
+    <div class="nav-links">
+      <a href="/demo">Demo</a>
+      <a href="/wayforthql-spec">WayforthQL</a>
+      <a href="/roadmap">Roadmap</a>
+      <a href="/docs">API Docs</a>
+    </div>
+  </nav>
+
+  <div class="container">
+    <div class="page-header">
+      <div class="page-title">Changelog</div>
+      <div class="page-subtitle">Every version, everything shipped.</div>
+    </div>
+
+    <div class="version-card">
+      <div class="version-header">
+        <span class="version-num">v0.1.4</span>
+        <span class="version-date">April 25, 2026</span>
+      </div>
+      <ul class="change-list">
+        <li>wayforth_remember / wayforth_recall — agent memory tools</li>
+        <li>wayforth_similar — co-usage based recommendations</li>
+        <li>API key system (free / starter / pro / enterprise)</li>
+        <li>Tier 3 verification applications</li>
+        <li>Provider webhooks with HMAC signing</li>
+        <li>WRI composite score on all search results</li>
+        <li>WayforthQL v2 — protocol filter, sort_by, with_similar</li>
+      </ul>
+    </div>
+
+    <div class="version-card">
+      <div class="version-header">
+        <span class="version-num">v0.1.3</span>
+        <span class="version-date">April 24, 2026</span>
+      </div>
+      <ul class="change-list">
+        <li>WayforthQL endpoint (POST /query)</li>
+        <li>wayforth:// service identifiers</li>
+        <li>Service Graph foundation</li>
+        <li>Intelligence API for service providers</li>
+        <li>Agent memory API</li>
+      </ul>
+    </div>
+
+    <div class="version-card">
+      <div class="version-header">
+        <span class="version-num">v0.1.2</span>
+        <span class="version-date">April 24, 2026</span>
+      </div>
+      <ul class="change-list">
+        <li>Health monitoring every 6 hours</li>
+        <li>Auto-demotion after 3 consecutive failures</li>
+        <li>/health-report endpoint</li>
+        <li>x402 service indexing</li>
+        <li>payment_protocol field on all results</li>
+      </ul>
+    </div>
+
+    <div class="version-card">
+      <div class="version-header">
+        <span class="version-num">v0.1.1</span>
+        <span class="version-date">April 23, 2026</span>
+      </div>
+      <ul class="change-list">
+        <li>Smart contracts deployed (Registry + Escrow on Base Sepolia)</li>
+        <li>POST /pay with non-custodial USDC calldata</li>
+        <li>Rate limiting (slowapi)</li>
+        <li>Live search demo at /demo</li>
+        <li>Leaderboard endpoint</li>
+        <li>Service submission (POST /submit)</li>
+      </ul>
+    </div>
+
+    <div class="version-card">
+      <div class="version-header">
+        <span class="version-num">v0.1.0</span>
+        <span class="version-date">April 22, 2026</span>
+      </div>
+      <ul class="change-list">
+        <li>Initial release</li>
+        <li>2,354 services indexed</li>
+        <li>MCP server (uvx wayforth-mcp)</li>
+        <li>Semantic search with Claude Haiku ranking</li>
+        <li>Python SDK + TypeScript SDK</li>
+        <li>Listed in Official MCP Registry</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="footer">
+    <a href="/demo">← Live Demo</a>
+    <a href="/wayforthql-spec">WayforthQL Spec</a>
+    <a href="/roadmap">Roadmap</a>
+    <a href="/docs">API Docs</a>
+  </div>
+</body>
+</html>

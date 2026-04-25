@@ -5,6 +5,7 @@ import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import asyncpg
 import sentry_sdk
@@ -123,7 +124,33 @@ async def lifespan(app: FastAPI):
         await app.state.pool.close()
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    title="Wayforth API",
+    description="""
+## The Search Engine and Payment Rail for AI Agents
+
+Wayforth provides semantic service discovery and non-custodial payment routing for AI agents.
+
+### Key Features
+- **WayforthQL** — Declarative query language for agent service discovery
+- **WayforthRank** — Proprietary multi-signal ranking engine
+- **Coverage Tiers** — Automated reliability verification (0–3)
+- **Non-custodial payments** — Agent signs, Wayforth routes, Base settles
+
+### Authentication
+Most endpoints are open with per-IP rate limits.
+Add `X-Wayforth-API-Key: wf_free_...` header for higher limits.
+
+### Quick Start
+```bash
+uvx wayforth-mcp
+```
+""",
+    version="0.1.4",
+    contact={"name": "Wayforth", "url": "https://wayforth.io", "email": "hello@wayforth.io"},
+    license_info={"name": "BSL 1.1", "url": "https://wayforth.io/license"},
+    lifespan=lifespan,
+)
 
 def get_real_ip(request: Request) -> str:
     forwarded = request.headers.get("X-Forwarded-For")
@@ -172,7 +199,21 @@ async def get_db(request: Request):
 @limiter.limit("60/minute")
 def health(request: Request):
     db_status = "ok" if getattr(app.state, "db_ok", False) else "unavailable"
-    return {"status": "ok", "service": "wayforth-api", "version": "0.1.0", "db_status": db_status}
+    return {"status": "ok", "service": "wayforth-api", "version": "0.1.4", "db_status": db_status}
+
+
+@app.get("/status", tags=["System"])
+async def system_status(db=Depends(get_db)):
+    """Public system status — uptime, service count, last health check."""
+    stats = await db.fetchrow("SELECT COUNT(*) as total FROM services WHERE coverage_tier >= 2")
+    return {
+        "status": "operational",
+        "version": "0.1.4",
+        "tier2_services": stats["total"],
+        "api": "operational",
+        "database": "operational",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.get("/chain")
@@ -903,6 +944,21 @@ async def submit_page():
 @app.get("/agent-demo")
 async def agent_demo():
     return FileResponse("static/agent-demo.html")
+
+
+@app.get("/wayforthql-spec", include_in_schema=False)
+async def wayforthql_spec():
+    return FileResponse("static/wayforthql.html")
+
+
+@app.get("/roadmap", include_in_schema=False)
+async def roadmap():
+    return FileResponse("static/roadmap.html")
+
+
+@app.get("/changelog", include_in_schema=False)
+async def changelog_page():
+    return FileResponse("static/changelog.html")
 
 
 @app.get("/analytics")
