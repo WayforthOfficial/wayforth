@@ -17,8 +17,8 @@ We will respond within 48 hours and aim to patch within 7 days.
 Contracts are deployed on Base Sepolia testnet only.
 Mainnet deployment follows an independent third-party security audit.
 
-Registry: `0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7`
-Escrow: `0xC9945621CfefD9a15972D3f3d33e2D6f0cc3E320`
+Registry: `0x55810EfB3444A693556C3f9910dbFbF2dDaC369C`
+Escrow: `0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809`
 
 ## Scope
 
