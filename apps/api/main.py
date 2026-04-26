@@ -629,44 +629,78 @@ async def wayforthql(request: Request, body: WayforthQLQuery):
 
 
 @app.get("/services")
-@limiter.limit("30/minute")
+@limiter.limit("20/minute")
 async def list_services(
     request: Request,
-    category: str | None = Query(default=None),
-    tier: int | None = Query(default=None, description="Filter by coverage tier (0=free, 1=basic, 2=standard, 3=premium)"),
+    category: str = None,
+    tier: int = None,
+    protocol: str = None,
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    sort: str = "tier",
+    db=Depends(get_db),
 ):
+    conditions = ["1=1"]
+    params = []
+    idx = 1
+
+    if category:
+        conditions.append(f"category = ${idx}")
+        params.append(category)
+        idx += 1
+    if tier is not None:
+        conditions.append(f"coverage_tier >= ${idx}")
+        params.append(tier)
+        idx += 1
+    if protocol:
+        conditions.append(f"payment_protocol = ${idx}")
+        params.append(protocol)
+        idx += 1
+
+    order = "coverage_tier DESC, name ASC" if sort == "tier" else "name ASC"
+
     try:
-        async with app.state.pool.acquire() as conn:
-            total = await conn.fetchval(
-                """
-                SELECT COUNT(*) FROM services
-                WHERE ($1::text IS NULL OR category = $1)
-                  AND ($2::int IS NULL OR coverage_tier = $2)
-                """,
-                category,
-                tier,
-            )
-            rows = await conn.fetch(
-                """
-                SELECT id, name, description, endpoint_url, category,
-                       coverage_tier, pricing_usdc, source, payment_protocol, created_at
-                FROM services
-                WHERE ($1::text IS NULL OR category = $1)
-                  AND ($2::int IS NULL OR coverage_tier = $2)
-                ORDER BY created_at DESC
-                LIMIT $3 OFFSET $4
-                """,
-                category,
-                tier,
-                limit,
-                offset,
-            )
+        rows = await db.fetch(f"""
+            SELECT id, name, description, endpoint_url, category,
+                   pricing_usdc, coverage_tier, payment_protocol, source, created_at
+            FROM services
+            WHERE {' AND '.join(conditions)}
+            ORDER BY {order}
+            LIMIT ${idx} OFFSET ${idx + 1}
+        """, *params, min(limit, 100), offset)
+
+        total = await db.fetchval(f"""
+            SELECT COUNT(*) FROM services WHERE {' AND '.join(conditions)}
+        """, *params)
     except Exception as e:
         logger.error(f"DB error: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
-    return {"total": total, "offset": offset, "limit": limit, "results": [dict(r) for r in rows]}
+
+    return {
+        "services": [dict(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "filters": {"category": category, "tier": tier, "protocol": protocol},
+    }
+
+
+@app.get("/services/categories")
+@limiter.limit("20/minute")
+async def list_categories(request: Request, db=Depends(get_db)):
+    """All service categories with counts."""
+    try:
+        rows = await db.fetch("""
+            SELECT category, COUNT(*) as count,
+                   COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2_count
+            FROM services
+            WHERE category IS NOT NULL
+            GROUP BY category ORDER BY count DESC
+        """)
+    except Exception as e:
+        logger.error(f"DB error: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    return {"categories": [dict(r) for r in rows], "total": len(rows)}
 
 
 @app.get("/stats")
@@ -1114,6 +1148,11 @@ async def pricing_page():
 @app.get("/intelligence-demo", include_in_schema=False)
 async def intelligence_demo():
     return FileResponse("static/intelligence-demo.html")
+
+
+@app.get("/health-page", include_in_schema=False)
+async def health_page():
+    return FileResponse("static/health-report.html")
 
 
 @app.get("/analytics")

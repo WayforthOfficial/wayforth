@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from health_monitor import run_health_check
+from health_monitor import run_health_check, fire_tier_promotion_email
 from graph_builder import build_service_graph
 from x402_monitor import run_x402_monitor
 
@@ -175,6 +175,7 @@ async def promote_tier1_to_tier2(service: dict, db_conn: asyncpg.Connection) -> 
             service["id"],
         )
         logger.info("Promoted Tier1→2: %s", service.get("name", service["id"]))
+        await fire_tier_promotion_email(db_conn, str(service["id"]), service.get("name", ""), 2)
         return True
     except Exception as exc:
         logger.warning("promote_tier1_to_tier2 failed for %s: %s", service.get("name"), exc)
