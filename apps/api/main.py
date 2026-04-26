@@ -833,75 +833,58 @@ async def health_report(request: Request):
 
 @app.get("/leaderboard")
 @limiter.limit("20/minute")
-async def leaderboard(
-    request: Request,
-    limit: int = Query(default=10, ge=1, le=50),
-    period: str = Query(default="7d", description="Time window: 1d, 7d, 30d"),
-):
-    days = 7
-    if period.endswith("d"):
-        try:
-            days = max(1, min(int(period[:-1]), 90))
-        except ValueError:
-            pass
+async def leaderboard(request: Request, limit: int = 20, db=Depends(get_db)):
+    rows = await db.fetch("""
+        SELECT
+            s.name,
+            s.category,
+            s.coverage_tier,
+            s.payment_protocol,
+            s.pricing_usdc,
+            s.consecutive_failures,
+            s.last_tested_at,
+            encode(sha256(s.endpoint_url::bytea), 'hex') as service_id,
+            COUNT(DISTINCT sa.id) as search_count,
+            COUNT(DISTINCT so.id) as payment_count
+        FROM services s
+        LEFT JOIN search_analytics sa ON
+            sa.top_result_id::text = '0x' || encode(sha256(s.endpoint_url::bytea), 'hex')
+            AND sa.created_at > NOW() - INTERVAL '7 days'
+        LEFT JOIN search_outcomes so ON
+            so.service_id::text = '0x' || encode(sha256(s.endpoint_url::bytea), 'hex')
+            AND so.outcome_type = 'payment_initiated'
+            AND so.created_at > NOW() - INTERVAL '7 days'
+        WHERE s.coverage_tier >= 2
+        GROUP BY s.name, s.category, s.coverage_tier, s.payment_protocol,
+                 s.pricing_usdc, s.consecutive_failures, s.last_tested_at, s.endpoint_url
+        ORDER BY s.coverage_tier DESC, payment_count DESC, search_count DESC, s.name ASC
+        LIMIT $1
+    """, limit)
 
-    try:
-        async with app.state.pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT
-                    s.name,
-                    s.category,
-                    s.coverage_tier,
-                    s.payment_protocol,
-                    encode(sha256(s.endpoint_url::bytea), 'hex') as service_id,
-                    COUNT(DISTINCT sa.id) as search_count,
-                    COUNT(DISTINCT so.id) as payment_count
-                FROM services s
-                LEFT JOIN search_analytics sa
-                    ON sa.top_result_id = s.id
-                    AND sa.created_at > NOW() - ($2 * INTERVAL '1 day')
-                LEFT JOIN search_outcomes so
-                    ON so.service_id = s.id
-                    AND so.outcome_type = 'payment_initiated'
-                    AND so.created_at > NOW() - ($2 * INTERVAL '1 day')
-                GROUP BY s.name, s.category, s.coverage_tier, s.payment_protocol, s.endpoint_url
-                ORDER BY coverage_tier DESC, search_count DESC, payment_count DESC
-                LIMIT $1
-            """, limit, days)
+    results = []
+    for r in rows:
+        svc = dict(r)
+        service_id = '0x' + svc['service_id']
+        svc['service_id'] = service_id
 
-            if not rows or all(r["search_count"] == 0 and r["payment_count"] == 0 for r in rows):
-                rows = await conn.fetch("""
-                    SELECT name, category, coverage_tier, payment_protocol,
-                           encode(sha256(endpoint_url::bytea), 'hex') as service_id,
-                           0 as search_count, 0 as payment_count
-                    FROM services WHERE coverage_tier >= 2
-                    ORDER BY coverage_tier DESC, name ASC LIMIT $1
-                """, limit)
+        score = 50.0
+        tier = svc.get('coverage_tier', 0)
+        if tier >= 2: score += 20
+        elif tier >= 1: score += 5
+        if svc.get('consecutive_failures', 1) == 0: score += 10
+        if svc.get('payment_protocol') == 'x402': score += 5
+        if svc.get('payment_count', 0) > 0: score += min(svc['payment_count'] * 2, 8)
+        svc['wri'] = round(min(score, 100), 1)
 
-            total_queries = await conn.fetchval(
-                "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - ($1 * INTERVAL '1 day')",
-                days,
-            )
-    except Exception as e:
-        logger.error(f"DB error: {e}")
-        raise HTTPException(status_code=503, detail="Database unavailable")
+        price = svc.get('pricing_usdc')
+        svc['price_display'] = f"${price:.7f}/req".rstrip('0').rstrip('.') + '/req' if price and price > 0 else "Free"
+
+        results.append(svc)
 
     return {
-        "period": period,
-        "total_queries": total_queries,
-        "leaderboard": [
-            {
-                "rank": i + 1,
-                "name": r["name"],
-                "search_count": r["search_count"],
-                "payment_count": r["payment_count"],
-                "category": r["category"],
-                "coverage_tier": r["coverage_tier"],
-                "payment_protocol": r["payment_protocol"],
-                "service_id": "0x" + r["service_id"],
-            }
-            for i, r in enumerate(rows)
-        ],
+        "leaderboard": results,
+        "total": len(results),
+        "period": "7d"
     }
 
 
