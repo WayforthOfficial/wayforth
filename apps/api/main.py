@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import asyncpg
+import httpx
 import sentry_sdk
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -143,6 +144,22 @@ async def _update_identity_payment(pool, agent_id: str, amount_usdc: float):
             """, agent_id, amount_usdc)
     except Exception as e:
         logger.warning(f"Identity payment update failed: {e}")
+
+
+async def _probe_new_service(service_id: str, endpoint_url: str):
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(endpoint_url)
+            new_tier = 1 if r.status_code < 500 else 0
+            async with app.state.pool.acquire() as db:
+                await db.execute("""
+                    UPDATE services
+                    SET coverage_tier=$1, last_tested_at=NOW(), consecutive_failures=0
+                    WHERE id=$2::uuid
+                """, new_tier, service_id)
+                logger.info(f"New service {service_id} probed: tier {new_tier} (status {r.status_code})")
+    except Exception as e:
+        logger.warning(f"New service probe failed for {service_id}: {e}")
 
 
 _DB_URL = os.environ.get("DATABASE_URL", "")
@@ -848,6 +865,19 @@ async def pay(request: Request, req: PayRequest):
         asyncio.create_task(_mark_search_converted(app.state.pool, req.query_id, req.service_id))
     if app.state.pool and req.agent_id:
         asyncio.create_task(_update_identity_payment(app.state.pool, req.agent_id, req.amount_usdc))
+    fee_bps = 150
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if raw_key and app.state.pool:
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        async with app.state.pool.acquire() as conn:
+            key_row = await conn.fetchrow(
+                "SELECT tier FROM api_keys WHERE key_hash=$1 AND active=TRUE", key_hash
+            )
+            if key_row:
+                fee_bps = TIER_LIMITS.get(key_row["tier"], {}).get("fee_bps", 150)
+    result["fee_bps"] = fee_bps
+    result["fee_pct"] = fee_bps / 100
+    result["payment"] = {"fee_bps": fee_bps}
     return result
 
 
@@ -877,6 +907,7 @@ async def submit_service(request: Request, req: SubmitRequest):
                 service_id, req.contact_email, get_real_ip(request),
             )
         logger.info(f"submit name={req.name!r} category={req.category}")
+        asyncio.create_task(_probe_new_service(str(service_id), req.endpoint_url))
         if req.contact_email:
             asyncio.create_task(asyncio.to_thread(
                 send_submission_confirmation,
@@ -959,6 +990,16 @@ async def admin_stats(request: Request, key: str = ""):
                 LIMIT 10
                 """
             )
+            platform = await conn.fetchrow("""
+                SELECT
+                    (SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '24h') as searches_24h,
+                    (SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '7d') as searches_7d,
+                    (SELECT COUNT(*) FROM search_outcomes WHERE outcome_type='payment_initiated') as total_payments,
+                    (SELECT COUNT(*) FROM tier3_applications WHERE kyb_status='pending') as pending_tier3,
+                    (SELECT COUNT(*) FROM api_keys WHERE active=TRUE) as active_api_keys,
+                    (SELECT COUNT(*) FROM agent_identities) as registered_agents,
+                    (SELECT COUNT(*) FROM provider_webhooks WHERE active=TRUE) as active_webhooks
+            """)
     except Exception as e:
         logger.error(f"Admin stats DB error: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -999,6 +1040,17 @@ async def admin_stats(request: Request, key: str = ""):
                 }
                 for r in sub_rows
             ],
+        },
+        "platform": {
+            "active_api_keys": platform["active_api_keys"],
+            "registered_agents": platform["registered_agents"],
+            "active_webhooks": platform["active_webhooks"],
+            "pending_tier3_applications": platform["pending_tier3"],
+        },
+        "usage": {
+            "searches_24h": platform["searches_24h"],
+            "searches_7d": platform["searches_7d"],
+            "total_payments": platform["total_payments"],
         },
         "infrastructure": {
             "api": "healthy",
@@ -1488,10 +1540,10 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # ── API Key System ──────────────────────────────────────────────────────────
 
 TIER_LIMITS = {
-    "free":       {"rpm": 10,  "monthly": 1_000},
-    "starter":    {"rpm": 30,  "monthly": 10_000},
-    "pro":        {"rpm": 100, "monthly": 100_000},
-    "enterprise": {"rpm": 500, "monthly": -1},  # unlimited
+    "free":       {"rpm": 10,  "monthly": 1_000,    "fee_bps": 150},
+    "starter":    {"rpm": 30,  "monthly": 10_000,   "fee_bps": 125},
+    "pro":        {"rpm": 100, "monthly": 100_000,  "fee_bps": 100},
+    "enterprise": {"rpm": 500, "monthly": -1,       "fee_bps": 75},
 }
 
 
@@ -1544,17 +1596,12 @@ async def get_api_key(request: Request, db=Depends(get_db)):
 async def key_tiers():
     return {
         "tiers": [
-            {"tier": "free", "price_monthly_usd": 0, "rpm": 10, "monthly_quota": 1000,
-             "features": ["search", "query", "pay", "services"]},
-            {"tier": "starter", "price_monthly_usd": 29, "rpm": 30, "monthly_quota": 10000,
-             "features": ["search", "query", "pay", "services", "intelligence", "webhooks"]},
-            {"tier": "pro", "price_monthly_usd": 149, "rpm": 100, "monthly_quota": 100000,
-             "features": ["search", "query", "pay", "services", "intelligence", "webhooks", "history", "graph"]},
-            {"tier": "enterprise", "price_monthly_usd": None, "rpm": 500, "monthly_quota": -1,
-             "features": ["everything", "sla", "private_catalog", "dedicated_infra", "custom_probing"]},
+            {"tier": "free",       "price_monthly_usd": 0,    "rpm": 10,  "monthly_quota": 1000,   "routing_fee_pct": 1.5,  "features": ["search", "query", "pay", "services"]},
+            {"tier": "starter",    "price_monthly_usd": 29,   "rpm": 30,  "monthly_quota": 10000,  "routing_fee_pct": 1.25, "features": ["search", "query", "pay", "services", "intelligence", "webhooks"]},
+            {"tier": "pro",        "price_monthly_usd": 149,  "rpm": 100, "monthly_quota": 100000, "routing_fee_pct": 1.0,  "features": ["search", "query", "pay", "services", "intelligence", "webhooks", "history", "graph"]},
+            {"tier": "enterprise", "price_monthly_usd": None, "rpm": 500, "monthly_quota": -1,     "routing_fee_pct": 0.75, "features": ["everything", "sla", "private_catalog", "dedicated_infra", "custom_probing"]},
         ],
-        "routing_fee_pct": 1.5,
-        "note": "1.5% routing fee applies to all payment transactions regardless of tier."
+        "note": "Routing fee applies to all payment transactions. Higher tiers receive reduced fees."
     }
 
 
