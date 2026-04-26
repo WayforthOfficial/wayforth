@@ -116,4 +116,4 @@ Core: BSL 1.1 — source visible, no competing use for 4 years. OpenAPI spec + c
 
 ---
 
-[wayforth.io](https://wayforth.io) · [docs](https://api-production-fd71.up.railway.app/docs) · hello@wayforth.io
+[wayforth.io](https://wayforth.io) · [docs](https://api-production-fd71.up.railway.app/docs) · [whitepaper](https://github.com/WayforthOfficial/wayforth/blob/main/docs/whitepaper-v2.pdf) · [hello@wayforth.io](mailto:hello@wayforth.io)

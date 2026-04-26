@@ -1,7 +1,7 @@
 """
 Wayforth Health Monitor
 Runs every 6 hours via Railway cron (called from promoter.py).
-Probes all Tier 2 services and auto-demotes if they fail 3 consecutive checks.
+Probes all Tier 2 services and auto-demotes if they fail CONSECUTIVE_FAILURE_THRESHOLD consecutive checks.
 """
 import asyncio
 import hashlib
@@ -17,6 +17,10 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
+
+CONSECUTIVE_FAILURE_THRESHOLD = int(os.getenv("CONSECUTIVE_FAILURE_THRESHOLD", "3"))
+TIER2_UPTIME_WINDOW_DAYS = int(os.getenv("TIER2_UPTIME_WINDOW_DAYS", "7"))
+TIER2_UPTIME_THRESHOLD = float(os.getenv("TIER2_UPTIME_THRESHOLD", "0.90"))
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("wayforth.monitor")
@@ -98,7 +102,7 @@ async def fire_tier_change_webhook(pool, service_id: str, old_tier: int, new_tie
 
 
 async def run_health_check(pool=None) -> None:
-    """Probe all Tier 2 services and auto-demote after 3 consecutive failures."""
+    """Probe all Tier 2 services and auto-demote after CONSECUTIVE_FAILURE_THRESHOLD consecutive failures."""
     _own_pool = pool is None
     if _own_pool:
         db_url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
@@ -137,7 +141,7 @@ async def run_health_check(pool=None) -> None:
                     else:
                         failures = (svc["consecutive_failures"] or 0) + 1
 
-                        if failures >= 3:
+                        if failures >= CONSECUTIVE_FAILURE_THRESHOLD:
                             await conn.execute(
                                 """
                                 UPDATE services
@@ -175,7 +179,7 @@ async def run_health_check(pool=None) -> None:
                                 (service_id, wri_score, tier, consecutive_failures, recorded_at)
                                 VALUES ($1, $2, $3, $4, NOW())
                             """, str(svc["id"]), compute_wri_simple(snapshot), svc["coverage_tier"], failures)
-                            logger.warning(f"⚠️ {svc['name']} — DOWN ({failures}/3 failures)")
+                            logger.warning(f"⚠️ {svc['name']} — DOWN ({failures}/{CONSECUTIVE_FAILURE_THRESHOLD} failures)")
 
         logger.info("Health check complete")
     finally:
