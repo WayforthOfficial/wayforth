@@ -44,7 +44,7 @@ def _keyword_rank(intent: str, services: list[dict]) -> list[dict]:
 _HAIKU_CANDIDATE_LIMIT = 20  # pre-filter before sending to Haiku
 
 
-def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0) -> float:
+def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0, payment_boost: float = 0.0) -> float:
     """
     Wayforth Reliability Index (WRI) — composite service quality score.
     Combines semantic relevance with reliability and usage signals.
@@ -87,11 +87,13 @@ def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0)
 
     # Usage: popularity signal (from search_analytics)
     score += min(popularity_boost, 5.0)
+    # Conversion: payment signal (from search_outcomes, max +8)
+    score += min(payment_boost, 8.0)
 
     return round(min(score, 100), 1)
 
 
-async def rank_services_local(intent: str, services: list[dict], popularity_signals: dict = None) -> list[dict]:
+async def rank_services_local(intent: str, services: list[dict], popularity_signals: dict = None, payment_signals: dict = None) -> list[dict]:
     """Rank services by semantic relevance using Claude Haiku; falls back to keyword ranking."""
     client = _get_client()
     if not client or not services:
@@ -123,8 +125,10 @@ async def rank_services_local(intent: str, services: list[dict], popularity_sign
             meta = name_to_meta.get(s.get("name"), {})
             s_copy["score"] = int(meta.get("score", 0))
             s_copy["reason"] = meta.get("reason", "")
-            boost = (popularity_signals or {}).get(str(s_copy.get('service_id', '')), 0.0)
-            s_copy['wri'] = compute_wri(s_copy, s_copy["score"], popularity_boost=boost)
+            svc_id = str(s_copy.get('id', ''))
+            boost = (popularity_signals or {}).get(svc_id, 0.0)
+            pay_boost = (payment_signals or {}).get(svc_id, 0.0)
+            s_copy['wri'] = compute_wri(s_copy, s_copy["score"], popularity_boost=boost, payment_boost=pay_boost)
             result.append(s_copy)
 
         return sorted(result, key=lambda x: x["score"], reverse=True)

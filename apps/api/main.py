@@ -92,14 +92,20 @@ async def _record_search(pool, q, results, session_id="", query_id=""):
         logger.warning(f"search analytics write failed: {e}")
 
 
-async def _record_payment(pool, service_id, query_text=""):
+async def _record_payment(pool, service_id_hex: str, query_text=""):
+    sid = service_id_hex.removeprefix("0x")
     try:
         async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO search_outcomes
-                (query_text, service_id, outcome_type, created_at)
-                VALUES ($1, $2, 'payment_initiated', NOW())
-            """, query_text, service_id)
+            svc_uuid = await conn.fetchval(
+                "SELECT id FROM services WHERE encode(sha256(endpoint_url::bytea), 'hex') = $1",
+                sid,
+            )
+            if svc_uuid:
+                await conn.execute("""
+                    INSERT INTO search_outcomes
+                    (query_text, service_id, outcome_type, created_at)
+                    VALUES ($1, $2, 'payment_initiated', NOW())
+                """, query_text, svc_uuid)
     except Exception as e:
         logger.warning(f"search outcome write failed: {e}")
 
@@ -243,10 +249,13 @@ app.add_middleware(
 async def add_request_id(request: Request, call_next):
     import uuid
     request_id = str(uuid.uuid4())
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if raw_key:
+        request.state.api_key = raw_key
     response = await call_next(request)
     response.headers["X-Wayforth-Request-ID"] = request_id
-    response.headers["X-Wayforth-Version"] = "1.0.0"
-    response.headers["X-RateLimit-Tier"] = str(getattr(request.state, "rate_limit_tier", "anonymous"))
+    response.headers["X-Wayforth-Version"] = "0.1.5"
+    response.headers["X-RateLimit-Tier"] = str(getattr(request.state, "rate_limit_tier", "free"))
     response.headers["X-RateLimit-Limit"] = str(getattr(request.state, "rate_limit_rpm", "10"))
     return response
 
@@ -402,6 +411,7 @@ async def search_services(
     if pool and agent_id:
         asyncio.create_task(_update_identity_search(pool, agent_id))
     popular_ids: dict = {}
+    payment_ids: dict = {}
     try:
         async with app.state.pool.acquire() as conn:
             pop_rows = await conn.fetch("""
@@ -414,6 +424,17 @@ async def search_services(
             """)
             max_count = max((r["c"] for r in pop_rows), default=1)
             popular_ids = {str(r["top_result_id"]): (r["c"] / max_count) * 5 for r in pop_rows}
+
+            pay_rows = await conn.fetch("""
+                SELECT service_id, COUNT(*) as c
+                FROM search_outcomes
+                WHERE outcome_type = 'payment_initiated'
+                  AND created_at > NOW() - INTERVAL '7 days'
+                  AND service_id IS NOT NULL
+                GROUP BY service_id ORDER BY c DESC LIMIT 50
+            """)
+            max_pay = max((r["c"] for r in pay_rows), default=1)
+            payment_ids = {str(r["service_id"]): (r["c"] / max_pay) * 8 for r in pay_rows}
     except Exception:
         pass
 
@@ -422,7 +443,7 @@ async def search_services(
         {
             "name": s.get("name"),
             "score": s.get("score", 0),
-            "wri": compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0)),
+            "wri": compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
             "reason": s.get("reason", ""),
             "coverage_tier": s.get("coverage_tier"),
             "category": s.get("category"),
@@ -788,23 +809,39 @@ async def leaderboard(
 
     try:
         async with app.state.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT s.id, s.name, s.category, s.coverage_tier, s.endpoint_url,
-                       COUNT(q.id)            AS query_count,
-                       ROUND(AVG(q.score), 1) AS avg_score
+            rows = await conn.fetch("""
+                SELECT
+                    s.name,
+                    s.category,
+                    s.coverage_tier,
+                    s.payment_protocol,
+                    encode(sha256(s.endpoint_url::bytea), 'hex') as service_id,
+                    COUNT(DISTINCT sa.id) as search_count,
+                    COUNT(DISTINCT so.id) as payment_count
                 FROM services s
-                JOIN service_queries q ON s.id = q.service_id
-                WHERE q.queried_at > NOW() - ($2 * INTERVAL '1 day')
-                GROUP BY s.id
-                ORDER BY query_count DESC
+                LEFT JOIN search_analytics sa
+                    ON sa.top_result_id = s.id
+                    AND sa.created_at > NOW() - ($2 * INTERVAL '1 day')
+                LEFT JOIN search_outcomes so
+                    ON so.service_id = s.id
+                    AND so.outcome_type = 'payment_initiated'
+                    AND so.created_at > NOW() - ($2 * INTERVAL '1 day')
+                GROUP BY s.name, s.category, s.coverage_tier, s.payment_protocol, s.endpoint_url
+                ORDER BY search_count DESC, payment_count DESC
                 LIMIT $1
-                """,
-                limit,
-                days,
-            )
+            """, limit, days)
+
+            if not rows or all(r["search_count"] == 0 and r["payment_count"] == 0 for r in rows):
+                rows = await conn.fetch("""
+                    SELECT name, category, coverage_tier, payment_protocol,
+                           encode(sha256(endpoint_url::bytea), 'hex') as service_id,
+                           0 as search_count, 0 as payment_count
+                    FROM services WHERE coverage_tier >= 2
+                    ORDER BY coverage_tier DESC, name ASC LIMIT $1
+                """, limit)
+
             total_queries = await conn.fetchval(
-                "SELECT COUNT(*) FROM service_queries WHERE queried_at > NOW() - ($1 * INTERVAL '1 day')",
+                "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - ($1 * INTERVAL '1 day')",
                 days,
             )
     except Exception as e:
@@ -818,11 +855,12 @@ async def leaderboard(
             {
                 "rank": i + 1,
                 "name": r["name"],
-                "query_count": r["query_count"],
-                "avg_score": r["avg_score"],
+                "search_count": r["search_count"],
+                "payment_count": r["payment_count"],
                 "category": r["category"],
                 "coverage_tier": r["coverage_tier"],
-                "endpoint_url": r["endpoint_url"],
+                "payment_protocol": r["payment_protocol"],
+                "service_id": "0x" + r["service_id"],
             }
             for i, r in enumerate(rows)
         ],
@@ -1497,6 +1535,42 @@ async def service_intelligence(request: Request, service_id: str, api_key: str =
         "payment_conversions": conversions or 0,
         "rank_position_distribution": [dict(r) for r in rank_dist],
         "note": "Wayforth Intelligence API v1 — powered by real agent usage data",
+    }
+
+
+@app.get("/services/{service_id}/wri")
+@limiter.limit("30/minute")
+async def service_wri(request: Request, service_id: str, db=Depends(get_db)):
+    """Current WRI score and 7-day trend for a service."""
+    async with app.state.pool.acquire() as conn:
+        history = await conn.fetch("""
+            SELECT wri_score, tier, recorded_at
+            FROM service_score_history
+            WHERE service_id = $1
+              AND recorded_at > NOW() - INTERVAL '7 days'
+            ORDER BY recorded_at DESC LIMIT 30
+        """, service_id)
+
+    if not history:
+        return {"service_id": service_id, "wri": None, "trend": "no_data", "history": []}
+
+    scores = [r["wri_score"] for r in history]
+    current = scores[0]
+    trend = "stable"
+    if len(scores) >= 4:
+        recent = sum(scores[:2]) / 2
+        older = sum(scores[-2:]) / 2
+        if recent > older + 3:
+            trend = "improving"
+        elif recent < older - 3:
+            trend = "declining"
+
+    return {
+        "service_id": service_id,
+        "wri": current,
+        "trend": trend,
+        "avg_7d": round(sum(scores) / len(scores), 1),
+        "history": [{"wri": r["wri_score"], "at": r["recorded_at"].isoformat()} for r in history],
     }
 
 
