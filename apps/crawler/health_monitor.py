@@ -46,6 +46,28 @@ def compute_wri_simple(svc: dict) -> float:
     return round(min(score, 100), 1)
 
 
+async def fire_tier_promotion_email(db, service_id: str, service_name: str, new_tier: int) -> None:
+    """Send email when service reaches Tier 2."""
+    if new_tier < 2:
+        return
+    try:
+        contact = await db.fetchrow("""
+            SELECT contact_email FROM tier3_applications
+            WHERE service_id = $1 OR LOWER(service_name) = LOWER($2)
+            LIMIT 1
+        """, service_id, service_name)
+        if contact and contact["contact_email"]:
+            from notifications import send_tier2_promotion_email
+            await asyncio.to_thread(
+                send_tier2_promotion_email,
+                contact["contact_email"],
+                service_name,
+                service_id,
+            )
+    except Exception as e:
+        logger.warning(f"Tier promotion email failed: {e}")
+
+
 async def fire_tier_change_webhook(pool, service_id: str, old_tier: int, new_tier: int, service_name: str) -> None:
     async with pool.acquire() as conn:
         webhooks = await conn.fetch("""
