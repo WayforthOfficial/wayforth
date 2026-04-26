@@ -21,8 +21,8 @@ Then in your agent:
     → Settles on Base in ~2 seconds. Tiered routing fee from 0.75%.
 
 **What's live:**
-- 2,463 services indexed across 7 categories (inference, data, translation, image, code, audio, embeddings)
-- 115 Tier 2 verified — automated 90%+ uptime check, probed every 6 hours, auto-demoted on failure
+- 190+ real API endpoints, 154 Tier 2 verified across 7 categories (inference, data, translation, image, code, audio, embeddings)
+- 154 Tier 2 verified — automated 90%+ uptime check, probed every 6 hours, auto-demoted on failure
 - WayforthRank — proprietary multi-signal ranking engine (semantic + reliability + usage signals)
 - WayforthQL — declarative query language: POST /query {"query": "fast inference", "protocol": "x402"}
 - Smart contracts on Base Sepolia (Registry + Escrow, 54 tests passing)
