@@ -23,8 +23,8 @@ wayforth_pay(service_id, owner_address, amount_usdc)
 
 ## What's Live
 
-- **2,432+ services indexed** — MCP servers, REST APIs, x402-enabled services
-- **81 Tier 2 verified** — automated 90%+ uptime, probed every 6 hours, auto-demoted on failure
+- **2,463+ services indexed** — MCP servers, REST APIs, x402-enabled services
+- **115 Tier 2 verified** — automated 90%+ uptime, probed every 6 hours, auto-demoted on failure
 - **WayforthRank** — proprietary multi-signal ranking engine
 - **WayforthQL** — declarative query language for structured service discovery
 - **Coverage tiers 0–3** — the only automated reliability verification system in any agent registry

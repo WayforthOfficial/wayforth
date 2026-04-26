@@ -799,6 +799,36 @@ async def get_stats(request: Request):
     }
 
 
+@app.get("/services/count")
+@limiter.limit("30/minute")
+async def service_count(request: Request):
+    """Live service counts — use this to display accurate numbers on the website."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
+                    COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3,
+                    COUNT(*) FILTER (WHERE payment_protocol = 'x402') as x402
+                FROM services
+            """)
+    except Exception as e:
+        logger.error(f"DB error: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    return {
+        "total": row["total"],
+        "tier2": row["tier2"],
+        "tier3": row["tier3"],
+        "x402": row["x402"],
+        "display": {
+            "total": f"{row['total']:,}+",
+            "tier2": f"{row['tier2']}+",
+        },
+    }
+
+
 @app.get("/health-report")
 @limiter.limit("10/minute")
 async def health_report(request: Request):
