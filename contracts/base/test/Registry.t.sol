@@ -16,6 +16,12 @@ contract RegistryTest is Test {
     event ServiceDeactivated(bytes32 indexed serviceId);
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed oldAdmin, address indexed newAdmin);
+    event ServiceOwnershipTransferStarted(
+        bytes32 indexed serviceId, address indexed currentOwner, address indexed pendingOwner
+    );
+    event ServiceOwnershipTransferred(
+        bytes32 indexed serviceId, address indexed oldOwner, address indexed newOwner
+    );
 
     function setUp() public {
         vm.prank(admin);
@@ -186,5 +192,102 @@ contract RegistryTest is Test {
         vm.prank(alice);
         vm.expectRevert("Not pending admin");
         registry.acceptAdmin();
+    }
+
+    // --- service ownership transfer: M-2 ---
+
+    function test_transferServiceOwnership_twoStepRotation() public {
+        bytes32 id = _register(alice, "https://a.example");
+
+        vm.prank(alice);
+        vm.expectEmit(true, true, true, false);
+        emit ServiceOwnershipTransferStarted(id, alice, bob);
+        registry.transferServiceOwnership(id, bob);
+
+        assertEq(registry.pendingServiceOwner(id), bob);
+        assertEq(registry.getService(id).owner, alice, "owner not rotated before accept");
+
+        vm.prank(bob);
+        vm.expectEmit(true, true, true, false);
+        emit ServiceOwnershipTransferred(id, alice, bob);
+        registry.acceptServiceOwnership(id);
+
+        assertEq(registry.getService(id).owner, bob);
+        assertEq(registry.pendingServiceOwner(id), address(0));
+    }
+
+    function test_transferServiceOwnership_appendsToNewOwner() public {
+        bytes32 id = _register(alice, "https://a.example");
+        vm.prank(alice);
+        registry.transferServiceOwnership(id, bob);
+        vm.prank(bob);
+        registry.acceptServiceOwnership(id);
+
+        bytes32[] memory bobsServices = registry.getOwnerServices(bob);
+        assertEq(bobsServices.length, 1);
+        assertEq(bobsServices[0], id);
+
+        // Old owner's array still references id by design — indexers read
+        // current ownership from `services[id].owner`, not `ownerServices[old]`.
+        bytes32[] memory alicesServices = registry.getOwnerServices(alice);
+        assertEq(alicesServices.length, 1);
+        assertEq(alicesServices[0], id);
+    }
+
+    function test_transferServiceOwnership_nonOwnerReverts() public {
+        bytes32 id = _register(alice, "https://a.example");
+        vm.prank(bob);
+        vm.expectRevert("Not service owner");
+        registry.transferServiceOwnership(id, bob);
+    }
+
+    function test_transferServiceOwnership_adminCannot() public {
+        // Admin can update tiers and deactivate, but cannot reassign ownership.
+        bytes32 id = _register(alice, "https://a.example");
+        vm.prank(admin);
+        vm.expectRevert("Not service owner");
+        registry.transferServiceOwnership(id, bob);
+    }
+
+    function test_transferServiceOwnership_zeroAddressReverts() public {
+        bytes32 id = _register(alice, "https://a.example");
+        vm.prank(alice);
+        vm.expectRevert("Zero address");
+        registry.transferServiceOwnership(id, address(0));
+    }
+
+    function test_transferServiceOwnership_nonexistentReverts() public {
+        vm.prank(alice);
+        vm.expectRevert("Service does not exist");
+        registry.transferServiceOwnership(bytes32(uint256(0xdead)), bob);
+    }
+
+    function test_acceptServiceOwnership_wrongCallerReverts() public {
+        bytes32 id = _register(alice, "https://a.example");
+        vm.prank(alice);
+        registry.transferServiceOwnership(id, bob);
+
+        vm.prank(address(0xF00D));
+        vm.expectRevert("Not pending owner");
+        registry.acceptServiceOwnership(id);
+    }
+
+    function test_transferServiceOwnership_overwritePending() public {
+        bytes32 id = _register(alice, "https://a.example");
+
+        vm.prank(alice);
+        registry.transferServiceOwnership(id, bob);
+        assertEq(registry.pendingServiceOwner(id), bob);
+
+        // Owner can re-target the pending transfer before acceptance.
+        address otherCandidate = address(0xF00D);
+        vm.prank(alice);
+        registry.transferServiceOwnership(id, otherCandidate);
+        assertEq(registry.pendingServiceOwner(id), otherCandidate);
+
+        // Original nominee can no longer accept.
+        vm.prank(bob);
+        vm.expectRevert("Not pending owner");
+        registry.acceptServiceOwnership(id);
     }
 }

@@ -3,7 +3,7 @@
 ## Automated Analysis
 
 ### Foundry Test Suite
-- 39 tests passing (20 Escrow, 19 Registry)
+- 54 tests passing (27 Escrow, 27 Registry)
 - 256-run fuzz suite on payment routing (`testFuzz_routePayment_splitArithmetic`)
 - Run: `forge test -vvv`
 
@@ -11,29 +11,23 @@
 
 Run: `slither src/ --print human-summary`
 
-**Summary (src/ — 3 contracts, 170 SLOC):**
+**Summary after pragma pin to `=0.8.28` (src/ — 3 contracts, 205 SLOC):**
 - High: 0
 - Medium: 0
-- Low: 3
-- Informational: 1
+- Low: 7
+- Informational: 0
 
-**Escrow.sol — 1 finding:**
+All 7 Low findings are the same `timestamp` detector false positive: Slither flags
+any address comparison on a struct slot whose initialization touched `block.timestamp`
+(via `services[id].registeredAt`). These checks are owner/existence checks, not
+timestamp-dependent comparisons. The `serviceCount` nonce already guarantees
+serviceId uniqueness — the timestamp value is not a security boundary.
 
-| Severity | Detector | Finding | Status |
-|---|---|---|---|
-| Informational | `solc-version` | `^0.8.20` pragma includes compiler versions with known bugs (VerbatimInvalidDeduplication, FullInlinerNonExpressionSplitArgumentEvaluationOrder, MissingSideEffectsOnSelectorAccess) | Accepted — none of these bugs affect our contracts; will pin to `=0.8.28` before mainnet |
-
-**Registry.sol — 4 findings:**
-
-| Severity | Detector | Finding | Status |
-|---|---|---|---|
-| Low | `timestamp` | `block.timestamp` used in `registerService` serviceId derivation — Slither flags comparisons that use the storage slot written with this value | False positive — timestamp is a uniqueness nonce, not a security boundary; collision check (`owner == address(0)`) is sound |
-| Low | `timestamp` | `updateTier` existence check uses slot derived from timestamp | False positive — same as above |
-| Low | `timestamp` | `deactivateService` existence + auth checks use slot derived from timestamp | False positive — same as above |
-| Informational | `solc-version` | `^0.8.20` pragma (same as Escrow) | Accepted — same note |
+The previous Informational `solc-version` finding was resolved by pinning pragma
+to `=0.8.28` (no known severe bugs in this version).
 
 **Action items from Slither:**
-- [ ] Pin pragma to `=0.8.28` in both contracts before mainnet deployment
+- [x] Pin pragma to `=0.8.28` (resolved 2026-04-26)
 
 ### Aderyn Analysis (April 2026)
 
@@ -45,7 +39,24 @@ cd contracts/base && aderyn .
 
 ---
 
-## Opus 4.7 Security Review (April 2026)
+## Opus 4.7 Follow-up Audit (2026-04-26)
+
+After the initial Opus 4.7 review (9 issues, all resolved — see below), a deeper
+audit identified 3 Medium and 5 Low operational-hardening issues. All Mediums and
+the deployment-related Low were resolved:
+
+| ID | Severity | Issue | Resolution |
+|---|---|---|---|
+| M-1 | Medium | Stuck USDC has no rescue path — non-USDC tokens accidentally sent to Escrow are permanently locked | **Fixed**: added `rescueToken(address, address)` (Escrow.sol). Refuses to rescue USDC to preserve non-custodial property. |
+| M-2 | Medium | Service ownership cannot be transferred — losing a service-owner key permanently bricks the service | **Fixed**: added two-step `transferServiceOwnership` / `acceptServiceOwnership` (Registry.sol). |
+| M-3 | Medium | Fee recipient DoS — admin could brick the rail by setting `feeRecipient` to a USDC-blacklisted or otherwise non-receiving address | **Fixed**: `updateFeeRecipient` now probes the recipient with `IERC20(usdc).transfer(newRecipient, 0)` before committing. |
+| L-1 | Low | No admin renunciation path | Deferred — `transferAdmin(address(0))` reverts; can be addressed in a future contract revision if full decentralization is needed |
+| L-2 | Low | No timelock on sensitive admin operations | **Fixed (deployment-only)**: added `script/Deploy.s.sol` that supports `TIMELOCK_ADDRESS` env var and initiates `transferAdmin` to a timelock at deploy time |
+| L-3 | Low | `getOwnerServices` returns unbounded array | Deferred — UX risk only, not a security risk |
+| L-4 | Low | Storage strings have no length cap in Registry | Deferred — gas griefing on Base is bounded by L1 cost |
+| L-5 | Low | `block.timestamp` in serviceId derivation is redundant | Deferred — would require a migration; Slither false positives documented |
+
+## Original Opus 4.7 Security Review (April 2026)
 
 9 issues identified and resolved prior to testnet deployment:
 

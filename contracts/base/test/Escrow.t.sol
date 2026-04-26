@@ -5,7 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {WayforthEscrow} from "../src/Escrow.sol";
 
 /// @dev Minimal ERC20 used to simulate USDC under Foundry. Six decimals to match
-///      Circle USDC on Base.
+///      Circle USDC on Base. Includes blacklist support to simulate Circle's
+///      compliance behavior — used to test the M-3 probe.
 contract MockUSDC {
     string public constant name = "USD Coin";
     string public constant symbol = "USDC";
@@ -13,6 +14,7 @@ contract MockUSDC {
 
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
+    mapping(address => bool) public blacklisted;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -22,6 +24,10 @@ contract MockUSDC {
         emit Transfer(address(0), to, amount);
     }
 
+    function setBlacklisted(address who, bool isBlacklisted) external {
+        blacklisted[who] = isBlacklisted;
+    }
+
     function approve(address spender, uint256 amount) external returns (bool) {
         allowance[msg.sender][spender] = amount;
         emit Approval(msg.sender, spender, amount);
@@ -29,6 +35,7 @@ contract MockUSDC {
     }
 
     function transfer(address to, uint256 amount) external returns (bool) {
+        require(!blacklisted[msg.sender] && !blacklisted[to], "blacklisted");
         require(balanceOf[msg.sender] >= amount, "balance");
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
@@ -37,6 +44,7 @@ contract MockUSDC {
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(!blacklisted[from] && !blacklisted[to], "blacklisted");
         uint256 a = allowance[from][msg.sender];
         require(a >= amount, "allowance");
         require(balanceOf[from] >= amount, "balance");
@@ -73,6 +81,7 @@ contract EscrowTest is Test {
         uint256 netAmount
     );
     event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -264,6 +273,74 @@ contract EscrowTest is Test {
         escrow.acceptAdmin();
     }
 
+    // --- updateFeeRecipient: M-3 probe ---
+
+    function test_updateFeeRecipient_blacklistedRecipientReverts() public {
+        // Simulates Circle blacklisting the proposed fee recipient. Without the
+        // probe, the admin would silently set a recipient that bricks every
+        // subsequent routePayment until reverted.
+        address newRecipient = address(0xF002);
+        usdc.setBlacklisted(newRecipient, true);
+        vm.prank(admin);
+        vm.expectRevert("blacklisted");
+        escrow.updateFeeRecipient(newRecipient);
+        assertEq(escrow.feeRecipient(), feeRecipient, "feeRecipient unchanged on probe failure");
+    }
+
+    function test_updateFeeRecipient_eoaRecipientPasses() public {
+        address newRecipient = address(0xF002);
+        vm.prank(admin);
+        escrow.updateFeeRecipient(newRecipient);
+        assertEq(escrow.feeRecipient(), newRecipient);
+    }
+
+    // --- rescueToken: M-1 ---
+
+    function test_rescueToken_sweepsNonUsdc() public {
+        MockUSDC other = new MockUSDC();
+        other.mint(address(escrow), 12_345);
+
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, true);
+        emit TokenRescued(address(other), outsider, 12_345);
+        escrow.rescueToken(address(other), outsider);
+
+        assertEq(other.balanceOf(outsider), 12_345);
+        assertEq(other.balanceOf(address(escrow)), 0);
+    }
+
+    function test_rescueToken_usdcReverts() public {
+        // Even if USDC ends up stuck in the contract, admin cannot drain it.
+        // Preserves the non-custodial invariant on the principal token.
+        usdc.mint(address(escrow), 1_000_000);
+        vm.prank(admin);
+        vm.expectRevert("Cannot rescue USDC");
+        escrow.rescueToken(address(usdc), outsider);
+    }
+
+    function test_rescueToken_nonAdminReverts() public {
+        MockUSDC other = new MockUSDC();
+        other.mint(address(escrow), 1_000);
+        vm.prank(outsider);
+        vm.expectRevert("Only admin");
+        escrow.rescueToken(address(other), outsider);
+    }
+
+    function test_rescueToken_zeroAddressReverts() public {
+        MockUSDC other = new MockUSDC();
+        other.mint(address(escrow), 1_000);
+        vm.prank(admin);
+        vm.expectRevert("Zero address");
+        escrow.rescueToken(address(other), address(0));
+    }
+
+    function test_rescueToken_emptyBalanceReverts() public {
+        MockUSDC other = new MockUSDC();
+        vm.prank(admin);
+        vm.expectRevert("Nothing to rescue");
+        escrow.rescueToken(address(other), outsider);
+    }
+
     // --- fuzz: split arithmetic holds for any valid amount ---
 
     function testFuzz_routePayment_splitArithmetic(uint256 amount) public {
@@ -281,3 +358,4 @@ contract EscrowTest is Test {
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
 }
+

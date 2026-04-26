@@ -4,6 +4,7 @@ pragma solidity =0.8.28;
 interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function transfer(address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
 }
 
 /// @title WayforthEscrow
@@ -35,6 +36,7 @@ contract WayforthEscrow {
     event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed oldAdmin, address indexed newAdmin);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
 
     modifier onlyAdmin() {
         require(msg.sender == admin, "Only admin");
@@ -90,12 +92,30 @@ contract WayforthEscrow {
         emit PaymentRouted(serviceId, msg.sender, serviceOwner, amount, feeAmount, netAmount);
     }
 
+    /// @notice Update the fee recipient. Probes the new recipient with a zero-value
+    ///         USDC transfer to ensure it can receive — guards against bricking
+    ///         the payment rail by setting `feeRecipient` to a contract that
+    ///         reverts on transfer (M-3 from Opus 4.7 audit).
     function updateFeeRecipient(address newRecipient) external onlyAdmin {
         require(newRecipient != address(0), "Zero address");
         require(newRecipient != address(this), "Self as recipient");
+        require(IERC20(usdc).transfer(newRecipient, 0), "Recipient cannot receive");
         address old = feeRecipient;
         feeRecipient = newRecipient;
         emit FeeRecipientUpdated(old, newRecipient);
+    }
+
+    /// @notice Rescue tokens accidentally sent to this contract. Cannot rescue
+    ///         USDC — that would break the non-custodial property of the
+    ///         payment rail. For all other tokens, sweeps the full balance to
+    ///         `to`. (M-1 from Opus 4.7 audit.)
+    function rescueToken(address token, address to) external onlyAdmin {
+        require(token != usdc, "Cannot rescue USDC");
+        require(to != address(0), "Zero address");
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        require(bal > 0, "Nothing to rescue");
+        require(IERC20(token).transfer(to, bal), "Rescue transfer failed");
+        emit TokenRescued(token, to, bal);
     }
 
     /// @notice Two-step admin rotation: current admin nominates, nominee accepts.

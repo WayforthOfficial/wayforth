@@ -18,6 +18,7 @@ contract WayforthRegistry {
 
     mapping(bytes32 => Service) public services;
     mapping(address => bytes32[]) public ownerServices;
+    mapping(bytes32 => address) public pendingServiceOwner;
 
     address public admin;
     address public pendingAdmin;
@@ -28,6 +29,12 @@ contract WayforthRegistry {
     event ServiceDeactivated(bytes32 indexed serviceId);
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed oldAdmin, address indexed newAdmin);
+    event ServiceOwnershipTransferStarted(
+        bytes32 indexed serviceId, address indexed currentOwner, address indexed pendingOwner
+    );
+    event ServiceOwnershipTransferred(
+        bytes32 indexed serviceId, address indexed oldOwner, address indexed newOwner
+    );
 
     modifier onlyAdmin() {
         require(msg.sender == admin, "Only admin");
@@ -84,6 +91,31 @@ contract WayforthRegistry {
         require(msg.sender == s.owner || msg.sender == admin, "Not authorized");
         s.active = false;
         emit ServiceDeactivated(serviceId);
+    }
+
+    /// @notice Two-step service ownership transfer: current owner nominates,
+    ///         nominee accepts. (M-2 from Opus 4.7 audit.)
+    /// @dev    `ownerServices[oldOwner]` retains the serviceId after transfer —
+    ///         indexers should resolve current ownership via `services[id].owner`,
+    ///         not by trusting `ownerServices[old]`. Documented to avoid an O(n)
+    ///         removal scan in storage.
+    function transferServiceOwnership(bytes32 serviceId, address newOwner) external {
+        Service storage s = services[serviceId];
+        require(s.owner != address(0), "Service does not exist");
+        require(msg.sender == s.owner, "Not service owner");
+        require(newOwner != address(0), "Zero address");
+        pendingServiceOwner[serviceId] = newOwner;
+        emit ServiceOwnershipTransferStarted(serviceId, msg.sender, newOwner);
+    }
+
+    function acceptServiceOwnership(bytes32 serviceId) external {
+        require(msg.sender == pendingServiceOwner[serviceId], "Not pending owner");
+        Service storage s = services[serviceId];
+        address oldOwner = s.owner;
+        s.owner = msg.sender;
+        pendingServiceOwner[serviceId] = address(0);
+        ownerServices[msg.sender].push(serviceId);
+        emit ServiceOwnershipTransferred(serviceId, oldOwner, msg.sender);
     }
 
     function getService(bytes32 serviceId) external view returns (Service memory) {
