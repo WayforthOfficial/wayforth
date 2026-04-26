@@ -44,8 +44,51 @@ def _keyword_rank(intent: str, services: list[dict]) -> list[dict]:
 _HAIKU_CANDIDATE_LIMIT = 20  # pre-filter before sending to Haiku
 
 
-def compute_wri(service: dict, base_score: float, popularity_boost: float = 0.0) -> float:
-    return base_score + popularity_boost
+def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0) -> float:
+    """
+    Wayforth Reliability Index (WRI) — composite service quality score.
+    Combines semantic relevance with reliability and usage signals.
+
+    Production scoring is handled by the WayforthRank private service (RANK_SERVICE_URL).
+    This local implementation is a reference fallback only.
+
+    Range: 0-100. Higher = more trustworthy for agent use.
+    """
+    # Base: semantic relevance (primary signal)
+    score = rank_score * 0.5
+
+    # Reliability: coverage tier bonus
+    tier = service.get("coverage_tier", 0)
+    tier_bonus = {2: 20, 1: 5}.get(min(tier, 2), 0)  # Tier 3+ capped at Tier 2 bonus
+    score += tier_bonus
+
+    # Freshness: recent probe signal
+    last_tested = service.get("last_tested_at")
+    if last_tested:
+        try:
+            from datetime import datetime, timezone, timedelta
+            from dateutil.parser import parse as parse_date
+            if isinstance(last_tested, str):
+                last_tested = parse_date(last_tested)
+            if last_tested.tzinfo is None:
+                last_tested = last_tested.replace(tzinfo=timezone.utc)
+            if last_tested > datetime.now(timezone.utc) - timedelta(hours=24):
+                score += 10
+        except Exception:
+            pass
+
+    # Stability: consecutive failure signal
+    if service.get("consecutive_failures", 1) == 0:
+        score += 10
+
+    # Protocol: institutional backing signal
+    if service.get("payment_protocol") == "x402":
+        score += 5
+
+    # Usage: popularity signal (from search_analytics)
+    score += min(popularity_boost, 5.0)
+
+    return round(min(score, 100), 1)
 
 
 async def rank_services_local(intent: str, services: list[dict], popularity_signals: dict = None) -> list[dict]:

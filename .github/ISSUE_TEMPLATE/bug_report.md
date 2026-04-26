@@ -1,15 +1,23 @@
 ---
 name: Bug report
-about: Something isn't working
+about: Something isn't working correctly
+title: '[BUG] '
+labels: bug
 ---
 
-**What happened:**
+**Describe the bug**
+A clear description of what happened.
 
-**Expected behavior:**
+**To reproduce**
+Steps to reproduce the behavior.
 
-**Steps to reproduce:**
+**Expected behavior**
+What you expected to happen.
 
-**Environment:**
-- OS:
-- Python/Node version:
-- wayforth-sdk/wayforth-mcp version:
+**Environment**
+- MCP server version: 
+- SDK version:
+- Agent runtime:
+
+**Additional context**
+Any other relevant information.
