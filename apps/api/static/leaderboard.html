@@ -86,7 +86,7 @@
           <th>Tier</th>
           <th>Category</th>
           <th>Searches (7d)</th>
-          <th>Avg Score</th>
+          <th>Payments (7d)</th>
         </tr>
       </thead>
       <tbody id="leaderboard-body">
@@ -108,7 +108,7 @@
 
         document.getElementById('total-searches').textContent = lb.total_queries?.toLocaleString() || '0';
         document.getElementById('total-services').textContent = stats.total_services?.toLocaleString() || '—';
-        document.getElementById('tier2-count').textContent = stats.by_tier?.['2'] || '—';
+        document.getElementById('tier2-count').textContent = stats.tier2_services ?? '—';
         document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
 
         const body = document.getElementById('leaderboard-body');
@@ -125,8 +125,8 @@
             <td class="service-name">${esc(s.name)}</td>
             <td><span class="tier-badge tier-${s.coverage_tier}">Tier ${s.coverage_tier}</span></td>
             <td><span class="category">${esc(s.category)}</span></td>
-            <td class="searches">${s.query_count}</td>
-            <td class="score">${s.avg_score}</td>
+            <td class="searches">${s.search_count}</td>
+            <td class="score">${s.payment_count}</td>
           </tr>
         `).join('');
       } catch(e) {
