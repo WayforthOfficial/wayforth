@@ -28,6 +28,11 @@ Then in your agent:
 - Smart contracts on Base Sepolia (Registry + Escrow, 54 tests passing)
 - API keys with free tier — 10 req/min, 1,000 searches/month
 
+**Reference implementation:**
+
+We built a research agent example that shows the full workflow — discover, rank, pay:
+https://github.com/WayforthOfficial/wayforth/blob/main/examples/research_agent.py
+
 **What makes it different from existing registries:**
 
 Most agent service registries are lists. You browse them. Wayforth is a search engine — agents describe intent in natural language and get ranked results based on reliability, not alphabetical order.

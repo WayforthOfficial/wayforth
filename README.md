@@ -101,6 +101,25 @@ npm install wayforth-sdk       # TypeScript / JavaScript
 uvx wayforth-mcp               # MCP server
 ```
 
+## Examples
+
+### Research Agent
+A complete working example — an agent that discovers and uses multiple services through Wayforth:
+
+```bash
+pip install wayforth-sdk
+python examples/research_agent.py "What are the best vector databases for RAG in 2026?"
+```
+
+See [`examples/research_agent.py`](examples/research_agent.py) for the full implementation.
+
+**What it demonstrates:**
+- Natural language service discovery across 190+ real API endpoints
+- WayforthRank scoring — best service rises to the top automatically  
+- WayforthQL structured queries with tier and protocol filters
+- Non-custodial payment calldata generation
+- The full search → pay attribution loop via query_id
+
 ## Smart Contracts (Base Sepolia)
 
 | Contract | Address |
