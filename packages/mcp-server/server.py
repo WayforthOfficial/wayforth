@@ -28,14 +28,16 @@ def _save_memory(data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
-async def _fetch_services(category: str = None) -> list[dict] | None:
+async def _fetch_services(category: str = None, tier_min: int = None, limit: int = 100) -> list[dict] | None:
     """Paginate through /services to collect all results."""
     all_results: list[dict] = []
     offset = 0
-    limit = 100
-    params: dict = {"limit": limit}
+    page_size = min(limit, 100)
+    params: dict = {"limit": page_size}
     if category:
         params["category"] = category
+    if tier_min is not None:
+        params["tier"] = tier_min
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             while True:
@@ -45,12 +47,12 @@ async def _fetch_services(category: str = None) -> list[dict] | None:
                 data = r.json()
                 page = data.get("results", [])
                 all_results.extend(page)
-                if len(all_results) >= data.get("total", 0) or not page:
+                if len(all_results) >= limit or len(all_results) >= data.get("total", 0) or not page:
                     break
-                offset += limit
+                offset += page_size
     except Exception:
         return None
-    return all_results
+    return all_results[:limit]
 
 
 def _format_ranked_service(idx: int, s: dict) -> str:
@@ -80,19 +82,22 @@ def _format_service(s: dict) -> str:
 
 
 @mcp.tool()
-async def wayforth_search(intent: str, category: str = None, limit: int = 3) -> str:
-    """Search for agent-payable services by natural language intent.
+async def wayforth_search(query: str, limit: int = 5, tier_min: int = 2, category: str = None) -> str:
+    """Search the Wayforth catalog for agent-callable services.
+    Returns services ranked by WayforthRank — combining semantic relevance,
+    reliability history, and real agent usage signals.
 
     Args:
-        intent: What you're looking for, e.g. "translate Spanish documents"
-        category: Optional filter — inference, data, or translation
-        limit: Number of results to return (default 3, max 20)
+        query: Natural language description of what your agent needs
+        limit: Number of results (default 5, max 20)
+        tier_min: Minimum coverage tier (default 2 = verified only)
+        category: Optional filter (inference/data/translation/image/code/audio/embeddings)
     """
-    params = {"q": intent, "limit": limit}
+    params = {"q": query, "limit": min(limit, 20), "tier": tier_min}
     if category:
         params["category"] = category
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(f"{API_BASE}/search", params=params)
             r.raise_for_status()
             data = r.json()
@@ -101,13 +106,25 @@ async def wayforth_search(intent: str, category: str = None, limit: int = 3) -> 
 
     results = data.get("results", [])
     if not results:
-        return f"No services found matching '{intent}'" + (
-            f" in category '{category}'" if category else ""
+        return f"No services found for '{query}'. Try broader terms or set tier_min=0."
+
+    lines = [f"Found {len(results)} services for '{query}':\n"]
+    for i, svc in enumerate(results, 1):
+        tier = svc.get("coverage_tier", 0)
+        tier_label = "✅ Tier 2 Verified" if tier >= 2 else f"Tier {tier}"
+        price = svc.get("pricing_usdc")
+        price_str = f"${price:.6f}/req" if price else "Free"
+        wri = svc.get("wri", "N/A")
+        wayforth_id = svc.get("wayforth_id", "")
+        lines.append(
+            f"{i}. {svc['name']} — Score: {svc.get('score', 0)}/100 | WRI: {wri} | {tier_label}\n"
+            f"   {svc.get('reason', svc.get('description', ''))[:120]}\n"
+            f"   Price: {price_str} | ID: {wayforth_id}\n"
+            f"   To pay: wayforth_pay(service_id='{svc.get('service_id', '')}', ...)\n"
         )
 
-    lines = [f"Top {len(results)} result(s) for \"{intent}\":\n"]
-    lines += [_format_ranked_service(i + 1, s) for i, s in enumerate(results)]
-    return "\n\n".join(lines)
+    lines.append(f"\nQuery ID: {data.get('query_id', '')} (use in wayforth_pay for conversion tracking)")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -159,13 +176,15 @@ async def wayforth_pay(
 
 
 @mcp.tool()
-async def wayforth_list(category: str = None) -> str:
-    """List services in the Wayforth catalog.
+async def wayforth_list(category: str = None, tier_min: int = 2, limit: int = 10) -> str:
+    """Browse the Wayforth service catalog.
 
     Args:
-        category: Optional filter — inference, data, or translation
+        category: Filter by category (inference/data/translation/image/code/audio/embeddings)
+        tier_min: Minimum tier (default 2 = verified only)
+        limit: Results count (default 10)
     """
-    services = await _fetch_services(category=category)
+    services = await _fetch_services(category=category, tier_min=tier_min, limit=limit)
     if services is None:
         return f"Wayforth API is not reachable at {API_BASE}."
 

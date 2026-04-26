@@ -16,8 +16,8 @@ That's it. Claude Code will restart and the eight Wayforth tools will be availab
 
 | Tool | Description |
 |---|---|
-| `wayforth_search` | Search services by natural language intent, with optional category and tier filters |
-| `wayforth_list` | List all services, optionally filtered by category |
+| `wayforth_search` | Search services by natural language — returns WRI, tier label, price/req, and payment hint |
+| `wayforth_list` | Browse catalog with optional category, tier, and limit filters |
 | `wayforth_status` | Catalog stats (counts by tier and category) and API health |
 | `wayforth_stats` | Detailed catalog statistics by tier and category |
 | `wayforth_pay` | Generate payment calldata for USDC routing through Wayforth Escrow |
