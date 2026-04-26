@@ -1007,7 +1007,7 @@ async def submit_service(request: Request, req: SubmitRequest):
             "name": req.name,
             "coverage_tier": 0,
             "message": "Service submitted successfully. Our crawler will verify it within 24 hours. You'll start at Tier 0 and be promoted automatically as uptime data accumulates.",
-            "basescan": "https://sepolia.basescan.org/address/0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7",
+            "basescan": "https://sepolia.basescan.org/address/0x55810EfB3444A693556C3f9910dbFbF2dDaC369C",
         }
     except asyncpg.UniqueViolationError:
         raise HTTPException(status_code=409, detail="A service with this endpoint URL already exists")

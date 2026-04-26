@@ -92,6 +92,22 @@ the deployment-related Low were resolved:
 
 | Contract | Address |
 |---|---|
-| WayforthRegistry | `0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7` |
-| WayforthEscrow | `0xC9945621CfefD9a15972D3f3d33e2D6f0cc3E320` |
+| WayforthRegistry | `0x55810EfB3444A693556C3f9910dbFbF2dDaC369C` |
+| WayforthEscrow | `0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809` |
 | Deployer | `0xAE99a420073780bCcd13E832222E0b07731da431` |
+
+---
+
+## Deployment History
+
+### Base Sepolia — v2 (April 26, 2026)
+Redeployed after Opus 4.7 security review. Changes: `rescueToken()`, two-step ownership transfer, `updateFeeRecipient` zero-value probe, pragma pinned to `=0.8.28`.
+- Registry: `0x55810EfB3444A693556C3f9910dbFbF2dDaC369C`
+- Escrow: `0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809`
+- Registry deploy tx: `0x8ad0969ff8b458174e89ca1fd764b1d040a03e99d170551814539711500958cc`
+- Escrow deploy tx: `0xfb99e89c969133e06f4a8ffeea409b11b0a3204bb0ba72eeddae2a819afdfa98`
+- Both contracts verified on Basescan
+
+### Base Sepolia — v1 (April 24, 2026) — DEPRECATED
+- Registry: `0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7`
+- Escrow: `0xC9945621CfefD9a15972D3f3d33e2D6f0cc3E320`

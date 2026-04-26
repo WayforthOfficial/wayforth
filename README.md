@@ -105,8 +105,8 @@ uvx wayforth-mcp               # MCP server
 
 | Contract | Address |
 |----------|---------|
-| WayforthRegistry | `0xE0596DbF37Fd9e3e5E39822602732CC0865E49C7` |
-| WayforthEscrow | `0xC9945621CfefD9a15972D3f3d33e2D6f0cc3E320` |
+| WayforthRegistry | `0x55810EfB3444A693556C3f9910dbFbF2dDaC369C` |
+| WayforthEscrow | `0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809` |
 
 39 Foundry tests passing. 256-run fuzz suite. Mainnet deployment follows independent security audit.
 
