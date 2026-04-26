@@ -673,6 +673,7 @@ async def list_services(
     category: str = None,
     tier: int = None,
     protocol: str = None,
+    real_only: bool = True,
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     sort: str = "tier",
@@ -681,6 +682,13 @@ async def list_services(
     conditions = ["1=1"]
     params = []
     idx = 1
+
+    if real_only:
+        conditions.append("""(
+            endpoint_url NOT ILIKE '%github.com%'
+            AND endpoint_url NOT ILIKE '%glama.ai%'
+            AND endpoint_url NOT ILIKE '%smithery%'
+        )""")
 
     if category:
         conditions.append(f"category = ${idx}")
@@ -719,7 +727,7 @@ async def list_services(
         "total": total,
         "limit": limit,
         "offset": offset,
-        "filters": {"category": category, "tier": tier, "protocol": protocol},
+        "filters": {"category": category, "tier": tier, "protocol": protocol, "real_only": real_only},
     }
 
 
@@ -801,29 +809,34 @@ async def get_stats(request: Request):
 
 @app.get("/services/count")
 @limiter.limit("30/minute")
-async def service_count(request: Request):
+async def service_count(request: Request, db=Depends(get_db)):
     """Live service counts — use this to display accurate numbers on the website."""
     try:
-        async with app.state.pool.acquire() as conn:
-            row = await conn.fetchrow("""
-                SELECT
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
-                    COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3,
-                    COUNT(*) FILTER (WHERE payment_protocol = 'x402') as x402
-                FROM services
-            """)
+        row = await db.fetchrow("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
+                COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3,
+                COUNT(*) FILTER (WHERE payment_protocol = 'x402') as x402,
+                COUNT(*) FILTER (
+                    WHERE endpoint_url NOT ILIKE '%github.com%'
+                    AND endpoint_url NOT ILIKE '%glama.ai%'
+                    AND endpoint_url NOT ILIKE '%smithery%'
+                ) as real_apis
+            FROM services
+        """)
     except Exception as e:
         logger.error(f"DB error: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     return {
         "total": row["total"],
+        "real_apis": row["real_apis"],
         "tier2": row["tier2"],
         "tier3": row["tier3"],
         "x402": row["x402"],
         "display": {
-            "total": f"{row['total']:,}+",
+            "total": f"{row['real_apis']:,}+",
             "tier2": f"{row['tier2']}+",
         },
     }
