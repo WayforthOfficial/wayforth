@@ -238,6 +238,7 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:5173",
         "http://localhost:8080",
+        "*",  # MCP server calls from any agent runtime
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -275,11 +276,26 @@ def health(request: Request):
 @app.get("/status", tags=["System"])
 async def system_status(db=Depends(get_db)):
     """Public system status — uptime, service count, last health check."""
-    stats = await db.fetchrow("SELECT COUNT(*) as total FROM services WHERE coverage_tier >= 2")
+    stats = await db.fetchrow("""
+        SELECT
+            COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2_services,
+            COUNT(*) as total_services,
+            COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3_services
+        FROM services
+    """)
+    searches = await db.fetchval("""
+        SELECT COUNT(*) FROM search_analytics
+        WHERE created_at > NOW() - INTERVAL '24h'
+    """)
     return {
         "status": "operational",
         "version": "0.1.5",
-        "tier2_services": stats["total"],
+        "services": {
+            "total": stats["total_services"],
+            "tier2": stats["tier2_services"],
+            "tier3": stats["tier3_services"],
+        },
+        "searches_24h": searches,
         "api": "operational",
         "database": "operational",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1134,6 +1150,41 @@ async def admin_stats(request: Request, key: str = ""):
                 "escrow": ESCROW_ADDRESS,
             },
         },
+    }
+
+
+@app.get("/admin/health")
+@limiter.limit("5/minute")
+async def admin_health(request: Request, key: str = "", db=Depends(get_db)):
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    checks = {}
+
+    try:
+        await db.fetchval("SELECT 1")
+        checks["database"] = "ok"
+    except Exception:
+        checks["database"] = "error"
+
+    for table in ["services", "search_analytics", "search_outcomes",
+                  "agent_identities", "api_keys", "service_score_history"]:
+        try:
+            count = await db.fetchval(f"SELECT COUNT(*) FROM {table}")
+            checks[table] = count
+        except Exception:
+            checks[table] = "error"
+
+    recent = await db.fetchval("""
+        SELECT COUNT(*) FROM search_analytics
+        WHERE created_at > NOW() - INTERVAL '1 hour'
+    """)
+    checks["searches_last_hour"] = recent
+
+    return {
+        "status": "operational" if checks["database"] == "ok" else "degraded",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
     }
 
 

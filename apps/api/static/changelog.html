@@ -80,13 +80,21 @@
         <span class="version-date">April 25, 2026</span>
       </div>
       <ul class="change-list">
-        <li>Wayforth Identity — agent registration, trust scores, reputation tiers (elite/trusted/established/new)</li>
+        <li>Wayforth Identity v1 — agent trust scores, reputation tiers: elite / trusted / established / new / unknown</li>
         <li><code>wayforth_identity</code> — 9th MCP tool</li>
         <li><code>query_id</code> on all /search responses — links searches to payments</li>
         <li>pay→search conversion tracking — closes the attribution loop</li>
-        <li>/search/suggestions — real usage patterns from agent queries</li>
-        <li>WayforthRank popularity signal from real 7-day usage data</li>
-        <li>SDK v0.1.2 — <code>get_identity</code>, <code>register_identity</code>, <code>query</code>, <code>get_similar</code>, <code>get_tiers</code></li>
+        <li>/search/suggestions — real-time query patterns from agent usage</li>
+        <li>WayforthRank popularity + payment conversion signals</li>
+        <li>Tiered routing fees: Free 1.5% / Starter 1.25% / Pro 1.0% / Enterprise 0.75%</li>
+        <li>Auto-probe on service submission — Tier 1 within seconds</li>
+        <li>/services/categories — catalog breakdown by category</li>
+        <li>/services filtering — category, tier, protocol, sort</li>
+        <li>/services/{id}/wri — WRI trend endpoint</li>
+        <li>/admin/stats — platform metrics</li>
+        <li>/health-page — live service status</li>
+        <li>SDK v0.1.2 — <code>identity</code>, <code>WayforthQL</code>, <code>similar</code>, <code>tiers</code> methods</li>
+        <li>20 curated services added — Groq, DeepL, ElevenLabs, E2B, Stability AI, and more</li>
       </ul>
     </div>
 

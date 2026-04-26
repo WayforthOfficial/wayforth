@@ -246,6 +246,9 @@
     render(d, key);
     loadAnalytics(key);
     loadWRIDistribution();
+    loadWayforthRankSignals(key);
+    loadCatalogHealth(key);
+    loadActivityFeed(key);
   }
 
   function tier_color(t) {
@@ -515,6 +518,108 @@
         <div class="card" style="color:#f87171;font-size:13px">Graph data unavailable.</div>
       `;
     }
+  }
+
+  async function loadWayforthRankSignals(key) {
+    const content = document.getElementById('content');
+    const section = document.createElement('div');
+    section.id = 'wrank-section';
+    section.innerHTML = `<p class="section-title">WayforthRank Signals</p><div style="color:#64748b;font-size:13px;padding:12px 0"><span class="spinner"></span>Loading rank signals…</div>`;
+    content.appendChild(section);
+    try {
+      const res = await fetch(`/analytics?key=${encodeURIComponent(key)}`);
+      if (!res.ok) throw new Error('failed');
+      const d = await res.json();
+      const cr = d.conversion_rate != null ? d.conversion_rate.toFixed(1) + '%' : '—';
+      section.innerHTML = `
+        <p class="section-title">WayforthRank Signals</p>
+        <div class="grid grid-4">
+          <div class="card"><div class="card-label">Total Searches</div><div class="card-value">${(d.total_searches||0).toLocaleString()}</div><div class="card-sub">last 7 days</div></div>
+          <div class="card"><div class="card-label">Conversion Rate</div><div class="card-value">${cr}</div><div class="card-sub">search → payment</div></div>
+          <div class="card"><div class="card-label">Unique Sessions</div><div class="card-value">${(d.unique_sessions||0).toLocaleString()}</div><div class="card-sub">distinct agents</div></div>
+          <div class="card"><div class="card-label">Return Sessions</div><div class="card-value">${(d.return_sessions||0).toLocaleString()}</div><div class="card-sub">seen before</div></div>
+        </div>
+      `;
+    } catch(e) {
+      section.innerHTML = `<p class="section-title">WayforthRank Signals</p><div class="card" style="color:#f87171;font-size:13px">Signals unavailable.</div>`;
+    }
+  }
+
+  async function loadCatalogHealth(key) {
+    const content = document.getElementById('content');
+    const section = document.createElement('div');
+    section.id = 'catalog-section';
+    section.innerHTML = `<p class="section-title">Catalog Health</p><div style="color:#64748b;font-size:13px;padding:12px 0"><span class="spinner"></span>Loading catalog health…</div>`;
+    content.appendChild(section);
+    try {
+      const [catRes, statusRes] = await Promise.all([
+        fetch('/services/categories'),
+        fetch('/status'),
+      ]);
+      if (!catRes.ok) throw new Error('failed');
+      const catData = await catRes.json();
+      const status = statusRes.ok ? await statusRes.json() : null;
+      const cats = catData.categories || [];
+      const totalSvcs = status?.services?.total ?? cats.reduce((a,c) => a+(c.count||0), 0);
+      const tier2 = status?.services?.tier2 ?? '—';
+      const catRows = cats.map(c => `
+        <div class="cat-row">
+          <span class="cat-name">${c.category}</span>
+          <div class="cat-bar-wrap"><div class="cat-bar" style="width:${Math.round((c.count||0)/Math.max(totalSvcs,1)*100)}%"></div></div>
+          <span class="cat-count">${c.count}</span>
+        </div>
+      `).join('') || '<div style="color:#64748b;font-size:13px">No categories yet.</div>';
+      section.innerHTML = `
+        <p class="section-title">Catalog Health</p>
+        <div class="grid grid-2">
+          <div class="card">
+            <div class="card-label">Tier 2+ Services</div>
+            <div class="card-value">${tier2}</div>
+            <div class="card-sub">of ${totalSvcs} total in catalog</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Category Breakdown</div>
+            <div class="cat-grid" style="margin-top:8px">${catRows}</div>
+          </div>
+        </div>
+      `;
+    } catch(e) {
+      section.innerHTML = `<p class="section-title">Catalog Health</p><div class="card" style="color:#f87171;font-size:13px">Catalog data unavailable.</div>`;
+    }
+  }
+
+  async function loadActivityFeed(key) {
+    const content = document.getElementById('content');
+    const section = document.createElement('div');
+    section.id = 'activity-section';
+    content.appendChild(section);
+
+    async function refresh() {
+      try {
+        const res = await fetch('/search/suggestions');
+        if (!res.ok) throw new Error('failed');
+        const d = await res.json();
+        const suggestions = d.suggestions || [];
+        const sourceTag = d.source === 'curated'
+          ? `<span style="color:#64748b;font-size:11px"> (curated fallback)</span>`
+          : `<span style="color:#4ade80;font-size:11px"> (live)</span>`;
+        const items = suggestions.slice(0, 15).map(q => `
+          <div style="padding:6px 0;border-bottom:1px solid #1e293b;font-size:13px;color:#e2e8f0">${q}</div>
+        `).join('') || '<div style="color:#64748b;font-size:13px">No queries yet.</div>';
+        section.innerHTML = `
+          <p class="section-title">Recent Activity Feed${sourceTag} <span style="font-size:11px;color:#64748b;font-weight:400;text-transform:none;letter-spacing:0">— refreshes every 30s</span></p>
+          <div class="card">
+            <div class="card-label" style="margin-bottom:12px">What agents are searching for</div>
+            ${items}
+          </div>
+        `;
+      } catch(e) {
+        section.innerHTML = `<p class="section-title">Recent Activity Feed</p><div class="card" style="color:#f87171;font-size:13px">Activity feed unavailable.</div>`;
+      }
+    }
+
+    await refresh();
+    setInterval(refresh, 30000);
   }
 
   async function loadWRIDistribution() {
