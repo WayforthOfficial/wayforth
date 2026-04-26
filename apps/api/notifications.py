@@ -106,3 +106,56 @@ def send_tier3_application_notification(to_email: str, service_name: str, compan
     except Exception as e:
         logger.error(f"Tier3 email failed: {e}")
         return False
+
+
+def send_welcome_email(to_email: str, api_key_prefix: str, tier: str) -> bool:
+    if not resend.api_key:
+        return False
+    try:
+        tier_benefits = {
+            "free": "10 req/min · 1,000 searches/month · 1.5% routing fee",
+            "starter": "30 req/min · 10,000 searches/month · 1.25% routing fee",
+            "pro": "100 req/min · 100,000 searches/month · 1.0% routing fee",
+            "enterprise": "500 req/min · Unlimited · 0.75% routing fee",
+        }
+        resend.Emails.send({
+            "from": FROM_EMAIL,
+            "to": to_email,
+            "subject": "Your Wayforth API Key is Ready",
+            "html": f"""
+            <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0F172A;color:#E2E8F0;padding:40px;border-radius:12px;">
+                <h1 style="color:#4F46E5;margin:0 0 8px">Wayforth</h1>
+                <p style="color:#64748B;margin:0 0 32px;font-size:13px">The search engine and payment rail for AI agents</p>
+
+                <h2 style="color:#E2E8F0">Your API key is ready.</h2>
+                <p>Key prefix: <code style="background:#1E293B;padding:4px 8px;border-radius:4px;color:#4F46E5">{api_key_prefix}...</code></p>
+                <p>Tier: <strong>{tier.capitalize()}</strong> — {tier_benefits.get(tier, '')}</p>
+
+                <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0">
+                    <p style="color:#64748B;font-size:12px;margin:0 0 8px">QUICK START</p>
+                    <code style="color:#4F46E5;font-size:13px">uvx wayforth-mcp</code>
+                </div>
+
+                <p><strong>What you can do now:</strong></p>
+                <ul style="color:#94A3B8">
+                    <li>Search 2,354+ agent-callable services</li>
+                    <li>Get non-custodial payment calldata for any service</li>
+                    <li>Use WayforthQL for structured queries</li>
+                    <li>Track your usage at /keys/usage</li>
+                </ul>
+
+                <p style="margin-top:32px">
+                    <a href="https://wayforth.io/demo" style="background:#4F46E5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Try Live Demo →</a>
+                </p>
+
+                <p style="margin-top:32px;color:#64748B;font-size:13px">
+                    Docs: <a href="https://api-production-fd71.up.railway.app/docs" style="color:#4F46E5">API Reference</a> ·
+                    GitHub: <a href="https://github.com/WayforthOfficial/wayforth" style="color:#4F46E5">WayforthOfficial/wayforth</a>
+                </p>
+            </div>
+            """,
+        })
+        return True
+    except Exception as e:
+        logger.error(f"Welcome email failed: {e}")
+        return False

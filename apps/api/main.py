@@ -27,7 +27,7 @@ from web3 import Web3
 
 from chain import ESCROW_ADDRESS, PAYMENT_INFO, REGISTRY_ADDRESS, build_payment_calldata, get_chain_stats
 from db import check_db
-from notifications import send_submission_confirmation, send_tier3_application_notification
+from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
 
 load_dotenv()
@@ -741,6 +741,35 @@ async def list_categories(request: Request, db=Depends(get_db)):
     return {"categories": [dict(r) for r in rows], "total": len(rows)}
 
 
+@app.get("/services/featured")
+@limiter.limit("30/minute")
+async def featured_services(request: Request, db=Depends(get_db)):
+    """Featured services — one per category, Tier 2 only, best WRI score. Powers the homepage inline search default state."""
+    try:
+        rows = await db.fetch("""
+            WITH ranked AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY category ORDER BY coverage_tier DESC, name ASC
+                ) as rn
+                FROM services
+                WHERE coverage_tier >= 2
+            )
+            SELECT name, description, category, pricing_usdc,
+                   coverage_tier, payment_protocol,
+                   encode(sha256(endpoint_url::bytea), 'hex') as service_id
+            FROM ranked WHERE rn = 1
+            ORDER BY category
+        """)
+    except Exception as e:
+        logger.error(f"DB error in featured_services: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    return {
+        "featured": [dict(r) for r in rows],
+        "total": len(rows),
+        "note": "One Tier 2 verified service per category",
+    }
+
+
 @app.get("/stats")
 @limiter.limit("30/minute")
 async def get_stats(request: Request):
@@ -1002,12 +1031,21 @@ async def submit_service(request: Request, req: SubmitRequest):
                 send_submission_confirmation,
                 req.contact_email, req.name, str(service_id), req.endpoint_url,
             ))
+        await asyncio.sleep(3)
+        async with app.state.pool.acquire() as conn2:
+            service = await conn2.fetchrow("""
+                SELECT coverage_tier, last_tested_at, consecutive_failures
+                FROM services WHERE id = $1::uuid
+            """, str(service_id))
+        tier = service["coverage_tier"] if service else 0
         return {
-            "id": str(service_id),
+            "status": "submitted",
+            "service_id": str(service_id),
             "name": req.name,
-            "coverage_tier": 0,
-            "message": "Service submitted successfully. Our crawler will verify it within 24 hours. You'll start at Tier 0 and be promoted automatically as uptime data accumulates.",
-            "basescan": "https://sepolia.basescan.org/address/0x55810EfB3444A693556C3f9910dbFbF2dDaC369C",
+            "initial_tier": tier,
+            "message": f"Service submitted and probed. Current tier: {tier}. Tier 2 requires 90%+ uptime over 7 days.",
+            "leaderboard_url": "https://wayforth.io/leaderboard",
+            "tier3_url": "https://wayforth.io/tier3",
         }
     except asyncpg.UniqueViolationError:
         raise HTTPException(status_code=409, detail="A service with this endpoint URL already exists")
@@ -1233,6 +1271,68 @@ async def changelog_page():
 @app.get("/pricing", include_in_schema=False)
 async def pricing_page():
     return FileResponse("static/pricing.html")
+
+
+@app.get("/pricing/json")
+@limiter.limit("30/minute")
+async def pricing_json(request: Request):
+    """Machine-readable pricing data."""
+    return {
+        "tiers": [
+            {
+                "name": "Free",
+                "price_usd": 0,
+                "price_monthly_usd": 0,
+                "rate_limit_per_minute": 10,
+                "monthly_quota": 1000,
+                "routing_fee_pct": 1.5,
+                "routing_fee_bps": 150,
+                "features": ["search", "query", "pay", "services", "memory", "identity"],
+                "cta": "Get Free Key",
+                "cta_url": "https://api-production-fd71.up.railway.app/keys/create",
+            },
+            {
+                "name": "Starter",
+                "price_monthly_usd": 29,
+                "rate_limit_per_minute": 30,
+                "monthly_quota": 10000,
+                "routing_fee_pct": 1.25,
+                "routing_fee_bps": 125,
+                "features": ["search", "query", "pay", "services", "memory", "identity", "intelligence", "webhooks"],
+                "cta": "Contact Us",
+                "cta_url": "https://wayforth.io/contact",
+            },
+            {
+                "name": "Pro",
+                "price_monthly_usd": 149,
+                "rate_limit_per_minute": 100,
+                "monthly_quota": 100000,
+                "routing_fee_pct": 1.0,
+                "routing_fee_bps": 100,
+                "features": ["search", "query", "pay", "services", "memory", "identity", "intelligence", "webhooks", "history", "graph"],
+                "cta": "Contact Us",
+                "cta_url": "https://wayforth.io/contact",
+            },
+            {
+                "name": "Enterprise",
+                "price_monthly_usd": None,
+                "rate_limit_per_minute": 500,
+                "monthly_quota": -1,
+                "routing_fee_pct": 0.75,
+                "routing_fee_bps": 75,
+                "features": ["everything", "sla", "private_catalog", "dedicated_infra", "custom_probing"],
+                "cta": "Contact Us",
+                "cta_url": "https://wayforth.io/contact",
+            },
+        ],
+        "routing_fee_note": "Routing fee applies to all payment transactions. Higher tiers receive reduced fees.",
+        "contracts": {
+            "registry": "0x55810EfB3444A693556C3f9910dbFbF2dDaC369C",
+            "escrow": "0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809",
+            "network": "base-sepolia",
+            "usdc": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        },
+    }
 
 
 @app.get("/intelligence-demo", include_in_schema=False)
@@ -1795,6 +1895,11 @@ async def create_api_key(request: Request, body: ApiKeyRequest, db=Depends(get_d
         (key_hash, key_prefix, owner_email, tier, rate_limit_per_minute, monthly_quota)
         VALUES ($1, $2, $3, $4, $5, $6)
     """, key_hash, key_prefix, body.email, body.tier, limits["rpm"], limits["monthly"])
+
+    if os.getenv("RESEND_API_KEY"):
+        asyncio.create_task(asyncio.to_thread(
+            send_welcome_email, body.email, key_prefix, body.tier
+        ))
 
     return {
         "api_key": raw_key,
