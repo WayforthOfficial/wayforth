@@ -775,35 +775,27 @@ async def featured_services(request: Request, db=Depends(get_db)):
 async def get_stats(request: Request):
     try:
         async with app.state.pool.acquire() as conn:
-            total = await conn.fetchval("SELECT COUNT(*) FROM services")
-            tier_rows = await conn.fetch(
-                "SELECT coverage_tier, COUNT(*) AS cnt FROM services GROUP BY coverage_tier"
-            )
-            category_rows = await conn.fetch(
-                "SELECT category, COUNT(*) AS cnt FROM services GROUP BY category"
-            )
-            tier2_rows = await conn.fetch(
-                "SELECT name FROM services WHERE coverage_tier = 2 ORDER BY name"
-            )
-            last_updated = await conn.fetchval("SELECT MAX(created_at) FROM services")
+            row = await conn.fetchrow("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
+                    COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3,
+                    COUNT(*) FILTER (WHERE payment_protocol = 'x402') as x402_count,
+                    COUNT(DISTINCT category) as categories
+                FROM services
+            """)
     except Exception as e:
         logger.error(f"DB error: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    by_tier = {str(t): 0 for t in range(4)}
-    for r in tier_rows:
-        by_tier[str(r["coverage_tier"])] = r["cnt"]
-
-    by_category = {r["category"]: r["cnt"] for r in category_rows}
-    tier2_services = [r["name"] for r in tier2_rows]
-    last_updated_str = last_updated.isoformat() + "Z" if last_updated else None
-
     return {
-        "total_services": total,
-        "by_tier": by_tier,
-        "by_category": by_category,
-        "tier2_services": tier2_services,
-        "last_updated": last_updated_str,
+        "total_services": row["total"],
+        "tier2_services": row["tier2"],
+        "tier3_services": row["tier3"],
+        "x402_services": row["x402_count"],
+        "categories": row["categories"],
+        "mcp_tools": 9,
+        "api_version": "0.1.5",
     }
 
 
@@ -873,7 +865,7 @@ async def leaderboard(
                     AND so.outcome_type = 'payment_initiated'
                     AND so.created_at > NOW() - ($2 * INTERVAL '1 day')
                 GROUP BY s.name, s.category, s.coverage_tier, s.payment_protocol, s.endpoint_url
-                ORDER BY search_count DESC, payment_count DESC
+                ORDER BY coverage_tier DESC, search_count DESC, payment_count DESC
                 LIMIT $1
             """, limit, days)
 

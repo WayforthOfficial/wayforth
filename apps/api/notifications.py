@@ -138,7 +138,7 @@ def send_welcome_email(to_email: str, api_key_prefix: str, tier: str) -> bool:
 
                 <p><strong>What you can do now:</strong></p>
                 <ul style="color:#94A3B8">
-                    <li>Search 2,354+ agent-callable services</li>
+                    <li>Search 2,394+ agent-callable services</li>
                     <li>Get non-custodial payment calldata for any service</li>
                     <li>Use WayforthQL for structured queries</li>
                     <li>Track your usage at /keys/usage</li>
