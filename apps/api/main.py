@@ -307,8 +307,8 @@ def chain_info(request: Request):
     }
 
 
-def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0) -> float:
-    """WRI v2 — composite reliability score with popularity signal. Range: 0-100."""
+def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0, payment_boost: float = 0.0) -> float:
+    """WRI v2 — composite reliability score with popularity and payment signals. Range: 0-100."""
     score = rank_score * 0.5
     tier = service.get("coverage_tier", 0)
     if tier >= 2:
@@ -333,6 +333,7 @@ def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0)
     if service.get("payment_protocol") == "x402":
         score += 5
     score += min(popularity_boost, 5.0)
+    score += min(payment_boost, 8.0)
     return round(min(score, 100), 1)
 
 
