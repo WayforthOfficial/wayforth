@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity =0.8.28;
 
 /// @title WayforthRegistry
 /// @notice On-chain mirror of the off-chain service catalog. Stores service
