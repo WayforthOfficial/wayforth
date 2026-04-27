@@ -1,4 +1,5 @@
 import asyncio
+import bcrypt
 import hashlib
 import json as json_lib
 import logging
@@ -6,7 +7,7 @@ import os
 import secrets
 import uuid as uuid_lib
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 import httpx
@@ -235,6 +236,7 @@ app.add_middleware(
     allow_origins=[
         "https://wayforth.io",
         "https://www.wayforth.io",
+        "https://admin.wayforth.io",
         "http://localhost:3000",
         "http://localhost:5173",
         "http://localhost:8080",
@@ -2389,3 +2391,279 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
 
     return {"status": "ok"}
 # s44 Sat Apr 25 12:29:13 PDT 2026
+
+
+# ── ADMIN AUTH ───────────────────────────────────────────────────────────────
+
+ADMIN_ROLES = {
+    'ceo':        ['all'],
+    'operations': ['catalog', 'health', 'tier3', 'webhooks'],
+    'support':    ['users', 'keys', 'tier3'],
+    'analytics':  ['analytics', 'searches', 'leaderboard'],
+}
+
+
+async def get_admin_session(request: Request, db):
+    token = request.headers.get("X-Admin-Token", "")
+    if not token:
+        raise HTTPException(status_code=401, detail="Admin token required")
+
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+
+    session = await db.fetchrow("""
+        SELECT s.*, u.email, u.role, u.full_name, u.is_active
+        FROM admin_sessions s
+        JOIN admin_users u ON u.id = s.admin_user_id
+        WHERE s.token_hash = $1 AND s.expires_at > NOW()
+    """, token_hash)
+
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    if not session['is_active']:
+        raise HTTPException(status_code=403, detail="Account deactivated")
+
+    return dict(session)
+
+
+@app.post("/admin-api/auth/login")
+@limiter.limit("10/minute")
+async def admin_login(request: Request, db=Depends(get_db)):
+    body = await request.json()
+    email = body.get("email", "").lower().strip()
+    password = body.get("password", "")
+
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password required")
+
+    user = await db.fetchrow(
+        "SELECT * FROM admin_users WHERE email = $1 AND is_active = true", email
+    )
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    raw_token = secrets.token_urlsafe(48)
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=12)
+
+    await db.execute("""
+        INSERT INTO admin_sessions (admin_user_id, token_hash, expires_at, ip_address)
+        VALUES ($1, $2, $3, $4)
+    """, user['id'], token_hash, expires_at,
+        request.client.host if request.client else None)
+
+    await db.execute(
+        "UPDATE admin_users SET last_login_at = NOW() WHERE id = $1", user['id']
+    )
+
+    return {
+        "token": raw_token,
+        "expires_at": expires_at.isoformat(),
+        "admin": {
+            "id": str(user['id']),
+            "email": user['email'],
+            "full_name": user['full_name'],
+            "role": user['role'],
+        }
+    }
+
+
+@app.post("/admin-api/auth/logout")
+async def admin_logout(request: Request, db=Depends(get_db)):
+    token = request.headers.get("X-Admin-Token", "")
+    if token:
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        await db.execute(
+            "DELETE FROM admin_sessions WHERE token_hash = $1", token_hash
+        )
+    return {"status": "logged out"}
+
+
+@app.get("/admin-api/auth/me")
+async def admin_me(request: Request, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    return {
+        "id": session['admin_user_id'],
+        "email": session['email'],
+        "full_name": session['full_name'],
+        "role": session['role'],
+    }
+
+
+# ── ADMIN TEAM MANAGEMENT (CEO only) ─────────────────────────────────────────
+
+@app.get("/admin-api/team")
+async def admin_team(request: Request, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    if session['role'] != 'ceo':
+        raise HTTPException(status_code=403, detail="CEO access required")
+
+    members = await db.fetch("""
+        SELECT id, email, full_name, role, is_active, last_login_at, created_at
+        FROM admin_users ORDER BY created_at ASC
+    """)
+    return {"team": [dict(m) for m in members]}
+
+
+@app.post("/admin-api/team/invite")
+async def admin_invite(request: Request, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    if session['role'] != 'ceo':
+        raise HTTPException(status_code=403, detail="CEO access required")
+
+    body = await request.json()
+    email = body.get("email", "").lower().strip()
+    full_name = body.get("full_name", "")
+    role = body.get("role", "support")
+    temp_password = body.get("password", "")
+
+    if not all([email, full_name, role, temp_password]):
+        raise HTTPException(status_code=400, detail="All fields required")
+    if role not in ['support', 'operations', 'analytics', 'ceo']:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    password_hash = bcrypt.hashpw(
+        temp_password.encode(), bcrypt.gensalt()
+    ).decode()
+
+    try:
+        member = await db.fetchrow("""
+            INSERT INTO admin_users (email, password_hash, full_name, role, created_by)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, email, full_name, role, created_at
+        """, email, password_hash, full_name, role,
+            session['admin_user_id'])
+        return {"member": dict(member), "temp_password": temp_password}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Email already exists")
+
+
+@app.patch("/admin-api/team/{member_id}")
+async def admin_update_member(
+    request: Request, member_id: str, db=Depends(get_db)
+):
+    session = await get_admin_session(request, db)
+    if session['role'] != 'ceo':
+        raise HTTPException(status_code=403, detail="CEO access required")
+
+    body = await request.json()
+
+    if 'is_active' in body:
+        await db.execute(
+            "UPDATE admin_users SET is_active=$1 WHERE id=$2",
+            body['is_active'], member_id
+        )
+    if 'role' in body:
+        await db.execute(
+            "UPDATE admin_users SET role=$1 WHERE id=$2",
+            body['role'], member_id
+        )
+    return {"status": "updated"}
+
+
+# ── ADMIN DASHBOARD DATA ──────────────────────────────────────────────────────
+
+@app.get("/admin-api/overview")
+async def admin_overview(request: Request, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+
+    stats = await db.fetchrow("""
+        SELECT
+            (SELECT COUNT(*) FROM services) as total_services,
+            (SELECT COUNT(*) FROM services WHERE coverage_tier >= 2) as tier2,
+            (SELECT COUNT(*) FROM users) as total_users,
+            (SELECT COUNT(*) FROM api_keys) as total_keys,
+            (SELECT COUNT(*) FROM search_analytics
+             WHERE created_at > NOW() - INTERVAL '24h') as searches_24h,
+            (SELECT COUNT(*) FROM search_analytics
+             WHERE created_at > NOW() - INTERVAL '7 days') as searches_7d,
+            (SELECT COUNT(*) FROM tier3_applications
+             WHERE status = 'pending') as pending_tier3,
+            (SELECT COUNT(*) FROM agent_identities) as total_agents
+    """)
+
+    daily = await db.fetch("""
+        SELECT DATE(created_at) as date, COUNT(*) as count
+        FROM search_analytics
+        WHERE created_at > NOW() - INTERVAL '30 days'
+        GROUP BY DATE(created_at)
+        ORDER BY date ASC
+    """)
+
+    signups = await db.fetch("""
+        SELECT DATE(created_at) as date, COUNT(*) as count
+        FROM users
+        WHERE created_at > NOW() - INTERVAL '30 days'
+        GROUP BY DATE(created_at)
+        ORDER BY date ASC
+    """)
+
+    return {
+        "stats": dict(stats),
+        "daily_searches": [{"date": str(r['date']), "count": r['count']} for r in daily],
+        "daily_signups": [{"date": str(r['date']), "count": r['count']} for r in signups],
+        "admin": {"email": session['email'], "role": session['role']}
+    }
+
+
+@app.get("/admin-api/users")
+async def admin_users_list(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    db=Depends(get_db)
+):
+    session = await get_admin_session(request, db)
+    if session['role'] not in ['ceo', 'support']:
+        raise HTTPException(status_code=403)
+
+    users = await db.fetch("""
+        SELECT u.id, u.email, u.created_at,
+               k.tier, k.owner_email, k.key_prefix,
+               k.usage_this_month, k.monthly_quota,
+               k.subscription_status
+        FROM users u
+        LEFT JOIN api_keys k ON k.user_id = u.id
+        ORDER BY u.created_at DESC
+        LIMIT $1 OFFSET $2
+    """, limit, offset)
+
+    total = await db.fetchval("SELECT COUNT(*) FROM users")
+
+    return {
+        "users": [dict(u) for u in users],
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+
+@app.get("/admin-api/catalog")
+async def admin_catalog(request: Request, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    if session['role'] not in ['ceo', 'operations']:
+        raise HTTPException(status_code=403)
+
+    rows = await db.fetch("""
+        SELECT category,
+               COUNT(*) as total,
+               COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
+               COUNT(*) FILTER (WHERE endpoint_url NOT ILIKE '%github%') as real_apis
+        FROM services
+        GROUP BY category ORDER BY total DESC
+    """)
+
+    recent_promotions = await db.fetch("""
+        SELECT name, coverage_tier, last_tested_at
+        FROM services
+        WHERE coverage_tier >= 2
+        ORDER BY last_tested_at DESC LIMIT 10
+    """)
+
+    return {
+        "by_category": [dict(r) for r in rows],
+        "recent_promotions": [dict(r) for r in recent_promotions]
+    }
