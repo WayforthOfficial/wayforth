@@ -236,7 +236,6 @@ app.add_middleware(
     allow_origins=[
         "https://wayforth.io",
         "https://www.wayforth.io",
-        "https://admin.wayforth.io",
         "http://localhost:3000",
         "http://localhost:5173",
         "http://localhost:8080",
@@ -1428,9 +1427,10 @@ async def admin_services(request: Request, key: str = "", db=Depends(get_db)):
 
 
 @app.get("/admin")
-async def admin_page():
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="https://admin.wayforth.io", status_code=302)
+async def admin_page(key: str = ""):
+    if not ADMIN_KEY or key != ADMIN_KEY:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return FileResponse("static/admin.html")
 
 
 @app.get("/demo")
