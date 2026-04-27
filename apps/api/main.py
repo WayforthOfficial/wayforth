@@ -483,6 +483,7 @@ async def search_services(
     results = [
         {
             "name": s.get("name"),
+            "description": s.get("description"),
             "score": s.get("score", 0),
             "wri": compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
             "reason": s.get("reason", ""),
