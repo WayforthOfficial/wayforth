@@ -1,3 +1,3 @@
 # Wayforth Documentation
 
-Full API docs: https://api-production-fd71.up.railway.app/docs
+Full API docs: https://gateway.wayforth.io/docs

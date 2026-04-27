@@ -7,7 +7,7 @@ from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
-API_BASE = os.getenv("WAYFORTH_API_URL", "https://api-production-fd71.up.railway.app")
+API_BASE = os.getenv("WAYFORTH_API_URL", "https://gateway.wayforth.io")
 
 mcp = FastMCP("wayforth")
 
@@ -416,7 +416,7 @@ wayforth_pay(service_id, owner_address, amount_usdc)
 → Currently on Base Sepolia testnet — no real funds needed.
 
 ## WayforthQL (structured queries)
-POST https://api-production-fd71.up.railway.app/query
+POST https://gateway.wayforth.io/query
 {"query": "fast inference", "tier_min": 2, "sort_by": "wri", "limit": 5}
 
 ## All 10 tools
@@ -433,7 +433,7 @@ wayforth_quickstart  — this guide
 
 ## Links
 Demo: https://wayforth.io/demo
-Docs: https://api-production-fd71.up.railway.app/docs
+Docs: https://gateway.wayforth.io/docs
 GitHub: https://github.com/WayforthOfficial/wayforth
 """
 

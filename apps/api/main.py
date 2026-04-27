@@ -1542,7 +1542,7 @@ async def pricing_json(request: Request):
                 "routing_fee_bps": 150,
                 "features": ["search", "query", "pay", "services", "memory", "identity"],
                 "cta": "Get Free Key",
-                "cta_url": "https://api-production-fd71.up.railway.app/keys/create",
+                "cta_url": "https://gateway.wayforth.io/keys/create",
             },
             {
                 "name": "Starter",

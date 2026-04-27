@@ -19,7 +19,7 @@ class SearchResult(TypedDict, total=False):
 
 
 class WayforthClient:
-    def __init__(self, base_url: str = "https://api-production-fd71.up.railway.app"):
+    def __init__(self, base_url: str = "https://gateway.wayforth.io"):
         self._base_url = base_url.rstrip("/")
 
     def search(self, intent: str, category: str = None, limit: int = 5) -> list[SearchResult]:
