@@ -2759,3 +2759,173 @@ async def admin_catalog(request: Request, db=Depends(get_db)):
         "by_category": [dict(r) for r in rows],
         "recent_promotions": [dict(r) for r in recent_promotions]
     }
+
+
+@app.get("/admin-api/users/{user_id}")
+async def admin_get_user(request: Request, user_id: str, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    user = await db.fetchrow("""
+        SELECT u.id, u.email, u.created_at, u.stripe_customer_id,
+               k.tier, k.key_prefix, k.usage_this_month, k.monthly_quota,
+               k.subscription_status, k.stripe_subscription_id,
+               k.created_at as key_created_at, k.last_used_at,
+               COUNT(sa.id) as total_searches,
+               MAX(sa.created_at) as last_search_at
+        FROM users u
+        LEFT JOIN api_keys k ON k.user_id = u.id
+        LEFT JOIN search_analytics sa ON sa.session_id ILIKE '%' || k.key_prefix || '%'
+        WHERE u.id = $1::uuid
+        GROUP BY u.id, u.email, u.created_at, u.stripe_customer_id,
+                 k.tier, k.key_prefix, k.usage_this_month, k.monthly_quota,
+                 k.subscription_status, k.stripe_subscription_id,
+                 k.created_at, k.last_used_at
+    """, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    searches = await db.fetch("""
+        SELECT query, created_at, top_result_id
+        FROM search_analytics
+        WHERE created_at > NOW() - INTERVAL '30 days'
+        ORDER BY created_at DESC LIMIT 10
+    """)
+
+    return {
+        "user": dict(user),
+        "recent_searches": [dict(s) for s in searches]
+    }
+
+
+@app.patch("/admin-api/users/{user_id}/tier")
+async def admin_change_tier(request: Request, user_id: str, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    body = await request.json()
+    new_tier = body.get("tier")
+    reason = body.get("reason", "Admin manual change")
+
+    if new_tier not in ['free', 'starter', 'pro', 'enterprise']:
+        raise HTTPException(status_code=400, detail="Invalid tier")
+
+    QUOTAS = {'free': 1000, 'starter': 10000, 'pro': 100000, 'enterprise': -1}
+
+    await db.execute("""
+        UPDATE api_keys SET tier = $1, monthly_quota = $2
+        WHERE user_id = $3::uuid
+    """, new_tier, QUOTAS[new_tier], user_id)
+
+    return {"status": "updated", "tier": new_tier, "changed_by": session['email'], "reason": reason}
+
+
+@app.post("/admin-api/users/{user_id}/reset-usage")
+async def admin_reset_usage(request: Request, user_id: str, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    body = await request.json()
+    reason = body.get("reason", "Admin reset")
+
+    await db.execute("""
+        UPDATE api_keys SET usage_this_month = 0, quota_reset_at = NOW()
+        WHERE user_id = $1::uuid
+    """, user_id)
+
+    return {"status": "reset", "changed_by": session['email'], "reason": reason}
+
+
+@app.post("/admin-api/users/{user_id}/add-credits")
+async def admin_add_credits(request: Request, user_id: str, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    body = await request.json()
+    credits = int(body.get("credits", 0))
+    reason = body.get("reason", "Admin bonus")
+
+    if credits <= 0 or credits > 100000:
+        raise HTTPException(status_code=400, detail="Credits must be 1-100000")
+
+    await db.execute("""
+        UPDATE api_keys
+        SET monthly_quota = monthly_quota + $1
+        WHERE user_id = $2::uuid
+    """, credits, user_id)
+
+    return {"status": "credits_added", "credits": credits, "changed_by": session['email'], "reason": reason}
+
+
+@app.post("/admin-api/users/{user_id}/regenerate-key")
+async def admin_regenerate_key(request: Request, user_id: str, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    body = await request.json()
+    reason = body.get("reason", "Admin revoked")
+
+    import secrets, hashlib
+    raw_key = "wf_live_" + secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_prefix = raw_key[:12]
+
+    await db.execute("""
+        UPDATE api_keys SET key_hash = $1, key_prefix = $2, last_used_at = NULL
+        WHERE user_id = $3::uuid
+    """, key_hash, key_prefix, user_id)
+
+    return {
+        "status": "regenerated",
+        "new_key": raw_key,
+        "new_prefix": key_prefix,
+        "changed_by": session['email'],
+        "reason": reason,
+        "warning": "Send this key to the user securely. It will not be shown again."
+    }
+
+
+@app.patch("/admin-api/users/{user_id}/suspend")
+async def admin_suspend_user(request: Request, user_id: str, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    body = await request.json()
+    suspended = body.get("suspended", True)
+    reason = body.get("reason", "")
+
+    await db.execute("""
+        UPDATE api_keys SET active = $1 WHERE user_id = $2::uuid
+    """, not suspended, user_id)
+
+    return {
+        "status": "suspended" if suspended else "unsuspended",
+        "changed_by": session['email'],
+        "reason": reason
+    }
+
+
+@app.patch("/admin-api/users/{user_id}/custom-quota")
+async def admin_custom_quota(request: Request, user_id: str, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    if session['role'] not in ['ceo', 'operations']:
+        raise HTTPException(status_code=403)
+    body = await request.json()
+    quota = int(body.get("quota", 0))
+    reason = body.get("reason", "")
+
+    await db.execute("""
+        UPDATE api_keys SET monthly_quota = $1 WHERE user_id = $2::uuid
+    """, quota, user_id)
+
+    return {"status": "quota_set", "quota": quota, "changed_by": session['email'], "reason": reason}
+
+
+@app.get("/admin-api/users/{user_id}/searches")
+async def admin_user_searches(request: Request, user_id: str, limit: int = 50, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    if session['role'] not in ['ceo', 'support']:
+        raise HTTPException(status_code=403)
+
+    key = await db.fetchrow("SELECT key_prefix FROM api_keys WHERE user_id = $1::uuid", user_id)
+    if not key:
+        return {"searches": [], "total": 0}
+
+    searches = await db.fetch("""
+        SELECT query, created_at, top_result_id, led_to_payment
+        FROM search_analytics
+        ORDER BY created_at DESC LIMIT $1
+    """, limit)
+
+    return {
+        "searches": [dict(s) for s in searches],
+        "total": len(searches)
+    }
