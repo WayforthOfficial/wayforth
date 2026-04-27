@@ -924,6 +924,10 @@ async def leaderboard(request: Request, limit: int = 20, db=Depends(get_db)):
 
         results.append(svc)
 
+    results.sort(key=lambda x: (x.get('wri', 0), x.get('payment_count', 0)), reverse=True)
+    for i, r in enumerate(results, 1):
+        r['rank'] = i
+
     return {
         "leaderboard": results,
         "total": len(results),
