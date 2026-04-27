@@ -215,7 +215,7 @@ uvx wayforth-mcp
 ```
 """,
     version="0.1.5",
-    contact={"name": "Wayforth", "url": "https://wayforth.io", "email": "hello@wayforth.io"},
+    contact={"name": "Wayforth", "url": "https://wayforth.io/contact"},
     license_info={"name": "BSL 1.1", "url": "https://wayforth.io/license"},
     lifespan=lifespan,
 )
@@ -629,7 +629,7 @@ results = client.query(
     <a class="link" href="https://wayforth.io/leaderboard">Leaderboard →</a>
     <a class="link" href="/wayforthql-spec">WayforthQL Spec →</a>
     <a class="link" href="https://github.com/WayforthOfficial/wayforth">GitHub →</a>
-    <a class="link" href="mailto:hello@wayforth.io">hello@wayforth.io</a>
+    <a class="link" href="https://wayforth.io/contact">Contact Us</a>
   </div>
 </div>
 </body>
@@ -1887,7 +1887,7 @@ async def similar_services(request: Request, service_id: str, limit: int = 5):
 async def service_intelligence(request: Request, service_id: str, api_key: str = ""):
     """Wayforth Intelligence API — market data for service providers."""
     if not ADMIN_KEY or api_key != ADMIN_KEY:
-        raise HTTPException(status_code=401, detail="Intelligence API key required. Contact hello@wayforth.io")
+        raise HTTPException(status_code=401, detail="Intelligence API key required. Contact us at https://wayforth.io/contact")
 
     async with app.state.pool.acquire() as db:
         internal_id = service_id

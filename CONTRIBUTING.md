@@ -30,4 +30,4 @@ The WayforthRank ranking engine is proprietary closed-source. The `ranker_client
 
 By contributing, you agree your contributions are licensed under BSL 1.1.
 
-Questions? hello@wayforth.io
+Questions? [Contact Us](https://wayforth.io/contact)
