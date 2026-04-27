@@ -4,6 +4,9 @@
 
 ```bash
 uvx wayforth-mcp
+
+# Or visit the dashboard
+open https://wayforth.io/dashboard
 ```
 
 Works with Claude Code, Cursor, Windsurf, and any MCP-compatible runtime.
@@ -25,8 +28,8 @@ wayforth_pay(service_id, owner_address, amount_usdc)
 
 ## What's Live
 
-- **2,463+ services indexed** — MCP servers, REST APIs, x402-enabled services
-- **115 Tier 2 verified** — automated 90%+ uptime, probed every 6 hours, auto-demoted on failure
+- **2,501+ services indexed** — MCP servers, REST APIs, x402-enabled services
+- **147 Tier 2 verified** — automated 90%+ uptime, probed every 6 hours, auto-demoted on failure
 - **WayforthRank** — proprietary multi-signal ranking engine
 - **WayforthQL** — declarative query language for structured service discovery
 - **Coverage tiers 0–3** — the only automated reliability verification system in any agent registry
@@ -137,4 +140,4 @@ Core: BSL 1.1 — source visible, no competing use for 4 years. OpenAPI spec + c
 
 ---
 
-[wayforth.io](https://wayforth.io) · [docs](https://api-production-fd71.up.railway.app/docs) · [whitepaper](https://github.com/WayforthOfficial/wayforth/blob/main/docs/whitepaper-v2.pdf) · [hello@wayforth.io](mailto:hello@wayforth.io)
+[wayforth.io](https://wayforth.io) · [dashboard](https://wayforth.io/dashboard) · [docs](https://api-production-fd71.up.railway.app/docs) · [whitepaper](https://github.com/WayforthOfficial/wayforth/blob/main/docs/whitepaper-v2.pdf) · [hello@wayforth.io](mailto:hello@wayforth.io)
