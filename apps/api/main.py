@@ -320,6 +320,12 @@ def chain_info(request: Request):
             "use_for": "services with native x402 support",
             "docs": "https://x402.org",
         },
+        "mainnet": {
+            "status": "coming_soon",
+            "target": "Q3 2026",
+            "requirement": "Independent security audit required before mainnet deployment",
+            "current_network": "Base Sepolia (testnet) — no real funds required",
+        },
     }
 
 
@@ -780,30 +786,41 @@ async def featured_services(request: Request, db=Depends(get_db)):
 
 @app.get("/stats")
 @limiter.limit("30/minute")
-async def get_stats(request: Request):
+async def get_stats(request: Request, db=Depends(get_db)):
     try:
-        async with app.state.pool.acquire() as conn:
-            row = await conn.fetchrow("""
-                SELECT
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
-                    COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3,
-                    COUNT(*) FILTER (WHERE payment_protocol = 'x402') as x402_count,
-                    COUNT(DISTINCT category) as categories
-                FROM services
-            """)
+        row = await db.fetchrow("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
+                COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3,
+                COUNT(*) FILTER (WHERE payment_protocol = 'x402') as x402_count,
+                COUNT(*) FILTER (
+                    WHERE endpoint_url NOT ILIKE '%github.com%'
+                    AND endpoint_url NOT ILIKE '%glama.ai%'
+                    AND endpoint_url NOT ILIKE '%smithery%'
+                ) as real_apis,
+                COUNT(DISTINCT category) as categories
+            FROM services
+        """)
+        searches_7d = await db.fetchval("""
+            SELECT COUNT(*) FROM search_analytics
+            WHERE created_at > NOW() - INTERVAL '7 days'
+        """)
     except Exception as e:
         logger.error(f"DB error: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     return {
         "total_services": row["total"],
+        "real_apis": row["real_apis"],
         "tier2_services": row["tier2"],
         "tier3_services": row["tier3"],
         "x402_services": row["x402_count"],
         "categories": row["categories"],
+        "searches_7d": searches_7d,
         "mcp_tools": 9,
         "api_version": "0.1.5",
+        "mcp_version": "0.1.7",
     }
 
 
@@ -1245,6 +1262,37 @@ async def admin_health(request: Request, key: str = "", db=Depends(get_db)):
         "status": "operational" if checks["database"] == "ok" else "degraded",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "checks": checks,
+    }
+
+
+@app.get("/admin/services")
+@limiter.limit("10/minute")
+async def admin_services(request: Request, key: str = "", db=Depends(get_db)):
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    rows = await db.fetch("""
+        SELECT
+            category,
+            COUNT(*) as total,
+            COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
+            COUNT(*) FILTER (WHERE coverage_tier >= 1) as tier1,
+            COUNT(*) FILTER (WHERE payment_protocol = 'x402') as x402,
+            COUNT(*) FILTER (
+                WHERE endpoint_url NOT ILIKE '%github.com%'
+                AND endpoint_url NOT ILIKE '%glama.ai%'
+                AND endpoint_url NOT ILIKE '%smithery%'
+            ) as real_apis
+        FROM services
+        GROUP BY category
+        ORDER BY total DESC
+    """)
+    return {
+        "by_category": [dict(r) for r in rows],
+        "summary": {
+            "total": sum(r['total'] for r in rows),
+            "real_apis": sum(r['real_apis'] for r in rows),
+            "tier2": sum(r['tier2'] for r in rows),
+        }
     }
 
 

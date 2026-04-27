@@ -43,6 +43,10 @@
   .loading { text-align: center; padding: 60px; color: #64748b; }
   a { color: #818cf8; text-decoration: none; }
   a:hover { color: #a5b4fc; }
+  .stats-grid { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat-card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 20px 24px; min-width: 140px; text-align: center; }
+  .stat-number { font-size: 32px; font-weight: 700; color: #e2e8f0; }
+  .stat-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -60,6 +64,21 @@
       <div class="last-checked">Last checked: <span id="last-checked">—</span></div>
     </div>
   </header>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-number" id="total-endpoints">—</div>
+      <div class="stat-label">REAL API ENDPOINTS</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" id="tier2-count">—</div>
+      <div class="stat-label">TIER 2 VERIFIED</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" id="api-status">✓</div>
+      <div class="stat-label">API STATUS</div>
+    </div>
+  </div>
 
   <div class="summary" id="summary">
     <div class="stat">
@@ -184,6 +203,11 @@ function startCountdown() {
     }
   }, 1000);
 }
+
+fetch('/services/count').then(r=>r.json()).then(d=>{
+  document.getElementById('total-endpoints').textContent = d.display.total;
+  document.getElementById('tier2-count').textContent = d.display.tier2;
+}).catch(()=>{});
 
 load().then(startCountdown);
 </script>
