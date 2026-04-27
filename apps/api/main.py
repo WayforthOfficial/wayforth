@@ -2241,4 +2241,151 @@ async def identity_history(request: Request, agent_id: str, db=Depends(get_db)):
         "recent_searches": [dict(r) for r in searches],
         "recent_payments": [dict(r) for r in payments],
     }
+
+
+@app.post("/auth/register")
+@limiter.limit("5/minute")
+async def register_user(request: Request, db=Depends(get_db)):
+    body = await request.json()
+    email = body.get("email")
+    supabase_id = body.get("supabase_id")
+
+    if not email or not supabase_id:
+        raise HTTPException(status_code=400, detail="email and supabase_id required")
+
+    user = await db.fetchrow("""
+        INSERT INTO users (email, supabase_id)
+        VALUES ($1, $2)
+        ON CONFLICT (email) DO UPDATE SET supabase_id = $2
+        RETURNING id, email, created_at
+    """, email, supabase_id)
+
+    raw_key = "wf_live_" + secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_prefix = raw_key[:12]
+
+    await db.execute("""
+        INSERT INTO api_keys (key_hash, key_prefix, tier, user_id, email)
+        VALUES ($1, $2, 'free', $3, $4)
+        ON CONFLICT DO NOTHING
+    """, key_hash, key_prefix, str(user['id']), email)
+
+    asyncio.create_task(asyncio.to_thread(
+        send_welcome_email, email, key_prefix, 'free'
+    ))
+
+    return {
+        "user_id": str(user['id']),
+        "email": email,
+        "api_key": raw_key,
+        "tier": "free",
+        "message": "Account created. Save your API key — it won't be shown again.",
+    }
+
+
+@app.get("/dashboard")
+@limiter.limit("30/minute")
+async def dashboard(request: Request, db=Depends(get_db)):
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not raw_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    key = await db.fetchrow("""
+        SELECT k.*, u.email, u.created_at as account_created,
+               u.stripe_customer_id
+        FROM api_keys k
+        LEFT JOIN users u ON u.id = k.user_id
+        WHERE k.key_hash = $1
+    """, key_hash)
+
+    if not key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    searches_this_month = await db.fetchval("""
+        SELECT COUNT(*) FROM search_analytics
+        WHERE created_at >= $1
+        AND session_id ILIKE $2
+    """, month_start, f"%{key['key_prefix']}%") or 0
+
+    recent = await db.fetch("""
+        SELECT query, created_at, top_result_id
+        FROM search_analytics
+        WHERE created_at > NOW() - INTERVAL '7 days'
+        ORDER BY created_at DESC LIMIT 10
+    """)
+
+    LIMITS = {
+        'free':       {'rpm': 10,  'monthly': 1000,   'fee_pct': 1.5},
+        'starter':    {'rpm': 30,  'monthly': 10000,  'fee_pct': 1.25},
+        'pro':        {'rpm': 100, 'monthly': 100000, 'fee_pct': 1.0},
+        'enterprise': {'rpm': 500, 'monthly': -1,     'fee_pct': 0.75},
+    }
+    tier = key['tier'] or 'free'
+    limits = LIMITS.get(tier, LIMITS['free'])
+
+    return {
+        "account": {
+            "email": key['email'],
+            "tier": tier,
+            "created_at": key['account_created'].isoformat() if key['account_created'] else None,
+            "stripe_customer_id": key['stripe_customer_id'],
+        },
+        "api_key": {
+            "prefix": key['key_prefix'],
+            "created_at": key['created_at'].isoformat(),
+            "subscription_status": key.get('subscription_status', 'active'),
+            "current_period_end": key['current_period_end'].isoformat() if key.get('current_period_end') else None,
+        },
+        "usage": {
+            "searches_this_month": searches_this_month,
+            "monthly_limit": limits['monthly'],
+            "pct_used": round((searches_this_month / limits['monthly'] * 100), 1) if limits['monthly'] > 0 else 0,
+            "rate_limit_rpm": limits['rpm'],
+            "routing_fee_pct": limits['fee_pct'],
+        },
+        "recent_searches": [
+            {"query": r['query'], "at": r['created_at'].isoformat()}
+            for r in recent
+        ],
+        "upgrade_url": "https://wayforth.io/pricing",
+    }
+
+
+@app.post("/stripe/webhook")
+async def stripe_webhook(request: Request, db=Depends(get_db)):
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+
+    STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
+    try:
+        import stripe
+        event = stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        customer_email = session.get('customer_email')
+        tier = session['metadata'].get('tier', 'starter')
+        subscription_id = session.get('subscription')
+
+        await db.execute("""
+            UPDATE api_keys SET tier = $1, stripe_subscription_id = $2,
+            subscription_status = 'active'
+            WHERE user_id = (SELECT id FROM users WHERE email = $3)
+        """, tier, subscription_id, customer_email)
+
+    elif event['type'] == 'customer.subscription.deleted':
+        subscription_id = event['data']['object']['id']
+        await db.execute("""
+            UPDATE api_keys SET tier = 'free', subscription_status = 'cancelled'
+            WHERE stripe_subscription_id = $1
+        """, subscription_id)
+
+    return {"status": "ok"}
 # s44 Sat Apr 25 12:29:13 PDT 2026
