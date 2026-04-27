@@ -18,7 +18,7 @@ import sys
 from wayforth.client import WayforthClient
 
 # Initialize clients
-wayforth = WayforthClient()  # Uses api-production-fd71.up.railway.app by default
+wayforth = WayforthClient()  # Uses gateway.wayforth.io by default
 
 
 async def research(topic: str) -> dict:
