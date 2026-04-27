@@ -14,7 +14,7 @@ import httpx
 import sentry_sdk
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -269,9 +269,26 @@ async def get_db(request: Request):
 
 @app.get("/health")
 @limiter.limit("60/minute")
-def health(request: Request):
-    db_status = "ok" if getattr(app.state, "db_ok", False) else "unavailable"
-    return {"status": "ok", "service": "wayforth-api", "version": "0.1.5", "db_status": db_status}
+async def health(request: Request, db=Depends(get_db)):
+    try:
+        await db.fetchval("SELECT 1")
+        db_status = "ok"
+        tier2 = await db.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2") or 0
+        total = await db.fetchval("SELECT COUNT(*) FROM services") or 0
+    except Exception:
+        db_status = "error"
+        tier2 = 0
+        total = 0
+    return {
+        "status": "ok" if db_status == "ok" else "degraded",
+        "service": "wayforth-api",
+        "version": "0.1.5",
+        "db_status": db_status,
+        "catalog": {
+            "total": total,
+            "tier2": tier2,
+        },
+    }
 
 
 @app.get("/status", tags=["System"])
@@ -622,33 +639,61 @@ results = client.query(
 @app.get("/search/suggestions")
 @limiter.limit("30/minute")
 async def search_suggestions(request: Request, db=Depends(get_db)):
-    """Top queries from real agent usage — helps agents discover what's searchable."""
+    """Top queries from real agent usage. Falls back to curated list."""
     rows = await db.fetch("""
         SELECT query, COUNT(*) as count
         FROM search_analytics
         WHERE created_at > NOW() - INTERVAL '7 days'
-        AND query IS NOT NULL AND query != ''
-        GROUP BY query ORDER BY count DESC LIMIT 20
+        AND query IS NOT NULL
+        AND LENGTH(query) > 3
+        GROUP BY query
+        ORDER BY count DESC
+        LIMIT 8
     """)
-    if not rows:
+    curated = [
+        "fast inference for coding",
+        "translate text to Spanish",
+        "real-time stock data",
+        "web search for agents",
+        "generate images from text",
+        "speech to text API",
+        "embed documents for RAG",
+        "crypto market prices",
+    ]
+    if rows and len(rows) >= 4:
+        return {"suggestions": [r['query'] for r in rows], "source": "live"}
+    return {"suggestions": curated, "source": "curated"}
+
+
+@app.get("/search/popular")
+@limiter.limit("30/minute")
+async def popular_searches(request: Request, limit: int = 8, db=Depends(get_db)):
+    """Real queries from the last 7 days. Powers homepage suggestion chips."""
+    rows = await db.fetch("""
+        SELECT query, COUNT(*) as count
+        FROM search_analytics
+        WHERE created_at > NOW() - INTERVAL '7 days'
+        AND query IS NOT NULL
+        AND LENGTH(query) > 3
+        GROUP BY query
+        ORDER BY count DESC
+        LIMIT $1
+    """, limit)
+    if not rows or len(rows) < 4:
         return {
-            "suggestions": [
+            "queries": [
                 "fast inference for coding",
-                "translate to spanish",
-                "real-time stock prices",
+                "translate text to Spanish",
+                "real-time stock data",
                 "web search for agents",
-                "image generation",
-                "weather data",
-                "text summarization",
-                "cryptocurrency prices"
+                "generate images from text",
+                "speech to text transcription",
+                "embed documents for RAG",
+                "crypto market prices",
             ],
-            "source": "curated"
+            "source": "curated",
         }
-    return {
-        "suggestions": [r['query'] for r in rows],
-        "source": "real_usage",
-        "period": "7d"
-    }
+    return {"queries": [r['query'] for r in rows], "source": "live", "period": "7d"}
 
 
 class WayforthQLQuery(BaseModel):
@@ -865,6 +910,13 @@ async def list_services(
         "offset": offset,
         "filters": {"category": category, "tier": tier, "protocol": protocol, "real_only": real_only},
     }
+
+
+@app.get("/services/search")
+@limiter.limit("20/minute")
+async def services_search_alias(request: Request, q: str = "", limit: int = 5, db=Depends(get_db)):
+    """Alias for /search — same behavior."""
+    return RedirectResponse(url=f"/search?q={q}&limit={limit}", status_code=307)
 
 
 @app.get("/services/categories")
