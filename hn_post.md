@@ -74,7 +74,7 @@ Already being used by developers who found us before this post.
 Whitepaper:  https://wayforth.io/technology
 Leaderboard: https://wayforth.io/leaderboard
 GitHub:      https://github.com/WayforthOfficial/wayforth
-Docs:        https://api-production-fd71.up.railway.app/docs
+Docs:        https://gateway.wayforth.io/docs
 PyPI:        https://pypi.org/project/wayforth-mcp/
 
 Happy to go deep on the WayforthRank architecture, the payment routing

@@ -1,6 +1,6 @@
 import { Service, SearchResponse, ServicesResponse, StatsResponse, HealthResponse, AgentIdentity, WayforthQLQuery, SimilarResponse, TiersResponse } from "./types";
 
-const DEFAULT_BASE_URL = "https://api-production-fd71.up.railway.app";
+const DEFAULT_BASE_URL = "https://gateway.wayforth.io";
 
 export class WayforthClient {
   private baseUrl: string;

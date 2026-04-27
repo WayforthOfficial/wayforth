@@ -11,7 +11,7 @@ open https://wayforth.io/dashboard
 
 Works with Claude Code, Cursor, Windsurf, and any MCP-compatible runtime.
 
-**Full quickstart guide:** https://api-production-fd71.up.railway.app/quickstart
+**Full quickstart guide:** https://gateway.wayforth.io/quickstart
 
 ## What It Does
 
@@ -28,7 +28,7 @@ wayforth_pay(service_id, owner_address, amount_usdc)
 
 ## What's Live
 
-- **2,501+ services indexed** — MCP servers, REST APIs, x402-enabled services
+- **190+ real API endpoints indexed** — MCP servers, REST APIs, x402-enabled services
 - **147 Tier 2 verified** — automated 90%+ uptime, probed every 6 hours, auto-demoted on failure
 - **WayforthRank** — proprietary multi-signal ranking engine
 - **WayforthQL** — declarative query language for structured service discovery
@@ -53,7 +53,7 @@ wayforth_pay(service_id, owner_address, amount_usdc)
 ## WayforthQL
 
 ```http
-POST https://api-production-fd71.up.railway.app/query
+POST https://gateway.wayforth.io/query
 Content-Type: application/json
 
 {
@@ -65,7 +65,7 @@ Content-Type: application/json
 }
 ```
 
-Full spec: https://api-production-fd71.up.railway.app/wayforthql-spec
+Full spec: https://gateway.wayforth.io/wayforthql-spec
 
 ## Coverage Tiers
 
@@ -80,7 +80,7 @@ Verification runs automatically every 6 hours. No manual review. No paid placeme
 
 ## REST API
 
-Base URL: `https://api-production-fd71.up.railway.app`
+Base URL: `https://gateway.wayforth.io`
 
 | Endpoint | Description |
 |----------|-------------|
@@ -96,7 +96,7 @@ Base URL: `https://api-production-fd71.up.railway.app`
 | `POST /tier3/apply` | Apply for Tier 3 verification |
 | `GET /keys/tiers` | API key tier limits |
 
-Full docs: https://api-production-fd71.up.railway.app/docs
+Full docs: https://gateway.wayforth.io/docs
 
 ## SDKs
 
@@ -140,4 +140,4 @@ Core: BSL 1.1 — source visible, no competing use for 4 years. OpenAPI spec + c
 
 ---
 
-[wayforth.io](https://wayforth.io) · [dashboard](https://wayforth.io/dashboard) · [docs](https://api-production-fd71.up.railway.app/docs) · [whitepaper](https://github.com/WayforthOfficial/wayforth/blob/main/docs/whitepaper-v2.pdf) · [hello@wayforth.io](mailto:hello@wayforth.io)
+[wayforth.io](https://wayforth.io) · [dashboard](https://wayforth.io/dashboard) · [docs](https://gateway.wayforth.io/docs) · [whitepaper](https://github.com/WayforthOfficial/wayforth/blob/main/docs/whitepaper-v2.pdf) · [hello@wayforth.io](mailto:hello@wayforth.io)

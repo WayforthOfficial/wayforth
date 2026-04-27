@@ -149,7 +149,7 @@ def send_welcome_email(to_email: str, api_key_prefix: str, tier: str) -> bool:
                 </p>
 
                 <p style="margin-top:32px;color:#64748B;font-size:13px">
-                    Docs: <a href="https://api-production-fd71.up.railway.app/docs" style="color:#4F46E5">API Reference</a> ·
+                    Docs: <a href="https://gateway.wayforth.io/docs" style="color:#4F46E5">API Reference</a> ·
                     GitHub: <a href="https://github.com/WayforthOfficial/wayforth" style="color:#4F46E5">WayforthOfficial/wayforth</a>
                 </p>
             </div>

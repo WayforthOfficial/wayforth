@@ -93,11 +93,11 @@
         <tr><td colspan="6" class="loading">Loading leaderboard...</td></tr>
       </tbody>
     </table>
-    <div class="refresh-note">Auto-refreshes every 60 seconds · <a href="https://api-production-fd71.up.railway.app/leaderboard?period=7d&limit=20">Raw JSON API</a></div>
+    <div class="refresh-note">Auto-refreshes every 60 seconds · <a href="https://gateway.wayforth.io/leaderboard?period=7d&limit=20">Raw JSON API</a></div>
   </div>
 
   <script>
-    const API = 'https://api-production-fd71.up.railway.app';
+    const API = 'https://gateway.wayforth.io';
 
     async function loadLeaderboard() {
       try {

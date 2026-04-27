@@ -1,6 +1,6 @@
 # wayforth-sdk
 
-TypeScript/JavaScript SDK for [Wayforth](https://api-production-fd71.up.railway.app) — discover and call AI services from the catalog.
+TypeScript/JavaScript SDK for [Wayforth](https://gateway.wayforth.io) — discover and call AI services from the catalog.
 
 ## Install
 
