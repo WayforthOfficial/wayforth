@@ -1428,10 +1428,9 @@ async def admin_services(request: Request, key: str = "", db=Depends(get_db)):
 
 
 @app.get("/admin")
-async def admin_page(key: str = ""):
-    if not ADMIN_KEY or key != ADMIN_KEY:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return FileResponse("static/admin.html")
+async def admin_page():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="https://admin.wayforth.io", status_code=302)
 
 
 @app.get("/demo")
