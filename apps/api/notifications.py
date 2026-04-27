@@ -97,7 +97,7 @@ def send_tier3_application_notification(to_email: str, service_name: str, compan
                     <li>SLA terms negotiated based on your uptime target</li>
                     <li>Tier 3 badge live on your service within 24h of approval</li>
                 </ul>
-                <p style="margin-top:32px;color:#64748B;font-size:13px">Questions? Reply to this email or contact <a href="mailto:hello@wayforth.io" style="color:#4F46E5">hello@wayforth.io</a></p>
+                <p style="margin-top:32px;color:#64748B;font-size:13px">Questions? Reply to this email or contact <a href="https://wayforth.io/contact" style="color:#4F46E5">Contact Us</a></p>
                 <p style="color:#64748B;font-size:13px">Wayforth · <a href="https://wayforth.io" style="color:#4F46E5">wayforth.io</a></p>
             </div>
             """,

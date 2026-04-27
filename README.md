@@ -140,4 +140,4 @@ Core: BSL 1.1 — source visible, no competing use for 4 years. OpenAPI spec + c
 
 ---
 
-[wayforth.io](https://wayforth.io) · [dashboard](https://wayforth.io/dashboard) · [docs](https://gateway.wayforth.io/docs) · [whitepaper](https://github.com/WayforthOfficial/wayforth/blob/main/docs/whitepaper-v2.pdf) · [hello@wayforth.io](mailto:hello@wayforth.io)
+[wayforth.io](https://wayforth.io) · [dashboard](https://wayforth.io/dashboard) · [docs](https://gateway.wayforth.io/docs) · [whitepaper](https://github.com/WayforthOfficial/wayforth/blob/main/docs/whitepaper-v2.pdf) · [Contact Us](https://wayforth.io/contact)

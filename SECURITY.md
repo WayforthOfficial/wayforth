@@ -2,7 +2,7 @@
 
 ## Reporting Vulnerabilities
 
-Email: security@wayforth.io
+[Contact Us](https://wayforth.io/contact)
 
 Please do not open public GitHub issues for security vulnerabilities. Include:
 - Description of the vulnerability
