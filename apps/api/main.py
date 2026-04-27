@@ -2666,24 +2666,3 @@ async def admin_catalog(request: Request, db=Depends(get_db)):
         "by_category": [dict(r) for r in rows],
         "recent_promotions": [dict(r) for r in recent_promotions]
     }
-
-
-# ── TEMP CEO BOOTSTRAP (remove after first use) ───────────────────────────────
-_BOOTSTRAP_TOKEN = "wf-bootstrap-7x9k2m4p"
-
-@app.post("/admin-api/_setup")
-async def bootstrap_ceo(request: Request, db=Depends(get_db)):
-    body = await request.json()
-    if body.get("token") != _BOOTSTRAP_TOKEN:
-        raise HTTPException(status_code=403)
-    email = body.get("email")
-    password = body.get("password")
-    full_name = body.get("full_name")
-    if not all([email, password, full_name]):
-        raise HTTPException(status_code=400, detail="email, password, full_name required")
-    pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    await db.execute(
-        "INSERT INTO admin_users (email, password_hash, full_name, role) VALUES ($1, $2, $3, 'ceo') ON CONFLICT DO NOTHING",
-        email, pw_hash, full_name
-    )
-    return {"status": "created"}
