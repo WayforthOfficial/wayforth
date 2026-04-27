@@ -2265,7 +2265,7 @@ async def register_user(request: Request, db=Depends(get_db)):
     key_prefix = raw_key[:12]
 
     await db.execute("""
-        INSERT INTO api_keys (key_hash, key_prefix, tier, user_id, email)
+        INSERT INTO api_keys (key_hash, key_prefix, tier, user_id, owner_email)
         VALUES ($1, $2, 'free', $3, $4)
         ON CONFLICT DO NOTHING
     """, key_hash, key_prefix, str(user['id']), email)
