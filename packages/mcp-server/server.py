@@ -389,6 +389,55 @@ async def wayforth_identity(agent_id: str) -> str:
         return f"New identity registered. Trust score: {d2['trust_score']}/100. Start searching to build reputation."
 
 
+@mcp.tool()
+async def wayforth_quickstart() -> str:
+    """
+    Get the Wayforth developer quickstart guide.
+    Returns step-by-step instructions for using Wayforth in an agent.
+    """
+    return """# Wayforth Quickstart
+
+## What is Wayforth?
+The search engine and payment rail for AI agents.
+190+ verified API endpoints. 154 Tier 2 verified. Semantic intent ranking.
+
+## Install
+uvx wayforth-mcp
+
+## Step 1 — Search
+wayforth_search("translate text to Spanish")
+→ Returns ranked services with WRI scores (0-100)
+→ WRI = Wayforth Reliability Index — uptime + usage signals
+
+## Step 2 — Pay
+wayforth_pay(service_id, owner_address, amount_usdc)
+→ Returns non-custodial Base transaction calldata
+→ Settles in ~2 seconds. Routing fee: 0.75%-1.5%.
+→ Currently on Base Sepolia testnet — no real funds needed.
+
+## WayforthQL (structured queries)
+POST https://api-production-fd71.up.railway.app/query
+{"query": "fast inference", "tier_min": 2, "sort_by": "wri", "limit": 5}
+
+## All 10 tools
+wayforth_search      — semantic service discovery
+wayforth_pay         — non-custodial payment calldata
+wayforth_list        — browse catalog with filters
+wayforth_similar     — co-used services (Service Graph)
+wayforth_identity    — agent trust score and reputation
+wayforth_remember    — save a service to agent memory
+wayforth_recall      — retrieve saved services
+wayforth_stats       — catalog statistics
+wayforth_status      — API health check
+wayforth_quickstart  — this guide
+
+## Links
+Demo: https://wayforth.io/demo
+Docs: https://api-production-fd71.up.railway.app/docs
+GitHub: https://github.com/WayforthOfficial/wayforth
+"""
+
+
 def main():
     mcp.run()
 
