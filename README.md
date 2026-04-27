@@ -8,6 +8,8 @@ uvx wayforth-mcp
 
 Works with Claude Code, Cursor, Windsurf, and any MCP-compatible runtime.
 
+**Full quickstart guide:** https://api-production-fd71.up.railway.app/quickstart
+
 ## What It Does
 
 ```python

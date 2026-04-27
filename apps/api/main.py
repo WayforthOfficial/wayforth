@@ -483,10 +483,139 @@ async def search_services(
         "query_id": query_id,
         "query": q,
         "total_results": len(top),
+        "total_matches": len(ranked),
         "results": results,
         "fallback": fallback_used,
         "fallback_reason": fallback_reason,
     }
+
+
+@app.get("/quickstart", include_in_schema=False)
+async def quickstart():
+    from fastapi.responses import HTMLResponse
+    html = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Wayforth — Developer Quickstart</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0F172A; color: #E2E8F0; padding: 40px 20px; line-height: 1.6; }
+  .container { max-width: 800px; margin: 0 auto; }
+  h1 { color: #4F46E5; font-size: 2rem; margin-bottom: 8px; }
+  .subtitle { color: #64748B; margin-bottom: 48px; }
+  .step { margin-bottom: 40px; }
+  .step-num { color: #4F46E5; font-weight: bold; font-size: 0.85rem;
+              text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  h2 { color: #E2E8F0; font-size: 1.25rem; margin-bottom: 12px; }
+  pre { background: #1E293B; border: 1px solid #334155; border-left: 3px solid #4F46E5;
+        padding: 16px 20px; border-radius: 6px; overflow-x: auto;
+        font-family: 'Courier New', monospace; font-size: 13px;
+        color: #94A3B8; margin-bottom: 12px; }
+  .comment { color: #475569; }
+  .keyword { color: #4F46E5; }
+  .string { color: #10B981; }
+  .note { background: #1E293B; border: 1px solid #334155; border-radius: 6px;
+          padding: 12px 16px; color: #64748B; font-size: 0.875rem; }
+  .note a { color: #4F46E5; }
+  .divider { border: none; border-top: 1px solid #1E293B; margin: 40px 0; }
+  .links { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 40px; }
+  .link { color: #4F46E5; text-decoration: none; font-size: 0.9rem; }
+  .link:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Wayforth Quickstart</h1>
+  <p class="subtitle">From zero to searching 190+ verified APIs in 60 seconds.</p>
+
+  <div class="step">
+    <div class="step-num">Step 1 of 3</div>
+    <h2>Install the MCP server</h2>
+    <pre>uvx wayforth-mcp</pre>
+    <p class="note">Works with Claude Code, Cursor, Windsurf, and any MCP-compatible runtime.
+    Or add explicitly: <code>claude mcp add wayforth -- uvx wayforth-mcp</code></p>
+  </div>
+
+  <div class="step">
+    <div class="step-num">Step 2 of 3</div>
+    <h2>Search the catalog</h2>
+    <pre><span class="comment"># In your agent — natural language, no API keys needed</span>
+wayforth_search(<span class="string">"translate text to Spanish"</span>)
+
+<span class="comment"># Returns ranked results with WRI scores</span>
+<span class="comment"># → DeepL API      WRI: 82  Tier 2 Verified  $0.0000025/req</span>
+<span class="comment"># → LibreTranslate  WRI: 71  Tier 2 Verified  Free</span>
+<span class="comment"># → ModernMT        WRI: 68  Tier 2 Verified  $0.000003/req</span></pre>
+    <p class="note">WRI (Wayforth Reliability Index) is a 0–100 score based on uptime history,
+    probe frequency, and real agent usage. Higher = more trustworthy.</p>
+  </div>
+
+  <div class="step">
+    <div class="step-num">Step 3 of 3</div>
+    <h2>Pay non-custodially</h2>
+    <pre><span class="comment"># Get payment calldata — no money moves until you broadcast</span>
+wayforth_pay(
+  service_id=<span class="string">"0x6c536ffe..."</span>,
+  service_owner=<span class="string">"0xProviderAddress"</span>,
+  amount_usdc=<span class="string">0.001</span>
+)
+
+<span class="comment"># Returns Base transaction calldata</span>
+<span class="comment"># Agent broadcasts → settles in ~2 seconds</span>
+<span class="comment"># Routing fee: 0.75%–1.5% (tiered by API key)</span>
+<span class="comment"># Currently on Base Sepolia testnet — no real funds needed</span></pre>
+  </div>
+
+  <hr class="divider">
+
+  <div class="step">
+    <div class="step-num">WayforthQL — structured queries</div>
+    <h2>For more control, use WayforthQL</h2>
+    <pre>POST /query
+{
+  <span class="string">"query"</span>: <span class="string">"fast inference for coding agents"</span>,
+  <span class="string">"tier_min"</span>: 2,
+  <span class="string">"protocol"</span>: <span class="string">"x402"</span>,
+  <span class="string">"sort_by"</span>: <span class="string">"wri"</span>,
+  <span class="string">"price_max"</span>: 0.001,
+  <span class="string">"limit"</span>: 5
+}</pre>
+  </div>
+
+  <div class="step">
+    <div class="step-num">Python SDK</div>
+    <h2>Or use the Python SDK directly</h2>
+    <pre>pip install wayforth-sdk
+
+<span class="keyword">from</span> wayforth.client <span class="keyword">import</span> WayforthClient
+
+client = WayforthClient()
+results = client.query(
+    query=<span class="string">"real-time stock data"</span>,
+    tier_min=2,
+    sort_by=<span class="string">"wri"</span>
+)
+<span class="keyword">for</span> r <span class="keyword">in</span> results[<span class="string">"results"</span>]:
+    print(r[<span class="string">"name"</span>], <span class="string">"WRI:"</span>, r[<span class="string">"wri"</span>])</pre>
+  </div>
+
+  <hr class="divider">
+
+  <div class="links">
+    <a class="link" href="/docs">API Reference →</a>
+    <a class="link" href="https://wayforth.io/demo">Live Demo →</a>
+    <a class="link" href="https://wayforth.io/leaderboard">Leaderboard →</a>
+    <a class="link" href="/wayforthql-spec">WayforthQL Spec →</a>
+    <a class="link" href="https://github.com/WayforthOfficial/wayforth">GitHub →</a>
+    <a class="link" href="mailto:hello@wayforth.io">hello@wayforth.io</a>
+  </div>
+</div>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 @app.get("/search/suggestions")
