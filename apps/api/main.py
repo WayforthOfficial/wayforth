@@ -2569,42 +2569,82 @@ async def admin_update_member(
 async def admin_overview(request: Request, db=Depends(get_db)):
     session = await get_admin_session(request, db)
 
-    stats = await db.fetchrow("""
-        SELECT
-            (SELECT COUNT(*) FROM services) as total_services,
-            (SELECT COUNT(*) FROM services WHERE coverage_tier >= 2) as tier2,
-            (SELECT COUNT(*) FROM users) as total_users,
-            (SELECT COUNT(*) FROM api_keys) as total_keys,
-            (SELECT COUNT(*) FROM search_analytics
-             WHERE created_at > NOW() - INTERVAL '24h') as searches_24h,
-            (SELECT COUNT(*) FROM search_analytics
-             WHERE created_at > NOW() - INTERVAL '7 days') as searches_7d,
-            (SELECT COUNT(*) FROM tier3_applications
-             WHERE status = 'pending') as pending_tier3,
-            (SELECT COUNT(*) FROM agent_identities) as total_agents
-    """)
+    try:
+        total_services = await db.fetchval("SELECT COUNT(*) FROM services") or 0
+    except: total_services = 0
 
-    daily = await db.fetch("""
-        SELECT DATE(created_at) as date, COUNT(*) as count
-        FROM search_analytics
-        WHERE created_at > NOW() - INTERVAL '30 days'
-        GROUP BY DATE(created_at)
-        ORDER BY date ASC
-    """)
+    try:
+        tier2 = await db.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2") or 0
+    except: tier2 = 0
 
-    signups = await db.fetch("""
-        SELECT DATE(created_at) as date, COUNT(*) as count
-        FROM users
-        WHERE created_at > NOW() - INTERVAL '30 days'
-        GROUP BY DATE(created_at)
-        ORDER BY date ASC
-    """)
+    try:
+        total_users = await db.fetchval("SELECT COUNT(*) FROM users") or 0
+    except: total_users = 0
+
+    try:
+        total_keys = await db.fetchval("SELECT COUNT(*) FROM api_keys") or 0
+    except: total_keys = 0
+
+    try:
+        searches_24h = await db.fetchval(
+            "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '24h'"
+        ) or 0
+    except: searches_24h = 0
+
+    try:
+        searches_7d = await db.fetchval(
+            "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '7 days'"
+        ) or 0
+    except: searches_7d = 0
+
+    try:
+        pending_tier3 = await db.fetchval(
+            "SELECT COUNT(*) FROM tier3_applications WHERE status = 'pending'"
+        ) or 0
+    except: pending_tier3 = 0
+
+    try:
+        total_agents = await db.fetchval("SELECT COUNT(*) FROM agent_identities") or 0
+    except: total_agents = 0
+
+    try:
+        daily = await db.fetch("""
+            SELECT DATE(created_at) as date, COUNT(*) as count
+            FROM search_analytics
+            WHERE created_at > NOW() - INTERVAL '30 days'
+            GROUP BY DATE(created_at)
+            ORDER BY date ASC
+        """)
+    except: daily = []
+
+    try:
+        signups = await db.fetch("""
+            SELECT DATE(created_at) as date, COUNT(*) as count
+            FROM users
+            WHERE created_at > NOW() - INTERVAL '30 days'
+            GROUP BY DATE(created_at)
+            ORDER BY date ASC
+        """)
+    except: signups = []
 
     return {
-        "stats": dict(stats),
+        "stats": {
+            "total_services": total_services,
+            "tier2": tier2,
+            "total_users": total_users,
+            "total_keys": total_keys,
+            "searches_24h": searches_24h,
+            "searches_7d": searches_7d,
+            "pending_tier3": pending_tier3,
+            "total_agents": total_agents,
+        },
         "daily_searches": [{"date": str(r['date']), "count": r['count']} for r in daily],
         "daily_signups": [{"date": str(r['date']), "count": r['count']} for r in signups],
-        "admin": {"email": session['email'], "role": session['role']}
+        "admin": {
+            "email": session['email'],
+            "role": session['role'],
+            "full_name": session['full_name'],
+        }
     }
 
 
