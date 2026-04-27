@@ -950,7 +950,7 @@ async def get_stats(request: Request, db=Depends(get_db)):
         "searches_7d": searches_7d,
         "mcp_tools": 9,
         "api_version": "0.1.5",
-        "mcp_version": "0.1.7",
+        "mcp_version": "0.1.8",
     }
 
 
@@ -2599,7 +2599,7 @@ async def admin_overview(request: Request, db=Depends(get_db)):
 
     try:
         pending_tier3 = await db.fetchval(
-            "SELECT COUNT(*) FROM tier3_applications WHERE status = 'pending'"
+            "SELECT COUNT(*) FROM tier3_applications WHERE kyb_status = 'pending'"
         ) or 0
     except: pending_tier3 = 0
 
