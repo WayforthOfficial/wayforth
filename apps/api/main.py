@@ -1546,7 +1546,7 @@ async def pricing_json(request: Request):
             },
             {
                 "name": "Starter",
-                "price_monthly_usd": 29,
+                "price_monthly_usd": 19,
                 "rate_limit_per_minute": 30,
                 "monthly_quota": 10000,
                 "routing_fee_pct": 1.25,
@@ -1557,7 +1557,7 @@ async def pricing_json(request: Request):
             },
             {
                 "name": "Pro",
-                "price_monthly_usd": 149,
+                "price_monthly_usd": 99,
                 "rate_limit_per_minute": 100,
                 "monthly_quota": 100000,
                 "routing_fee_pct": 1.0,
@@ -2115,8 +2115,8 @@ async def key_tiers():
     return {
         "tiers": [
             {"tier": "free",       "price_monthly_usd": 0,    "rpm": 10,  "monthly_quota": 1000,   "routing_fee_pct": 1.5,  "features": ["search", "query", "pay", "services"]},
-            {"tier": "starter",    "price_monthly_usd": 29,   "rpm": 30,  "monthly_quota": 10000,  "routing_fee_pct": 1.25, "features": ["search", "query", "pay", "services", "intelligence", "webhooks"]},
-            {"tier": "pro",        "price_monthly_usd": 149,  "rpm": 100, "monthly_quota": 100000, "routing_fee_pct": 1.0,  "features": ["search", "query", "pay", "services", "intelligence", "webhooks", "history", "graph"]},
+            {"tier": "starter",    "price_monthly_usd": 19,   "rpm": 30,  "monthly_quota": 10000,  "routing_fee_pct": 1.25, "features": ["search", "query", "pay", "services", "intelligence", "webhooks"]},
+            {"tier": "pro",        "price_monthly_usd": 99,   "rpm": 100, "monthly_quota": 100000, "routing_fee_pct": 1.0,  "features": ["search", "query", "pay", "services", "intelligence", "webhooks", "history", "graph"]},
             {"tier": "enterprise", "price_monthly_usd": None, "rpm": 500, "monthly_quota": -1,     "routing_fee_pct": 0.75, "features": ["everything", "sla", "private_catalog", "dedicated_infra", "custom_probing"]},
         ],
         "note": "Routing fee applies to all payment transactions. Higher tiers receive reduced fees."
