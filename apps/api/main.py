@@ -349,6 +349,8 @@ async def check_auth(request: Request) -> dict:
             "authenticated": True,
             "tier": key["tier"],
             "key_id": str(key["id"]),
+            "usage_this_month": key["usage_this_month"] + 1,
+            "monthly_quota": key["monthly_quota"],
             "anonymous_count": None,
             "ip": ip,
         }
@@ -619,7 +621,11 @@ async def search_services(
         "fallback": fallback_used,
         "fallback_reason": fallback_reason,
     }
-    if not auth["authenticated"]:
+    if auth["authenticated"]:
+        response["tier"] = auth["tier"]
+        response["usage_this_month"] = auth["usage_this_month"]
+        response["monthly_quota"] = auth["monthly_quota"]
+    else:
         remaining = _ANON_DAILY_LIMIT - auth["anonymous_count"]
         response["anonymous_searches_remaining"] = remaining
         if remaining > 0:
