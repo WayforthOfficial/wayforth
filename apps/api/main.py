@@ -2990,8 +2990,8 @@ async def run_seed_v7(request: Request, db=Depends(get_db)):
         if not existing:
             await db.execute("""
                 INSERT INTO services (name, description, endpoint_url, category,
-                                     pricing_usdc, payment_protocol, coverage_tier, source, active)
-                VALUES ($1, $2, $3, $4, $5, $6, 2, 'curated_v7', true)
+                                     pricing_usdc, payment_protocol, coverage_tier, source, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, 2, 'curated_v7', NOW())
             """, svc["name"], svc["description"], svc["endpoint_url"],
                 svc["category"], svc["pricing_usdc"], svc["payment_protocol"])
             added += 1
