@@ -3060,3 +3060,18 @@ async def admin_user_searches(request: Request, user_id: str, limit: int = 50, d
         "searches": [dict(s) for s in searches],
         "total": len(searches)
     }
+
+
+# ── TEMP: CLEAN TEST QUERIES (remove after run) ───────────────────────────────
+
+@app.post("/admin/clean-test-queries")
+async def clean_test_queries(request: Request, db=Depends(get_db)):
+    key = request.headers.get("X-Admin-Key", "")
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=401)
+    result = await db.execute("""
+        DELETE FROM search_analytics
+        WHERE query ILIKE 'test%'
+    """)
+    remaining = await db.fetchval("SELECT COUNT(*) FROM search_analytics WHERE query ILIKE 'test%'")
+    return {"deleted": result, "remaining": remaining}
