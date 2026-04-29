@@ -28,7 +28,7 @@ wayforth_pay(service_id, owner_address, amount_usdc)
 
 ## What's Live
 
-- **190+ real API endpoints indexed** — MCP servers, REST APIs, x402-enabled services
+- **200+ real API endpoints indexed** — MCP servers, REST APIs, x402-enabled services
 - **147 Tier 2 verified** — automated 90%+ uptime, probed every 6 hours, auto-demoted on failure
 - **WayforthRank** — proprietary multi-signal ranking engine
 - **WayforthQL** — declarative query language for structured service discovery
@@ -119,7 +119,7 @@ python examples/research_agent.py "What are the best vector databases for RAG in
 See [`examples/research_agent.py`](examples/research_agent.py) for the full implementation.
 
 **What it demonstrates:**
-- Natural language service discovery across 190+ real API endpoints
+- Natural language service discovery across 200+ real API endpoints
 - WayforthRank scoring — best service rises to the top automatically  
 - WayforthQL structured queries with tier and protocol filters
 - Non-custodial payment calldata generation
