@@ -173,6 +173,17 @@ _DB_URL = os.environ.get("DATABASE_URL", "")
 _ASYNCPG_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 
+async def _cleanup_anon_searches_loop(app: "FastAPI"):
+    while True:
+        await asyncio.sleep(3600)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        stale = [k for k in list(app.state.anon_searches) if not k.endswith(f":{today}")]
+        for k in stale:
+            app.state.anon_searches.pop(k, None)
+        if stale:
+            logger.info(f"Cleaned {len(stale)} stale anon search entries")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Wayforth API starting, environment={ENVIRONMENT}")
@@ -180,6 +191,7 @@ async def lifespan(app: FastAPI):
     if not ok:
         logger.warning("DB connection check failed — starting anyway")
     app.state.db_ok = ok
+    app.state.anon_searches = {}
     try:
         app.state.pool = await asyncpg.create_pool(_ASYNCPG_URL, min_size=2, max_size=10)
         app.state.db_ok = True
@@ -187,7 +199,9 @@ async def lifespan(app: FastAPI):
         logger.error(f"DB error: {e}")
         logger.warning(f"DB pool creation failed: {e} — /services will be unavailable")
         app.state.pool = None
+    cleanup_task = asyncio.create_task(_cleanup_anon_searches_loop(app))
     yield
+    cleanup_task.cancel()
     if app.state.pool:
         await app.state.pool.close()
 
@@ -265,6 +279,104 @@ async def add_request_id(request: Request, call_next):
 async def get_db(request: Request):
     async with request.app.state.pool.acquire() as conn:
         yield conn
+
+
+class _AuthError(Exception):
+    def __init__(self, status_code: int, content: dict):
+        self.status_code = status_code
+        self.content = content
+
+
+@app.exception_handler(_AuthError)
+async def _auth_error_handler(request: Request, exc: _AuthError):
+    return JSONResponse(status_code=exc.status_code, content=exc.content)
+
+
+_ANON_DAILY_LIMIT = 3
+_TIER_RPM = {"free": 10, "starter": 30, "pro": 100, "enterprise": 500}
+
+
+async def check_auth(request: Request) -> dict:
+    """Unified auth dependency for /search and /query.
+
+    Authenticated (X-Wayforth-API-Key present):
+      - Validates key, checks monthly quota, increments usage.
+      - Returns authenticated=True with tier/key_id.
+
+    Anonymous (no key):
+      - Enforces 3 searches/IP/day via in-memory dict.
+      - Returns authenticated=False with anonymous_count.
+    """
+    ip = get_real_ip(request)
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+
+    if raw_key:
+        pool = request.app.state.pool
+        if not pool:
+            raise HTTPException(status_code=503, detail="Database unavailable")
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        async with pool.acquire() as db:
+            key = await db.fetchrow("""
+                SELECT id, tier, rate_limit_per_minute, monthly_quota,
+                       usage_this_month, quota_reset_at, active
+                FROM api_keys WHERE key_hash = $1
+            """, key_hash)
+
+        if not key or not key["active"]:
+            raise _AuthError(401, {
+                "error": "invalid_key",
+                "message": "Invalid API key. Get yours at wayforth.io/dashboard",
+            })
+
+        if key["monthly_quota"] > 0 and key["usage_this_month"] >= key["monthly_quota"]:
+            raise _AuthError(429, {
+                "error": "quota_exceeded",
+                "message": "Monthly quota exceeded. Upgrade at wayforth.io/pricing",
+                "upgrade_url": "https://wayforth.io/pricing",
+            })
+
+        async with pool.acquire() as db:
+            await db.execute("""
+                UPDATE api_keys SET usage_this_month = usage_this_month + 1,
+                                    last_used_at = NOW()
+                WHERE id = $1
+            """, key["id"])
+
+        rpm = _TIER_RPM.get(key["tier"], 10)
+        request.state.rate_limit_tier = key["tier"]
+        request.state.rate_limit_rpm = rpm
+        return {
+            "authenticated": True,
+            "tier": key["tier"],
+            "key_id": str(key["id"]),
+            "anonymous_count": None,
+            "ip": ip,
+        }
+
+    # Anonymous path
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    anon_key = f"{ip}:{today}"
+    anon_dict = request.app.state.anon_searches
+    count = anon_dict.get(anon_key, 0)
+
+    if count >= _ANON_DAILY_LIMIT:
+        raise _AuthError(429, {
+            "error": "free_limit_reached",
+            "message": "You've used your 3 free searches. Sign up free for 1,000 searches/month — no credit card required.",
+            "signup_url": "https://wayforth.io/signup",
+            "dashboard_url": "https://wayforth.io/dashboard",
+        })
+
+    anon_dict[anon_key] = count + 1
+    request.state.rate_limit_tier = "anonymous"
+    request.state.rate_limit_rpm = 10
+    return {
+        "authenticated": False,
+        "tier": None,
+        "key_id": None,
+        "anonymous_count": count + 1,
+        "ip": ip,
+    }
 
 
 @app.get("/health")
@@ -385,7 +497,6 @@ def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0,
         "Falls back to keyword scoring when ANTHROPIC_API_KEY is not set."
     ),
 )
-@limiter.limit("10/minute")
 async def search_services(
     request: Request,
     q: str = Query(description="Natural language query, e.g. 'fast cheap inference for coding'"),
@@ -395,6 +506,7 @@ async def search_services(
     session_id: str = Query(default="", description="Optional agent session ID for return-visit tracking"),
     agent_id: str = Query(default="", description="Optional agent identity ID for reputation tracking"),
     db=Depends(get_db),
+    auth: dict = Depends(check_auth),
 ):
     try:
         async with app.state.pool.acquire() as conn:
@@ -498,7 +610,7 @@ async def search_services(
         }
         for s in top
     ]
-    return {
+    response: dict = {
         "query_id": query_id,
         "query": q,
         "total_results": len(top),
@@ -507,6 +619,13 @@ async def search_services(
         "fallback": fallback_used,
         "fallback_reason": fallback_reason,
     }
+    if not auth["authenticated"]:
+        remaining = _ANON_DAILY_LIMIT - auth["anonymous_count"]
+        response["anonymous_searches_remaining"] = remaining
+        if remaining > 0:
+            response["signup_url"] = "https://wayforth.io/signup"
+            response["message"] = f"{remaining} free {'search' if remaining == 1 else 'searches'} remaining. Sign up free for 1,000/month."
+    return response
 
 
 @app.get("/quickstart", include_in_schema=False)
@@ -712,8 +831,7 @@ class WayforthQLQuery(BaseModel):
 
 
 @app.post("/query")
-@limiter.limit("10/minute")
-async def wayforthql(request: Request, body: WayforthQLQuery):
+async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depends(check_auth)):
     """WayforthQL — declarative query language for agent service discovery."""
     conditions = ["coverage_tier >= $1"]
     params: list = [body.tier_min if body.tier_min is not None else 0]
@@ -832,7 +950,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery):
         except Exception as e:
             logger.warning(f"with_similar failed: {e}")
 
-    return {
+    response: dict = {
         "query": body.query,
         "results": results,
         "total": len(results),
@@ -846,6 +964,13 @@ async def wayforthql(request: Request, body: WayforthQLQuery):
             "exclude_ids": body.exclude_ids or [],
         },
     }
+    if not auth["authenticated"]:
+        remaining = _ANON_DAILY_LIMIT - auth["anonymous_count"]
+        response["anonymous_searches_remaining"] = remaining
+        if remaining > 0:
+            response["signup_url"] = "https://wayforth.io/signup"
+            response["message"] = f"{remaining} free {'search' if remaining == 1 else 'searches'} remaining. Sign up free for 1,000/month."
+    return response
 
 
 @app.get("/services")
