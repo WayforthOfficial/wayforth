@@ -3173,6 +3173,17 @@ async def run_seed_v8(request: Request, db=Depends(get_db)):
         {"name": "OpenSea API", "description": "NFT marketplace data. Collections, assets, orders, events. Largest NFT marketplace.", "endpoint_url": "https://api.opensea.io/api/v2", "category": "data", "pricing_usdc": 0.0, "payment_protocol": "wayforth"},
     ]
 
+    # Apply migration 018 inline — expand category constraint for new service types
+    await db.execute("ALTER TABLE services DROP CONSTRAINT IF EXISTS services_category_check")
+    await db.execute("""
+        ALTER TABLE services ADD CONSTRAINT services_category_check
+        CHECK (category IN (
+            'inference', 'data', 'translation', 'image', 'code', 'audio', 'embeddings',
+            'communication', 'location', 'identity', 'payments', 'productivity',
+            'devops', 'legal', 'healthcare', 'real_estate', 'social', 'analytics'
+        ))
+    """)
+
     added = skipped = 0
     for svc in SERVICES_V8:
         existing = await db.fetchval(
