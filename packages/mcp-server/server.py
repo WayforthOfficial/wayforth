@@ -399,7 +399,7 @@ async def wayforth_quickstart() -> str:
 
 ## What is Wayforth?
 The search engine and payment rail for AI agents.
-190+ verified API endpoints. 154 Tier 2 verified. Semantic intent ranking.
+200+ verified API endpoints. 154 Tier 2 verified. Semantic intent ranking.
 
 ## Install
 uvx wayforth-mcp

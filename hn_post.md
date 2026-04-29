@@ -42,7 +42,7 @@ No API keys. No billing relationships. No integration code.
 
 What's live today:
 
-- 190+ real API endpoints indexed across 7 categories (inference, data,
+- 200+ real API endpoints indexed across 7 categories (inference, data,
   translation, image, code, audio, embeddings)
 - 147 Tier 2 verified — automatically probed every 6 hours, 90%+ uptime
   required, auto-demoted after 3 consecutive failures. No paid placement.
