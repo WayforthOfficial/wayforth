@@ -32,6 +32,106 @@ STRIPE_PACKAGES = {
     "pro":     {"price_cents": 9900,  "credits": 300000,  "label": "Pro Pack"},
     "growth":  {"price_cents": 29900, "credits": 1000000, "label": "Growth Pack"},
 }
+
+# Service proxy configuration
+# Wayforth holds API keys for these services
+# Developer never needs their own keys
+# credits_per_unit = credits charged per API unit (with markup)
+SERVICE_PROXIES = {
+    "deepl": {
+        "name": "DeepL API",
+        "endpoint": "https://api-free.deepl.com/v2/translate",
+        "key_env": "DEEPL_API_KEY",
+        "category": "translation",
+        "unit": "1000_chars",
+        "cost_per_unit_usd": 0.0000250,
+        "markup_pct": 0.30,
+        "credits_per_unit": 33,
+        "params_map": {
+            "text": "text",
+            "target_lang": "target_lang",
+            "source_lang": "source_lang",
+        },
+    },
+    "openweather": {
+        "name": "OpenWeatherMap API",
+        "endpoint": "https://api.openweathermap.org/data/2.5/weather",
+        "key_env": "OPENWEATHER_API_KEY",
+        "category": "data",
+        "unit": "call",
+        "cost_per_unit_usd": 0.0000010,
+        "markup_pct": 0.50,
+        "credits_per_unit": 2,
+        "params_map": {
+            "city": "q",
+            "lat": "lat",
+            "lon": "lon",
+            "units": "units",
+        },
+    },
+    "newsapi": {
+        "name": "NewsAPI",
+        "endpoint": "https://newsapi.org/v2/everything",
+        "key_env": "NEWSAPI_API_KEY",
+        "category": "data",
+        "unit": "call",
+        "cost_per_unit_usd": 0.0000010,
+        "markup_pct": 0.50,
+        "credits_per_unit": 2,
+        "params_map": {
+            "query": "q",
+            "language": "language",
+            "page_size": "pageSize",
+            "from": "from",
+            "to": "to",
+        },
+    },
+    "groq": {
+        "name": "Groq API",
+        "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+        "key_env": "GROQ_API_KEY",
+        "category": "inference",
+        "unit": "1m_tokens",
+        "cost_per_unit_usd": 0.000270,
+        "markup_pct": 0.30,
+        "credits_per_unit": 351,
+        "params_map": {
+            "messages": "messages",
+            "model": "model",
+            "temperature": "temperature",
+            "max_tokens": "max_tokens",
+        },
+    },
+    "libretranslate": {
+        "name": "LibreTranslate",
+        "endpoint": "https://libretranslate.com/translate",
+        "key_env": "LIBRETRANSLATE_API_KEY",
+        "category": "translation",
+        "unit": "call",
+        "cost_per_unit_usd": 0.0,
+        "markup_pct": 0.0,
+        "credits_per_unit": 1,
+        "params_map": {
+            "q": "q",
+            "source": "source",
+            "target": "target",
+        },
+    },
+    "pdfco": {
+        "name": "PDFco API",
+        "endpoint": "https://api.pdf.co/v1",
+        "key_env": "PDFCO_API_KEY",
+        "category": "data",
+        "unit": "call",
+        "cost_per_unit_usd": 0.000100,
+        "markup_pct": 0.30,
+        "credits_per_unit": 130,
+        "params_map": {
+            "url": "url",
+            "operation": "operation",
+        },
+    },
+}
 from db import check_db
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
@@ -444,6 +544,12 @@ async def system_status(db=Depends(get_db)):
             "stripe": "active",
             "credits_per_dollar": 1000,
             "free_credits_on_signup": 2000,
+        },
+        "proxy_services": {
+            "total": len(SERVICE_PROXIES),
+            "available": len([k for k, v in SERVICE_PROXIES.items() if os.environ.get(v["key_env"])]),
+            "endpoint": "/call",
+            "docs": "gateway.wayforth.io/docs#/default/wayforth_call_endpoint_call_post",
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -1381,6 +1487,216 @@ async def pay_stub(request: Request, db=Depends(get_db)):
             "dashboard": "https://wayforth.io/dashboard",
         }
     )
+
+
+@app.get("/call/services")
+async def list_callable_services():
+    """List all services available via wayforth_call() proxy."""
+    return {
+        "services": [
+            {
+                "key": k,
+                "name": v["name"],
+                "category": v["category"],
+                "credits_per_call": v["credits_per_unit"],
+                "unit": v["unit"],
+                "available": bool(os.environ.get(v["key_env"], "")),
+            }
+            for k, v in SERVICE_PROXIES.items()
+        ],
+        "total": len(SERVICE_PROXIES),
+        "tip": "More services added weekly. Request a service: wayforth.io/submit",
+    }
+
+
+@app.post("/call")
+@limiter.limit("30/minute")
+async def wayforth_call_endpoint(request: Request, db=Depends(get_db)):
+    """
+    Execute an API call through Wayforth proxy.
+    Wayforth holds the API key, charges credits with markup.
+    Developer never needs their own API key per service.
+
+    Credits charged = actual API cost + 30% Wayforth markup
+    """
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "api_key_required",
+                "message": "Get your free API key at wayforth.io/dashboard",
+            },
+        )
+
+    key_record = await db.fetchrow(
+        """
+        SELECT k.user_id, k.tier, u.email
+        FROM api_keys k JOIN users u ON u.id = k.user_id
+        WHERE k.key_hash = $1 AND k.active = true
+        """,
+        hashlib.sha256(api_key.encode()).hexdigest(),
+    )
+
+    if not key_record:
+        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+
+    body = await request.json()
+    service_key = body.get("service", "").lower().strip()
+    params = body.get("params", {})
+
+    if not service_key:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "service_required",
+                "message": "Specify which service to call",
+                "available": list(SERVICE_PROXIES.keys()),
+                "example": {"service": "deepl", "params": {"text": "Hello", "target_lang": "ES"}},
+            },
+        )
+
+    if service_key not in SERVICE_PROXIES:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "service_not_found",
+                "message": f"Service '{service_key}' not in proxy catalog",
+                "available": list(SERVICE_PROXIES.keys()),
+                "tip": "Search first: wayforth_search() to find the right service",
+            },
+        )
+
+    proxy = SERVICE_PROXIES[service_key]
+
+    service_api_key = os.environ.get(proxy["key_env"], "")
+    if not service_api_key and proxy["cost_per_unit_usd"] > 0:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "service_unavailable",
+                "message": f"{proxy['name']} proxy not yet configured. Coming soon.",
+                "service": service_key,
+            },
+        )
+
+    credits_needed = proxy["credits_per_unit"]
+
+    success, balance_after = await check_and_deduct_credits(
+        db, str(key_record["user_id"]), credits_needed, f"/call/{service_key}", service_key
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "insufficient_credits",
+                "message": f"Need {credits_needed} credits. You have {balance_after}.",
+                "credits_needed": credits_needed,
+                "credits_balance": balance_after,
+                "top_up_url": "https://wayforth.io/dashboard",
+            },
+        )
+
+    # Map params using service-specific param names
+    mapped_params = {}
+    for our_key, their_key in proxy["params_map"].items():
+        if our_key in params:
+            mapped_params[their_key] = params[our_key]
+    for k, v in params.items():
+        if k not in proxy["params_map"] and k not in mapped_params:
+            mapped_params[k] = v
+
+    import time as _time
+    start_time = _time.time()
+
+    async def _refund(reason: str):
+        await db.execute(
+            "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() WHERE user_id = $2::uuid",
+            credits_needed, key_record["user_id"],
+        )
+        await db.execute(
+            "INSERT INTO credit_transactions (user_id, amount, balance_after, type, description) VALUES ($1::uuid, $2, $3, 'refund', $4)",
+            key_record["user_id"], credits_needed, balance_after + credits_needed, reason,
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if service_key == "deepl":
+                resp = await client.post(
+                    proxy["endpoint"],
+                    json=mapped_params,
+                    headers={"Authorization": f"DeepL-Auth-Key {service_api_key}"},
+                )
+            elif service_key == "groq":
+                if "model" not in mapped_params:
+                    mapped_params["model"] = "llama-3.1-8b-instant"
+                resp = await client.post(
+                    proxy["endpoint"],
+                    json=mapped_params,
+                    headers={"Authorization": f"Bearer {service_api_key}", "Content-Type": "application/json"},
+                )
+            elif service_key == "libretranslate":
+                mapped_params["api_key"] = service_api_key
+                resp = await client.post(proxy["endpoint"], json=mapped_params)
+            elif service_key == "openweather":
+                mapped_params["appid"] = service_api_key
+                resp = await client.get(proxy["endpoint"], params=mapped_params)
+            elif service_key == "newsapi":
+                mapped_params["apiKey"] = service_api_key
+                resp = await client.get(proxy["endpoint"], params=mapped_params)
+            else:
+                resp = await client.post(
+                    proxy["endpoint"],
+                    json=mapped_params,
+                    headers={"Authorization": f"Bearer {service_api_key}"},
+                )
+    except httpx.TimeoutException:
+        await _refund(f"Refund: {service_key} timeout")
+        raise HTTPException(
+            status_code=504,
+            detail={"error": "service_timeout", "message": f"{proxy['name']} timed out. Credits refunded."},
+        )
+    except Exception:
+        await _refund(f"Refund: {service_key} error")
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "service_error", "message": f"Error calling {proxy['name']}. Credits refunded."},
+        )
+
+    latency_ms = round((_time.time() - start_time) * 1000)
+
+    if resp.status_code >= 400:
+        await _refund(f"Refund: {service_key} HTTP {resp.status_code}")
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail={
+                "error": "service_error",
+                "service": proxy["name"],
+                "service_status": resp.status_code,
+                "message": "Credits refunded.",
+                "detail": resp.text[:500],
+            },
+        )
+
+    try:
+        result = resp.json()
+    except Exception:
+        result = {"raw": resp.text}
+
+    return {
+        "service": service_key,
+        "service_name": proxy["name"],
+        "result": result,
+        "credits_deducted": credits_needed,
+        "credits_remaining": balance_after,
+        "latency_ms": latency_ms,
+        "wayforth": {
+            "markup_pct": proxy["markup_pct"],
+            "unit": proxy["unit"],
+            "tip": "Search more services: wayforth.io/search",
+        },
+    }
 
 
 @app.post("/submit")
