@@ -112,12 +112,6 @@ def send_welcome_email(to_email: str, api_key_prefix: str, tier: str) -> bool:
     if not resend.api_key:
         return False
     try:
-        tier_benefits = {
-            "free": "10 req/min · 1,000 searches/month · 1.5% routing fee",
-            "starter": "30 req/min · 10,000 searches/month · 1.25% routing fee",
-            "pro": "100 req/min · 100,000 searches/month · 1.0% routing fee",
-            "enterprise": "500 req/min · Unlimited · 0.75% routing fee",
-        }
         resend.Emails.send({
             "from": FROM_EMAIL,
             "to": to_email,
@@ -125,11 +119,15 @@ def send_welcome_email(to_email: str, api_key_prefix: str, tier: str) -> bool:
             "html": f"""
             <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0F172A;color:#E2E8F0;padding:40px;border-radius:12px;">
                 <h1 style="color:#4F46E5;margin:0 0 8px">Wayforth</h1>
-                <p style="color:#64748B;margin:0 0 32px;font-size:13px">The search engine and payment rail for AI agents</p>
+                <p style="color:#64748B;margin:0 0 32px;font-size:13px">The search engine for AI agents</p>
 
                 <h2 style="color:#E2E8F0">Your API key is ready.</h2>
                 <p>Key prefix: <code style="background:#1E293B;padding:4px 8px;border-radius:4px;color:#4F46E5">{api_key_prefix}...</code></p>
-                <p>Tier: <strong>{tier.capitalize()}</strong> — {tier_benefits.get(tier, '')}</p>
+
+                <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0;border-left:4px solid #4F46E5;">
+                    <p style="color:#4F46E5;font-weight:bold;margin:0 0 8px">1,000 free credits included</p>
+                    <p style="color:#94A3B8;font-size:13px;margin:0">1 credit = $0.001 · Each search costs 1 credit · Top up anytime at wayforth.io/dashboard</p>
+                </div>
 
                 <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0">
                     <p style="color:#64748B;font-size:12px;margin:0 0 8px">QUICK START</p>
@@ -139,9 +137,9 @@ def send_welcome_email(to_email: str, api_key_prefix: str, tier: str) -> bool:
                 <p><strong>What you can do now:</strong></p>
                 <ul style="color:#94A3B8">
                     <li>Search 200+ verified API endpoints</li>
-                    <li>Get non-custodial payment calldata for any service</li>
                     <li>Use WayforthQL for structured queries</li>
-                    <li>Track your usage at /keys/usage</li>
+                    <li>Pay for services with credits via wayforth_pay()</li>
+                    <li>Track usage and buy more credits at wayforth.io/dashboard</li>
                 </ul>
 
                 <p style="margin-top:32px">

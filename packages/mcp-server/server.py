@@ -129,58 +129,40 @@ async def wayforth_search(query: str, limit: int = 5, tier_min: int = 2, categor
 
 
 @mcp.tool()
-async def wayforth_pay(
-    service_id: str,
-    service_owner: str,
-    amount_usdc: float,
-) -> str:
-    """
-    Route a USDC payment through Wayforth treasury on behalf of the developer.
-    Wayforth broadcasts the payment and deducts credits (100 per $1 routed).
+async def wayforth_pay(service_id: str, amount_usd: float) -> str:
+    """Pay for a service using Wayforth credits. 1 credit = $0.001 USD. Credits purchased at wayforth.io/dashboard
 
     Args:
-        service_id: bytes32 service identifier from wayforth_search
-        service_owner: Ethereum address of the service owner
-        amount_usdc: Amount in USDC (e.g. 1.0 for 1 USDC)
+        service_id: Service identifier from wayforth_search
+        amount_usd: Amount in USD (e.g. 0.01 for 1 cent = 10 credits)
     """
-    if not WAYFORTH_API_KEY:
-        return "Payment error: WAYFORTH_API_KEY not set. Set it in your MCP server environment."
+    api_key = os.environ.get("WAYFORTH_API_KEY", "")
+    if not api_key:
+        return "Error: WAYFORTH_API_KEY not set. Get your key at wayforth.io/dashboard"
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        try:
-            response = await client.post(
-                f"{API_BASE}/pay",
-                json={
-                    "service_id": service_id,
-                    "service_owner": service_owner,
-                    "amount_usdc": amount_usdc,
-                },
-                headers={"X-Wayforth-API-Key": WAYFORTH_API_KEY},
-            )
-            response.raise_for_status()
-            data = response.json()
+    credits_needed = max(1, round(amount_usd * 1000))
 
-            return (
-                f"Payment routed.\n\n"
-                f"tx_hash: {data['tx_hash']}\n"
-                f"status: {data['status']}\n"
-                f"amount: {data['amount_usdc']} USDC "
-                f"(fee: {data['fee_usdc']} USDC, net: {data['net_usdc']} USDC)\n"
-                f"credits_deducted: {data['credits_deducted']}\n"
-                f"credits_remaining: {data['credits_remaining']}\n"
-                f"network: {data['network']}"
-            )
-        except httpx.HTTPStatusError as e:
-            detail = e.response.json().get("detail", str(e))
-            if isinstance(detail, dict):
-                return (
-                    f"Payment failed: {detail.get('error', 'unknown')} — "
-                    f"{detail.get('message', '')} "
-                    f"(balance: {detail.get('balance', '?')}, required: {detail.get('required', '?')})"
-                )
-            return f"Payment failed: {detail}"
-        except Exception as e:
-            return f"Payment error: {str(e)}"
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{API_BASE}/billing/deduct",
+            headers={"X-Wayforth-API-Key": api_key},
+            json={
+                "service_id": service_id,
+                "amount_usd": amount_usd,
+                "credits": credits_needed,
+            },
+            timeout=10.0,
+        )
+
+    if resp.status_code == 402:
+        data = resp.json()
+        return f"Insufficient credits. Balance: {data.get('balance', 0)} credits. Top up at wayforth.io/dashboard"
+
+    if resp.status_code == 200:
+        data = resp.json()
+        return f"Payment processed. Credits deducted: {data['credits_deducted']}. Remaining: {data['credits_remaining']}"
+
+    return f"Payment error: {resp.status_code}"
 
 
 @mcp.tool()

@@ -26,7 +26,14 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address  # fallback only
 from web3 import Web3
 
-from chain import ESCROW_ADDRESS, PAYMENT_INFO, REGISTRY_ADDRESS, build_payment_calldata, get_chain_stats
+import stripe
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+
+STRIPE_PACKAGES = {
+    "starter": {"price_cents": 1900,  "credits": 20000,  "label": "Starter Pack"},
+    "pro":     {"price_cents": 9900,  "credits": 120000, "label": "Pro Pack"},
+    "growth":  {"price_cents": 29900, "credits": 400000, "label": "Growth Pack"},
+}
 from db import check_db
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
@@ -431,35 +438,21 @@ async def system_status(db=Depends(get_db)):
         "searches_24h": searches,
         "api": "operational",
         "database": "operational",
+        "billing": {
+            "stripe": "active",
+            "credits_per_dollar": 1000,
+            "free_credits_on_signup": 1000,
+        },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
 @app.get("/chain")
-@limiter.limit("10/minute")
-def chain_info(request: Request):
-    """On-chain contract addresses, stats, and supported payment protocols"""
-    chain = get_chain_stats()
-    return {
-        "wayforth_escrow": {
-            "address": chain.get("escrow"),
-            "fee_pct": chain.get("fee_pct"),
-            "use_for": "services without x402 support",
-            **{k: v for k, v in chain.items() if k not in ("escrow", "fee_pct")},
-        },
-        "x402": {
-            "protocol": "HTTP 402",
-            "fee_pct": 0,
-            "use_for": "services with native x402 support",
-            "docs": "https://x402.org",
-        },
-        "mainnet": {
-            "status": "coming_soon",
-            "target": "Q3 2026",
-            "requirement": "Independent security audit required before mainnet deployment",
-            "current_network": "Base Sepolia (testnet) — no real funds required",
-        },
-    }
+async def chain_stub():
+    raise HTTPException(
+        status_code=410,
+        detail={"error": "endpoint_deprecated", "message": "Blockchain payment rail removed. See /billing for credits."}
+    )
 
 
 def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0, payment_boost: float = 0.0) -> float:
@@ -658,11 +651,12 @@ async def search_services(
             "coverage_tier": s.get("coverage_tier"),
             "category": s.get("category"),
             "endpoint_url": s.get("endpoint_url"),
-            "pricing_usdc": s.get("pricing_usdc"),
-            "payment_protocol": s.get("payment_protocol", "wayforth"),
+            "pricing": {
+                "per_call_usd": s.get("pricing_usdc"),
+                "credits_per_call": max(1, round((s.get("pricing_usdc") or 0.001) * 1000)),
+            },
             "service_id": "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest(),
             "wayforth_id": f"wayforth://{s.get('name','').lower().replace(' ','_').replace('/','_')[:30]}/{hashlib.sha256(s.get('endpoint_url','').encode()).hexdigest()[:8]}",
-            "payment": PAYMENT_INFO,
         }
         for s in top
     ]
@@ -886,7 +880,6 @@ class WayforthQLQuery(BaseModel):
     exclude_ids: list[str] | None = []  # service_id SHA256 hashes to exclude
     sort_by: str | None = "wri"       # 'wri' | 'score' | 'price' | 'tier'
     limit: int | None = 5
-    with_payment_calldata: bool | None = False
     with_similar: bool | None = False  # include similar services for top result
 
 
@@ -984,13 +977,13 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
             "coverage_tier": s.get("coverage_tier"),
             "category": s.get("category"),
             "endpoint_url": s.get("endpoint_url"),
-            "pricing_usdc": s.get("pricing_usdc"),
-            "payment_protocol": s.get("payment_protocol", "wayforth"),
+            "pricing": {
+                "per_call_usd": s.get("pricing_usdc"),
+                "credits_per_call": max(1, round((s.get("pricing_usdc") or 0.001) * 1000)),
+            },
             "service_id": service_id,
             "wayforth_id": f"wayforth://{name_slug}/{service_id[2:10]}",
         }
-        if body.with_payment_calldata:
-            entry["payment"] = PAYMENT_INFO
         results.append(entry)
 
     # Attach similar services for top result when requested
@@ -1385,81 +1378,16 @@ class AgentIdentityRequest(BaseModel):
 
 @app.post("/pay")
 @limiter.limit("20/minute")
-async def pay(request: Request, req: PayRequest, db=Depends(get_db)):
-    if req.amount_usdc <= 0.000066:
-        raise HTTPException(
-            status_code=400,
-            detail="amount_usdc must be > 0.000066 (minimum to generate non-zero fee)",
-        )
-    if not Web3.is_address(req.service_owner):
-        raise HTTPException(status_code=400, detail="service_owner is not a valid Ethereum address")
-    sid = req.service_id.removeprefix("0x")
-    if len(sid) != 64 or not all(c in "0123456789abcdefABCDEF" for c in sid):
-        raise HTTPException(
-            status_code=400,
-            detail="service_id must be a valid bytes32 hex string (0x + 64 hex chars)",
-        )
-
-    raw_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not raw_key:
-        raise HTTPException(status_code=401, detail="API key required for payment routing")
-
-    key_row = await db.fetchrow(
-        "SELECT user_id, tier FROM api_keys WHERE key_hash = $1 AND active = TRUE",
-        hashlib.sha256(raw_key.encode()).hexdigest()
+async def pay_stub(request: Request, db=Depends(get_db)):
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "error": "endpoint_deprecated",
+            "message": "Direct blockchain payments removed. Use credits system instead.",
+            "docs": "https://wayforth.io/docs",
+            "dashboard": "https://wayforth.io/dashboard",
+        }
     )
-    if not key_row:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    user_id = str(key_row["user_id"])
-    fee_bps = TIER_LIMITS.get(key_row["tier"], {}).get("fee_bps", 150)
-    credit_cost = max(1, round(req.amount_usdc * CREDIT_COSTS["payment_routing"]))
-
-    success, balance_after = await check_and_deduct_credits(
-        db, user_id, credit_cost, "/pay", req.service_id
-    )
-    if not success:
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "error": "insufficient_credits",
-                "message": "Insufficient credits to route this payment.",
-                "balance": balance_after,
-                "required": credit_cost,
-                "top_up_url": "https://wayforth.io/dashboard/billing",
-                "packages_url": "https://wayforth.io/pricing",
-            }
-        )
-
-    # Stub broadcast — treasury wallet goes live mainnet Q3 2026
-    tx_hash = "0x" + secrets.token_hex(32)
-    broadcast_status = "stub"
-
-    amount_units = int(req.amount_usdc * 10**6)
-    fee_units = (amount_units * fee_bps) // 10000
-    net_units = amount_units - fee_units
-
-    logger.info(f"pay amount={req.amount_usdc} service={req.service_id[:10]} user={user_id[:8]} credits={credit_cost}")
-    if app.state.pool:
-        asyncio.create_task(_record_payment(app.state.pool, req.service_id))
-    if app.state.pool and req.query_id:
-        asyncio.create_task(_mark_search_converted(app.state.pool, req.query_id, req.service_id))
-    if app.state.pool and req.agent_id:
-        asyncio.create_task(_update_identity_payment(app.state.pool, req.agent_id, req.amount_usdc))
-
-    return {
-        "tx_hash": tx_hash,
-        "status": broadcast_status,
-        "amount_usdc": req.amount_usdc,
-        "fee_usdc": round(fee_units / 10**6, 6),
-        "net_usdc": round(net_units / 10**6, 6),
-        "fee_bps": fee_bps,
-        "credits_deducted": credit_cost,
-        "credits_remaining": balance_after,
-        "network": "base-sepolia",
-        "service_id": req.service_id,
-        "service_owner": req.service_owner,
-    }
 
 
 @app.post("/submit")
@@ -1646,10 +1574,6 @@ async def admin_stats(request: Request, key: str = ""):
             "api": "healthy",
             "db": "healthy" if getattr(app.state, "db_ok", False) else "unavailable",
             "sentry": "connected" if SENTRY_DSN else "not configured",
-            "contracts": {
-                "registry": REGISTRY_ADDRESS,
-                "escrow": ESCROW_ADDRESS,
-            },
         },
     }
 
@@ -1820,12 +1744,6 @@ async def pricing_json(request: Request):
             },
         ],
         "routing_fee_note": "Routing fee applies to all payment transactions. Higher tiers receive reduced fees.",
-        "contracts": {
-            "registry": "0x55810EfB3444A693556C3f9910dbFbF2dDaC369C",
-            "escrow": "0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809",
-            "network": "base-sepolia",
-            "usdc": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        },
     }
 
 
@@ -2816,40 +2734,187 @@ async def get_purchases(request: Request, db=Depends(get_db)):
     return {"purchases": [dict(p) for p in purchases]}
 
 
+@app.post("/billing/deduct")
+@limiter.limit("60/minute")
+async def deduct_credits(request: Request, db=Depends(get_db)):
+    """Deduct credits for a service payment. Called by wayforth_pay() MCP tool."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401)
+
+    key_record = await db.fetchrow(
+        "SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true",
+        hashlib.sha256(api_key.encode()).hexdigest()
+    )
+    if not key_record:
+        raise HTTPException(status_code=401)
+
+    body = await request.json()
+    service_id = body.get("service_id", "unknown")
+    amount_usd = float(body.get("amount_usd", 0.001))
+    credits_needed = max(1, round(amount_usd * 1000))
+
+    success, balance_after = await check_and_deduct_credits(
+        db,
+        str(key_record['user_id']),
+        credits_needed,
+        "/billing/deduct",
+        service_id
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "insufficient_credits",
+                "balance": balance_after,
+                "required": credits_needed,
+                "top_up_url": "https://wayforth.io/dashboard",
+            }
+        )
+
+    return {
+        "status": "ok",
+        "credits_deducted": credits_needed,
+        "credits_remaining": balance_after,
+        "amount_usd": amount_usd,
+        "service_id": service_id,
+    }
+
+
+@app.post("/billing/checkout")
+@limiter.limit("10/minute")
+async def create_checkout(request: Request, db=Depends(get_db)):
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401)
+
+    key_record = await db.fetchrow("""
+        SELECT k.user_id, u.email
+        FROM api_keys k JOIN users u ON u.id = k.user_id
+        WHERE k.key_hash = $1 AND k.active = true
+    """, hashlib.sha256(api_key.encode()).hexdigest())
+
+    if not key_record:
+        raise HTTPException(status_code=401)
+
+    body = await request.json()
+    package = body.get("package", "starter")
+
+    if package not in STRIPE_PACKAGES:
+        raise HTTPException(status_code=400, detail="Invalid package")
+
+    pkg = STRIPE_PACKAGES[package]
+
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "unit_amount": pkg["price_cents"],
+                    "product_data": {
+                        "name": f"Wayforth {pkg['label']}",
+                        "description": f"{pkg['credits']:,} credits · 1 credit = $0.001",
+                    },
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            success_url="https://wayforth.io/dashboard?purchase=success&package=" + package,
+            cancel_url="https://wayforth.io/dashboard?purchase=cancelled",
+            customer_email=key_record['email'],
+            metadata={
+                "user_id": str(key_record['user_id']),
+                "package": package,
+                "credits": str(pkg["credits"]),
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stripe error: {str(e)}")
+
+    await db.execute("""
+        INSERT INTO package_purchases
+        (user_id, package_name, credits_purchased, credits_total,
+         amount_usd, payment_method, payment_status, stripe_payment_id)
+        VALUES ($1, $2, $3, $3, $4, 'card', 'pending', $5)
+    """, key_record['user_id'], package, pkg['credits'],
+        pkg['price_cents'] / 100, session.id)
+
+    return {
+        "checkout_url": session.url,
+        "session_id": session.id,
+        "package": package,
+        "credits": pkg["credits"],
+        "price_usd": pkg["price_cents"] / 100,
+    }
+
+
 @app.post("/stripe/webhook")
 async def stripe_webhook(request: Request, db=Depends(get_db)):
     payload = await request.body()
     sig = request.headers.get("stripe-signature", "")
-
-    STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
     try:
-        import stripe
-        event = stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        event = stripe.Webhook.construct_event(payload, sig, secret)
+    except Exception:
+        raise HTTPException(status_code=400)
 
-    if event['type'] == 'checkout.session.completed':
-        session = event['data']['object']
-        customer_email = session.get('customer_email')
-        tier = session['metadata'].get('tier', 'starter')
-        subscription_id = session.get('subscription')
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        meta = session.get("metadata", {})
+        user_id = meta.get("user_id")
+        package = meta.get("package")
+        credits = int(meta.get("credits", 0))
+        session_id = session.get("id")
 
-        await db.execute("""
-            UPDATE api_keys SET tier = $1, stripe_subscription_id = $2,
-            subscription_status = 'active'
-            WHERE user_id = (SELECT id FROM users WHERE email = $3)
-        """, tier, subscription_id, customer_email)
+        if not all([user_id, package, credits]):
+            return {"status": "missing_metadata"}
 
-    elif event['type'] == 'customer.subscription.deleted':
-        subscription_id = event['data']['object']['id']
-        await db.execute("""
-            UPDATE api_keys SET tier = 'free', subscription_status = 'cancelled'
-            WHERE stripe_subscription_id = $1
-        """, subscription_id)
+        already = await db.fetchval(
+            "SELECT id FROM package_purchases WHERE stripe_payment_id = $1 AND payment_status = 'completed'",
+            session_id
+        )
+        if already:
+            return {"status": "already_processed"}
 
-    return {"status": "ok"}
-# s44 Sat Apr 25 12:29:13 PDT 2026
+        async with db.transaction():
+            await db.execute(
+                "UPDATE package_purchases SET payment_status = 'completed' WHERE stripe_payment_id = $1",
+                session_id
+            )
+
+            existing = await db.fetchrow(
+                "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
+                user_id
+            )
+
+            if existing:
+                new_balance = existing['credits_balance'] + credits
+                await db.execute("""
+                    UPDATE user_credits
+                    SET credits_balance = $1, lifetime_credits = lifetime_credits + $2,
+                        package_tier = $3, payment_method = 'card', updated_at = NOW()
+                    WHERE user_id = $4::uuid
+                """, new_balance, credits, package, user_id)
+            else:
+                new_balance = credits
+                await db.execute("""
+                    INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier, payment_method)
+                    VALUES ($1::uuid, $2, $2, $3, 'card')
+                """, user_id, credits, package)
+
+            await db.execute("""
+                INSERT INTO credit_transactions
+                (user_id, amount, balance_after, type, description)
+                VALUES ($1::uuid, $2, $3, 'purchase', $4)
+            """, user_id, credits, new_balance,
+                f"Stripe purchase: {package} pack — {credits:,} credits added")
+
+        return {"status": "credited", "credits_added": credits, "new_balance": new_balance}
+
+    return {"status": "ignored"}
 
 
 # ── ADMIN AUTH ───────────────────────────────────────────────────────────────
