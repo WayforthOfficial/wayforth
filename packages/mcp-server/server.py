@@ -58,8 +58,8 @@ async def _fetch_services(category: str = None, tier_min: int = None, limit: int
 
 def _format_ranked_service(idx: int, s: dict) -> str:
     tier = TIER_LABELS.get(s.get("coverage_tier", 0), str(s.get("coverage_tier")))
-    price = s.get("pricing_usdc")
-    price_str = f"${float(price):.4f}" if price is not None else "$0"
+    price = (s.get("pricing") or {}).get("per_call_usd") or s.get("pricing_usdc")
+    price_str = f"${float(price):.4f}/req" if price else "free"
     score = s.get("score", 0)
     reason = s.get("reason", "")
     service_id = s.get("service_id", "")
@@ -73,8 +73,8 @@ def _format_ranked_service(idx: int, s: dict) -> str:
 
 def _format_service(s: dict) -> str:
     tier = TIER_LABELS.get(s.get("coverage_tier", 0), str(s.get("coverage_tier")))
-    price = s.get("pricing_usdc")
-    price_str = f"${float(price):.4f} USDC" if price is not None else "free"
+    price = (s.get("pricing") or {}).get("per_call_usd") or s.get("pricing_usdc")
+    price_str = f"${float(price):.4f}/req" if price else "free"
     return (
         f"**{s['name']}** [{s.get('category', 'unknown')} / tier {tier}]\n"
         f"  {s.get('description') or 'No description'}\n"
@@ -113,8 +113,8 @@ async def wayforth_search(query: str, limit: int = 5, tier_min: int = 2, categor
     for i, svc in enumerate(results, 1):
         tier = svc.get("coverage_tier", 0)
         tier_label = "✅ Tier 2 Verified" if tier >= 2 else f"Tier {tier}"
-        price = svc.get("pricing_usdc")
-        price_str = f"${price:.6f}/req" if price else "Free"
+        price = (svc.get("pricing") or {}).get("per_call_usd") or svc.get("pricing_usdc")
+        price_str = f"${float(price):.6f}/req" if price else "Free"
         wri = svc.get("wri", "N/A")
         wayforth_id = svc.get("wayforth_id", "")
         lines.append(
@@ -388,7 +388,7 @@ async def wayforth_quickstart() -> str:
     return """# Wayforth Quickstart
 
 ## What is Wayforth?
-The search engine and payment rail for AI agents.
+The search engine for AI agents.
 200+ verified API endpoints. 154 Tier 2 verified. Semantic intent ranking.
 
 ## Install
@@ -400,10 +400,10 @@ wayforth_search("translate text to Spanish")
 → WRI = Wayforth Reliability Index — uptime + usage signals
 
 ## Step 2 — Pay
-wayforth_pay(service_id, owner_address, amount_usdc)
-→ Returns non-custodial Base transaction calldata
-→ Settles in ~2 seconds. Routing fee: 0.75%-1.5%.
-→ Currently on Base Sepolia testnet — no real funds needed.
+wayforth_pay(service_id, amount_usd)
+→ Deducts credits from your balance (1 credit = $0.001 USD)
+→ Returns credits_remaining after deduction.
+→ Top up credits at wayforth.io/dashboard
 
 ## WayforthQL (structured queries)
 POST https://gateway.wayforth.io/query
@@ -411,7 +411,7 @@ POST https://gateway.wayforth.io/query
 
 ## All 10 tools
 wayforth_search      — semantic service discovery
-wayforth_pay         — non-custodial payment calldata
+wayforth_pay         — pay for a service using credits
 wayforth_list        — browse catalog with filters
 wayforth_similar     — co-used services (Service Graph)
 wayforth_identity    — agent trust score and reputation

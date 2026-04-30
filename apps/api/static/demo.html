@@ -147,7 +147,7 @@
             <div class="result-reason">${s.reason}</div>
             <div class="result-meta">
               <span class="tier-badge tier-${s.coverage_tier}">Tier ${s.coverage_tier}</span>
-              <span>${s.pricing_usdc ? '$' + s.pricing_usdc + ' USDC/req' : 'Free'}</span>
+              <span>${(s.pricing?.per_call_usd || s.pricing_usdc) ? '$' + (s.pricing?.per_call_usd || s.pricing_usdc) + '/req' : 'Free'}</span>
               <a href="${s.endpoint_url}" target="_blank" class="result-endpoint">${s.endpoint_url}</a>
             </div>
           </div>
@@ -232,7 +232,7 @@
         <option value="data">Data</option>
         <option value="translation">Translation</option>
       </select>
-      <input id="s-price" placeholder="Price per request in USDC (0 = free)" type="number" step="0.000001" />
+      <input id="s-price" placeholder="Price per request in USD (0 = free)" type="number" step="0.000001" />
       <input id="s-email" placeholder="Contact email (optional)" />
       <button onclick="submitService()">Submit Service</button>
       <div id="submit-result"></div>

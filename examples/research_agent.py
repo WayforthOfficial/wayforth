@@ -65,9 +65,9 @@ async def research(topic: str) -> dict:
     print(f"   To pay for {top_search['name']}:")
     print(f"   wayforth_pay(")
     print(f"     service_id='{top_search.get('service_id', '')}',")
-    print(f"     amount_usdc=0.001  # ~$0.001 per search")
+    print(f"     amount_usd=0.001  # ~$0.001 per search (1 credit)")
     print(f"   )")
-    print(f"   → Non-custodial. Settles on Base in ~2s.")
+    print(f"   → Deducted from your credit balance.")
 
     # Step 5: Show the full WayforthQL query power
     print("\n5. WayforthQL structured query:")

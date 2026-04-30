@@ -98,7 +98,8 @@
         let html = `<div>Found <strong>${data.results.length} services</strong> for "${q}":</div>`;
 
         data.results.forEach(s => {
-          const protocol = s.payment_protocol === 'x402' ? ' · <span style="color:#10B981">x402</span>' : '';
+          const tierBadge = s.coverage_tier >= 2 ? ' · <span style="color:#10B981">✓ Tier 2</span>' : '';
+          const price = (s.pricing?.per_call_usd) || s.pricing_usdc;
           html += `
             <div class="service-card">
               <div style="display:flex;justify-content:space-between;align-items:center">
@@ -106,12 +107,12 @@
                 <span class="score">Score: ${s.score}</span>
               </div>
               <div class="reason">${s.reason}</div>
-              <div class="meta">Tier ${s.coverage_tier} · ${s.category} · ${s.pricing_usdc ? '$'+s.pricing_usdc+' USDC/req' : 'Free'}${protocol}</div>
+              <div class="meta">Tier ${s.coverage_tier} · ${s.category} · ${price ? '$'+price+'/req' : 'Free'}${tierBadge}</div>
             </div>`;
         });
 
         html += `<div style="color:#64748B;font-size:12px;margin-top:8px">
-          To pay for <strong>${topResult.name}</strong>, call <code style="color:#4F46E5">wayforth_pay("${(topResult.service_id||'').slice(0,16)}...", owner, amount)</code>
+          To pay for <strong>${topResult.name}</strong>, call <code style="color:#4F46E5">wayforth_pay("${(topResult.service_id||'').slice(0,16)}...", amount_usd)</code>
         </div>`;
 
         addMessage('assistant', html, true);

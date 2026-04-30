@@ -371,18 +371,14 @@
           <div class="status-row"><span class="status-label">Sentry</span>${statusPill(infra.sentry)}</div>
         </div>
         <div class="card">
-          <div class="card-label" style="margin-bottom:12px">Contracts (Base Sepolia)</div>
+          <div class="card-label" style="margin-bottom:12px">Payments</div>
           <div class="status-row">
-            <span class="status-label">Registry</span>
-            <span class="addr"><a href="https://sepolia.basescan.org/address/${infra.contracts.registry}" target="_blank">${infra.contracts.registry.slice(0,10)}…</a></span>
+            <span class="status-label">System</span>
+            <span class="addr">Credits-based (1 credit = $0.001 USD)</span>
           </div>
           <div class="status-row">
-            <span class="status-label">Escrow</span>
-            <span class="addr"><a href="https://sepolia.basescan.org/address/${infra.contracts.escrow}" target="_blank">${infra.contracts.escrow.slice(0,10)}…</a></span>
-          </div>
-          <div class="status-row">
-            <span class="status-label">USDC</span>
-            <span class="addr">0x036CbD53842c5426634e7929541eC2318f3dCF7e</span>
+            <span class="status-label">Stripe</span>
+            ${statusPill(infra.stripe || 'ok')}
           </div>
         </div>
       </div>
@@ -396,8 +392,7 @@
           <a class="quick-link" href="/demo" target="_blank">Demo</a>
           <a class="quick-link" href="/admin/stats?key=${encodeURIComponent(key)}" target="_blank">Raw JSON Stats</a>
           <a class="quick-link" href="https://railway.app/dashboard" target="_blank">Railway Dashboard</a>
-          <a class="quick-link" href="https://sepolia.basescan.org/address/${infra.contracts.registry}" target="_blank">Basescan Registry</a>
-          <a class="quick-link" href="https://sepolia.basescan.org/address/${infra.contracts.escrow}" target="_blank">Basescan Escrow</a>
+          <a class="quick-link" href="https://dashboard.stripe.com" target="_blank">Stripe Dashboard</a>
           <a class="quick-link" href="https://sentry.io" target="_blank">Sentry</a>
         </div>
       </div>
