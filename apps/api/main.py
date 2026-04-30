@@ -317,7 +317,7 @@ async def check_auth(request: Request) -> dict:
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         async with pool.acquire() as db:
             key = await db.fetchrow("""
-                SELECT id, tier, rate_limit_per_minute, monthly_quota,
+                SELECT id, user_id, tier, rate_limit_per_minute, monthly_quota,
                        usage_this_month, quota_reset_at, active
                 FROM api_keys WHERE key_hash = $1
             """, key_hash)
@@ -349,6 +349,7 @@ async def check_auth(request: Request) -> dict:
             "authenticated": True,
             "tier": key["tier"],
             "key_id": str(key["id"]),
+            "user_id": str(key["user_id"]) if key["user_id"] else None,
             "usage_this_month": key["usage_this_month"] + 1,
             "monthly_quota": key["monthly_quota"],
             "anonymous_count": None,
@@ -491,6 +492,42 @@ def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0,
     return round(min(score, 100), 1)
 
 
+async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str, service_id: str = None):
+    """Atomically check and deduct credits. Returns (success, balance_after)."""
+    async with db.transaction():
+        row = await db.fetchrow(
+            "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
+            user_id
+        )
+        if not row:
+            await db.execute("""
+                INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier)
+                VALUES ($1::uuid, 1000, 1000, 'free')
+                ON CONFLICT (user_id) DO NOTHING
+            """, user_id)
+            row = await db.fetchrow(
+                "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
+                user_id
+            )
+
+        balance = row['credits_balance']
+        if balance < cost:
+            return False, balance
+
+        new_balance = balance - cost
+        await db.execute(
+            "UPDATE user_credits SET credits_balance = $1, updated_at = NOW() WHERE user_id = $2::uuid",
+            new_balance, user_id
+        )
+        await db.execute("""
+            INSERT INTO credit_transactions
+            (user_id, amount, balance_after, type, description, api_endpoint, service_id)
+            VALUES ($1::uuid, $2, $3, 'usage', $4, $5, $6)
+        """, user_id, -cost, new_balance, f"API call: {endpoint}", endpoint, service_id)
+
+        return True, new_balance
+
+
 @app.get(
     "/search",
     summary="Semantic service search",
@@ -510,6 +547,23 @@ async def search_services(
     db=Depends(get_db),
     auth: dict = Depends(check_auth),
 ):
+    if auth.get("authenticated") and auth.get("user_id"):
+        success, balance = await check_and_deduct_credits(
+            db, auth["user_id"], CREDIT_COSTS["search"], "/search"
+        )
+        if not success:
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": "insufficient_credits",
+                    "message": "You've run out of credits. Top up to continue.",
+                    "balance": balance,
+                    "required": CREDIT_COSTS["search"],
+                    "top_up_url": "https://wayforth.io/dashboard/billing",
+                    "packages_url": "https://wayforth.io/pricing",
+                }
+            )
+
     try:
         async with app.state.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -837,8 +891,25 @@ class WayforthQLQuery(BaseModel):
 
 
 @app.post("/query")
-async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depends(check_auth)):
+async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depends(check_auth), db=Depends(get_db)):
     """WayforthQL — declarative query language for agent service discovery."""
+    if auth.get("authenticated") and auth.get("user_id"):
+        success, balance = await check_and_deduct_credits(
+            db, auth["user_id"], CREDIT_COSTS["query"], "/query"
+        )
+        if not success:
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": "insufficient_credits",
+                    "message": "You've run out of credits. Top up to continue.",
+                    "balance": balance,
+                    "required": CREDIT_COSTS["query"],
+                    "top_up_url": "https://wayforth.io/dashboard/billing",
+                    "packages_url": "https://wayforth.io/pricing",
+                }
+            )
+
     conditions = ["coverage_tier >= $1"]
     params: list = [body.tier_min if body.tier_min is not None else 0]
     idx = 2
@@ -2195,6 +2266,46 @@ TIER_LIMITS = {
     "enterprise": {"rpm": 500, "monthly": -1,       "fee_bps": 75},
 }
 
+PACKAGES = {
+    "starter": {
+        "credits": 20000,
+        "price_usd": 19,
+        "wayf_bonus_pct": 0.15,
+        "fee_bps": 125,
+        "label": "Starter Pack"
+    },
+    "pro": {
+        "credits": 120000,
+        "price_usd": 99,
+        "wayf_bonus_pct": 0.15,
+        "fee_bps": 100,
+        "label": "Pro Pack"
+    },
+    "growth": {
+        "credits": 400000,
+        "price_usd": 299,
+        "wayf_bonus_pct": 0.15,
+        "fee_bps": 85,
+        "label": "Growth Pack"
+    },
+    "enterprise": {
+        "credits": -1,
+        "price_usd": None,
+        "wayf_bonus_pct": 0.15,
+        "fee_bps": 75,
+        "label": "Enterprise"
+    }
+}
+
+CREDIT_COSTS = {
+    "search": 1,
+    "query": 2,
+    "intelligence": 5,
+    "graph": 2,
+    "wri_history": 1,
+    "payment_routing": 100,  # per $1 routed
+}
+
 
 class ApiKeyRequest(BaseModel):
     email: str
@@ -2455,6 +2566,18 @@ async def register_user(request: Request, db=Depends(get_db)):
         ON CONFLICT DO NOTHING
     """, key_hash, key_prefix, str(user['id']), email)
 
+    await db.execute("""
+        INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier)
+        VALUES ($1, 1000, 1000, 'free')
+        ON CONFLICT (user_id) DO NOTHING
+    """, user['id'])
+
+    await db.execute("""
+        INSERT INTO credit_transactions
+        (user_id, amount, balance_after, type, description)
+        VALUES ($1, 1000, 1000, 'bonus', 'Free signup credits')
+    """, user['id'])
+
     asyncio.create_task(asyncio.to_thread(
         send_welcome_email, email, key_prefix, 'free'
     ))
@@ -2538,6 +2661,120 @@ async def dashboard(request: Request, db=Depends(get_db)):
         ],
         "upgrade_url": "https://wayforth.io/pricing",
     }
+
+
+@app.get("/billing/balance")
+@limiter.limit("30/minute")
+async def get_balance(request: Request, db=Depends(get_db)):
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_record = await db.fetchrow("""
+        SELECT k.user_id, k.tier, u.email
+        FROM api_keys k
+        JOIN users u ON u.id = k.user_id
+        WHERE k.key_hash = $1 AND k.active = true
+    """, hashlib.sha256(api_key.encode()).hexdigest())
+
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    credits = await db.fetchrow(
+        "SELECT credits_balance, lifetime_credits, package_tier, payment_method FROM user_credits WHERE user_id = $1",
+        key_record['user_id']
+    )
+
+    return {
+        "credits_balance": credits['credits_balance'] if credits else 0,
+        "lifetime_credits": credits['lifetime_credits'] if credits else 0,
+        "package_tier": credits['package_tier'] if credits else 'free',
+        "payment_method": credits['payment_method'] if credits else None,
+        "fee_bps": PACKAGES.get(credits['package_tier'] if credits else 'free', {}).get('fee_bps', 150),
+        "email": key_record['email'],
+    }
+
+
+@app.get("/billing/packages")
+async def get_packages(request: Request):
+    result = []
+    for key, pkg in PACKAGES.items():
+        if pkg['price_usd'] is None:
+            continue
+        result.append({
+            "id": key,
+            "label": pkg['label'],
+            "credits": pkg['credits'],
+            "price_usd": pkg['price_usd'],
+            "price_card_usd": pkg['price_usd'],
+            "price_usdc": pkg['price_usd'],
+            "wayf_bonus_pct": pkg['wayf_bonus_pct'],
+            "credits_with_wayf": int(pkg['credits'] * (1 + pkg['wayf_bonus_pct'])),
+            "fee_bps": pkg['fee_bps'],
+            "fee_pct": pkg['fee_bps'] / 100,
+        })
+    return {"packages": result}
+
+
+@app.get("/billing/transactions")
+@limiter.limit("20/minute")
+async def get_transactions(request: Request, limit: int = 50, offset: int = 0, db=Depends(get_db)):
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401)
+
+    key_record = await db.fetchrow(
+        "SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true",
+        hashlib.sha256(api_key.encode()).hexdigest()
+    )
+    if not key_record:
+        raise HTTPException(status_code=401)
+
+    txs = await db.fetch("""
+        SELECT id, amount, balance_after, type, description,
+               api_endpoint, service_id, created_at
+        FROM credit_transactions
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3
+    """, key_record['user_id'], limit, offset)
+
+    total = await db.fetchval(
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id = $1",
+        key_record['user_id']
+    )
+
+    return {
+        "transactions": [dict(t) for t in txs],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/billing/purchases")
+@limiter.limit("20/minute")
+async def get_purchases(request: Request, db=Depends(get_db)):
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401)
+
+    key_record = await db.fetchrow(
+        "SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true",
+        hashlib.sha256(api_key.encode()).hexdigest()
+    )
+    if not key_record:
+        raise HTTPException(status_code=401)
+
+    purchases = await db.fetch("""
+        SELECT id, package_name, credits_total, payment_method,
+               payment_status, amount_usd, tx_hash, purchased_at
+        FROM package_purchases
+        WHERE user_id = $1
+        ORDER BY purchased_at DESC
+    """, key_record['user_id'])
+
+    return {"purchases": [dict(p) for p in purchases]}
 
 
 @app.post("/stripe/webhook")
@@ -2966,18 +3203,44 @@ async def admin_add_credits(request: Request, user_id: str, db=Depends(get_db)):
     session = await get_admin_session(request, db)
     body = await request.json()
     credits = int(body.get("credits", 0))
-    reason = body.get("reason", "Admin bonus")
+    reason = body.get("reason", "Admin grant")
+    payment_method = body.get("payment_method", "admin")
 
-    if credits <= 0 or credits > 100000:
-        raise HTTPException(status_code=400, detail="Credits must be 1-100000")
+    if credits <= 0 or credits > 1000000:
+        raise HTTPException(status_code=400, detail="Credits must be 1-1,000,000")
 
-    await db.execute("""
-        UPDATE api_keys
-        SET monthly_quota = monthly_quota + $1
-        WHERE user_id = $2::uuid
-    """, credits, user_id)
+    async with db.transaction():
+        row = await db.fetchrow(
+            "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
+            user_id
+        )
+        if not row:
+            await db.execute("""
+                INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier)
+                VALUES ($1::uuid, $2, $2, 'free')
+            """, user_id, credits)
+            new_balance = credits
+        else:
+            new_balance = row['credits_balance'] + credits
+            await db.execute("""
+                UPDATE user_credits
+                SET credits_balance = $1, lifetime_credits = lifetime_credits + $2, updated_at = NOW()
+                WHERE user_id = $3::uuid
+            """, new_balance, credits, user_id)
 
-    return {"status": "credits_added", "credits": credits, "changed_by": session['email'], "reason": reason}
+        await db.execute("""
+            INSERT INTO credit_transactions
+            (user_id, amount, balance_after, type, description)
+            VALUES ($1::uuid, $2, $3, 'admin_grant', $4)
+        """, user_id, credits, new_balance, reason)
+
+    return {
+        "status": "credits_added",
+        "credits_added": credits,
+        "new_balance": new_balance,
+        "granted_by": session['email'],
+        "reason": reason,
+    }
 
 
 @app.post("/admin-api/users/{user_id}/regenerate-key")
