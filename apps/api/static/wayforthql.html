@@ -133,7 +133,7 @@ Content-Type: application/json
               <td><span class="field-name">price_max</span></td>
               <td><span class="field-type">float</span></td>
               <td><span class="field-default">null</span></td>
-              <td class="field-desc">Maximum price in USDC per request. Only returns services at or below this price point.</td>
+              <td class="field-desc">Maximum price in USD per request. Only returns services at or below this price point.</td>
             </tr>
             <tr>
               <td><span class="field-name">category</span></td>
@@ -145,7 +145,7 @@ Content-Type: application/json
               <td><span class="field-name">protocol</span></td>
               <td><span class="field-type">string</span></td>
               <td><span class="field-default">null</span></td>
-              <td class="field-desc">Filter by payment protocol. One of: <span class="inline-code">wayforth</span> | <span class="inline-code">x402</span> | <span class="inline-code">any</span></td>
+              <td class="field-desc">Filter by payment protocol. One of: <span class="inline-code">wayforth</span> | <span class="inline-code">any</span></td>
             </tr>
             <tr>
               <td><span class="field-name">sort_by</span></td>
@@ -170,12 +170,6 @@ Content-Type: application/json
               <td><span class="field-type">bool</span></td>
               <td><span class="field-default">false</span></td>
               <td class="field-desc">Include co-used services from the Service Graph. Returns services frequently used alongside top results.</td>
-            </tr>
-            <tr>
-              <td><span class="field-name">with_payment_calldata</span></td>
-              <td><span class="field-type">bool</span></td>
-              <td><span class="field-default">false</span></td>
-              <td class="field-desc">Include Base-compatible USDC transaction calldata for each result. Agent can sign and broadcast directly.</td>
             </tr>
           </tbody>
         </table>
@@ -227,17 +221,12 @@ Content-Type: application/json
             <tr>
               <td><span class="field-name">pricing_usdc</span></td>
               <td><span class="field-type">float</span></td>
-              <td class="field-desc">Price per request in USDC. Null or 0 means free.</td>
+              <td class="field-desc">Price per request in USD. Null or 0 means free.</td>
             </tr>
             <tr>
               <td><span class="field-name">payment_protocol</span></td>
               <td><span class="field-type">string</span></td>
-              <td class="field-desc">Payment routing protocol. One of: <span class="inline-code">wayforth</span> (escrow) | <span class="inline-code">x402</span> (native HTTP 402)</td>
-            </tr>
-            <tr>
-              <td><span class="field-name">payment_calldata</span></td>
-              <td><span class="field-type">object</span></td>
-              <td class="field-desc">Base-compatible USDC transaction calldata. Only present when <span class="inline-code">with_payment_calldata: true</span>.</td>
+              <td class="field-desc">Payment routing protocol. One of: <span class="inline-code">wayforth</span> | <span class="inline-code">any</span></td>
             </tr>
             <tr>
               <td><span class="field-name">similar</span></td>
@@ -264,25 +253,24 @@ Content-Type: application/json
       </div>
 
       <div class="card" style="margin-bottom:16px">
-        <div class="example-label">x402-only services sorted by price</div>
+        <div class="example-label">Cheapest web search APIs sorted by price</div>
         <pre>curl -X POST https://api.wayforth.io/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "web search API",
-    "protocol": "x402",
     "sort_by": "price",
     "limit": 10
   }'</pre>
       </div>
 
       <div class="card" style="margin-bottom:16px">
-        <div class="example-label">Translation services with Base payment calldata</div>
+        <div class="example-label">Translation services with co-used recommendations</div>
         <pre>curl -X POST https://api.wayforth.io/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "translate English to Spanish",
     "category": "translation",
-    "with_payment_calldata": true,
+    "with_similar": true,
     "limit": 3
   }'</pre>
       </div>

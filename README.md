@@ -1,6 +1,6 @@
 # Wayforth
 
-**The search engine and payment rail for AI agents.**
+**The search engine for AI agents.**
 
 ```bash
 uvx wayforth-mcp
@@ -20,20 +20,20 @@ Works with Claude Code, Cursor, Windsurf, and any MCP-compatible runtime.
 wayforth_search("translate text to Spanish")
 # → DeepL API (score: 98, wri: 82), Azure Translator (96), LibreTranslate (90)
 
-# Pay non-custodially on Base
-wayforth_pay(service_id, owner_address, amount_usdc)
-# → Returns approve + routePayment calldata
-# → Settles in ~2 seconds. 1.5% routing fee. Agent signs, Wayforth routes.
+# Pay using credits
+wayforth_pay(service_id, amount_usd)
+# → Deducts from your credit balance (1 credit = $0.001 USD)
+# → Returns credits_remaining after deduction.
 ```
 
 ## What's Live
 
-- **200+ real API endpoints indexed** — MCP servers, REST APIs, x402-enabled services
+- **200+ real API endpoints indexed** — MCP servers, REST APIs, verified services
 - **147 Tier 2 verified** — automated 90%+ uptime, probed every 6 hours, auto-demoted on failure
 - **WayforthRank** — proprietary multi-signal ranking engine
 - **WayforthQL** — declarative query language for structured service discovery
 - **Coverage tiers 0–3** — the only automated reliability verification system in any agent registry
-- **Non-custodial payments** — smart contracts on Base Sepolia (39 tests, 256-run fuzz)
+- **Credits-based payments** — pre-paid credits, Stripe checkout, 1 credit = $0.001 USD
 - **API keys** — free tier included, paid tiers at wayforth.io/pricing
 
 ## MCP Tools
@@ -41,7 +41,7 @@ wayforth_pay(service_id, owner_address, amount_usdc)
 | Tool | Description |
 |------|-------------|
 | `wayforth_search` | Semantic search — ranked results 0–100 with WRI scores |
-| `wayforth_pay` | Non-custodial payment calldata for any service |
+| `wayforth_pay` | Pay for a service using credits |
 | `wayforth_list` | Browse catalog with filters |
 | `wayforth_stats` | Catalog statistics |
 | `wayforth_status` | API health check |
@@ -59,7 +59,6 @@ Content-Type: application/json
 {
   "query": "fast inference for coding",
   "tier_min": 2,
-  "protocol": "x402",
   "sort_by": "wri",
   "limit": 5
 }
@@ -86,7 +85,8 @@ Base URL: `https://gateway.wayforth.io`
 |----------|-------------|
 | `GET /search?q=...` | Semantic search |
 | `POST /query` | WayforthQL structured query |
-| `POST /pay` | Payment calldata |
+| `GET /billing/balance` | Credit balance and tier |
+| `GET /billing/packages` | Available credit packages |
 | `GET /stats` | Catalog stats |
 | `GET /leaderboard` | Most searched by agents |
 | `GET /services/similar/{id}` | Co-usage recommendations |
@@ -121,23 +121,26 @@ See [`examples/research_agent.py`](examples/research_agent.py) for the full impl
 **What it demonstrates:**
 - Natural language service discovery across 200+ real API endpoints
 - WayforthRank scoring — best service rises to the top automatically  
-- WayforthQL structured queries with tier and protocol filters
-- Non-custodial payment calldata generation
+- WayforthQL structured queries with tier filters
+- Credits-based payment via wayforth_pay()
 - The full search → pay attribution loop via query_id
 
-## Smart Contracts (Base Sepolia)
+## Credits
 
-| Contract | Address |
-|----------|---------|
-| WayforthRegistry | `0x55810EfB3444A693556C3f9910dbFbF2dDaC369C` |
-| WayforthEscrow | `0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809` |
+1 credit = $0.001 USD. Every search costs 1 credit. wayforth_pay() deducts credits equal to the service's per-request price.
 
-39 Foundry tests passing. 256-run fuzz suite. Mainnet deployment follows independent security audit.
+New accounts receive 1,000 free credits. Top up at [wayforth.io/dashboard](https://wayforth.io/dashboard).
+
+| Package | Credits | Price |
+|---------|---------|-------|
+| Starter | 10,000 | $10 |
+| Pro | 60,000 | $50 |
+| Growth | 150,000 | $100 |
 
 ## License
 
-Core: BSL 1.1 — source visible, no competing use for 4 years. OpenAPI spec + contract ABIs: MIT.
+Core: BSL 1.1 — source visible, no competing use for 4 years. OpenAPI spec: MIT.
 
 ---
 
-[wayforth.io](https://wayforth.io) · [dashboard](https://wayforth.io/dashboard) · [docs](https://gateway.wayforth.io/docs) · [whitepaper](https://github.com/WayforthOfficial/wayforth/blob/main/https://wayforth.io/wayforth-whitepaper-v3.pdf) · [Contact Us](https://wayforth.io/contact)
+[wayforth.io](https://wayforth.io) · [dashboard](https://wayforth.io/dashboard) · [docs](https://gateway.wayforth.io/docs) · [Contact Us](https://wayforth.io/contact)

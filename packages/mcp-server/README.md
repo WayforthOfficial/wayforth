@@ -20,7 +20,7 @@ That's it. Claude Code will restart and the eight Wayforth tools will be availab
 | `wayforth_list` | Browse catalog with optional category, tier, and limit filters |
 | `wayforth_status` | Catalog stats (counts by tier and category) and API health |
 | `wayforth_stats` | Detailed catalog statistics by tier and category |
-| `wayforth_pay` | Generate payment calldata for USDC routing through Wayforth Escrow |
+| `wayforth_pay` | Pay for a service using Wayforth credits (1 credit = $0.001 USD) |
 | `wayforth_remember` | Save a service to agent memory (persisted to API) |
 | `wayforth_recall` | Recall services previously saved to memory, with optional filter |
 | `wayforth_similar` | Find services co-used alongside a given service |

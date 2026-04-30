@@ -5,7 +5,7 @@
 ---
 
 ## TITLE (copy exactly)
-Show HN: Wayforth – The search engine and payment rail for AI agents
+Show HN: Wayforth – The search engine for AI agents
 
 ## URL
 https://github.com/WayforthOfficial/wayforth
@@ -33,10 +33,10 @@ Then two tool calls from any agent:
     → ModernMT        WRI: 68  Tier 2 Verified  $0.000003/req
 
     # Pay
-    wayforth_pay(service_id, owner_address, amount_usdc=0.001)
-    → Non-custodial calldata. Settles on Base in ~2 seconds.
+    wayforth_pay(service_id, amount_usd=0.001)
+    → Deducts from your credit balance. 1 credit = $0.001 USD.
 
-No API keys. No billing relationships. No integration code.
+No API keys per provider. No billing relationships. No integration code.
 
 ---
 
@@ -50,11 +50,9 @@ What's live today:
   reliability history, and real agent payment conversion signals. Rankings
   improve with every query. (Patent pending)
 - WayforthQL — declarative query language for structured discovery:
-  POST /query {"query": "...", "tier_min": 2, "protocol": "x402",
-  "price_max": 0.001, "sort_by": "wri"}
-- Smart contracts on Base Sepolia — non-custodial escrow, audited,
-  Basescan verified. Mainnet Q3 2026.
-- Tiered routing fee 0.75%–1.5% — the only cost
+  POST /query {"query": "...", "tier_min": 2, "price_max": 0.001, "sort_by": "wri"}
+- Credits system — pre-paid credits via Stripe. 1 credit = $0.001.
+  1,000 free credits on signup.
 
 Works in Claude Code, Cursor, Windsurf, and any MCP-compatible runtime.
 
@@ -77,6 +75,5 @@ GitHub:      https://github.com/WayforthOfficial/wayforth
 Docs:        https://wayforth.io/docs
 PyPI:        https://pypi.org/project/wayforth-mcp/
 
-Happy to go deep on the WayforthRank architecture, the payment routing
+Happy to go deep on the WayforthRank architecture, the credits payment
 design, or the coverage tier system.
-

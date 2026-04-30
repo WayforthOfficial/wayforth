@@ -24,8 +24,6 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address  # fallback only
-from web3 import Web3
-
 import stripe
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
@@ -216,9 +214,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Wayforth API",
     description="""
-## The Search Engine and Payment Rail for AI Agents
+## The Search Engine for AI Agents
 
-Wayforth provides semantic service discovery and non-custodial payment routing for AI agents.
+Wayforth provides semantic service discovery and credits-based payments for AI agents.
 
 ### Key Features
 - **WayforthQL** — Declarative query language for agent service discovery
@@ -478,8 +476,6 @@ def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0,
             pass
     if service.get("consecutive_failures", 1) == 0:
         score += 10
-    if service.get("payment_protocol") == "x402":
-        score += 5
     score += min(popularity_boost, 5.0)
     score += min(payment_boost, 8.0)
     return round(min(score, 100), 1)
@@ -747,18 +743,16 @@ wayforth_search(<span class="string">"translate text to Spanish"</span>)
 
   <div class="step">
     <div class="step-num">Step 3 of 3</div>
-    <h2>Pay non-custodially</h2>
-    <pre><span class="comment"># Get payment calldata — no money moves until you broadcast</span>
+    <h2>Pay with credits</h2>
+    <pre><span class="comment"># Deduct credits for a service call</span>
 wayforth_pay(
-  service_id=<span class="string">"0x6c536ffe..."</span>,
-  service_owner=<span class="string">"0xProviderAddress"</span>,
-  amount_usdc=<span class="string">0.001</span>
+  service_id=<span class="string">"service_id_from_search"</span>,
+  amount_usd=<span class="string">0.001</span>
 )
 
-<span class="comment"># Returns Base transaction calldata</span>
-<span class="comment"># Agent broadcasts → settles in ~2 seconds</span>
-<span class="comment"># Routing fee: 0.75%–1.5% (tiered by API key)</span>
-<span class="comment"># Currently on Base Sepolia testnet — no real funds needed</span></pre>
+<span class="comment"># 1 credit = $0.001</span>
+<span class="comment"># Credits deducted instantly from your balance</span>
+<span class="comment"># Buy credits at wayforth.io/dashboard</span></pre>
   </div>
 
   <hr class="divider">
@@ -770,7 +764,6 @@ wayforth_pay(
 {
   <span class="string">"query"</span>: <span class="string">"fast inference for coding agents"</span>,
   <span class="string">"tier_min"</span>: 2,
-  <span class="string">"protocol"</span>: <span class="string">"x402"</span>,
   <span class="string">"sort_by"</span>: <span class="string">"wri"</span>,
   <span class="string">"price_max"</span>: 0.001,
   <span class="string">"limit"</span>: 5
@@ -876,7 +869,7 @@ class WayforthQLQuery(BaseModel):
     price_max: float | None = None
     uptime_min: float | None = None  # reserved — no column yet
     category: str | None = None
-    protocol: str | None = None       # 'wayforth' | 'x402' | 'any'
+    protocol: str | None = None       # 'wayforth' | 'any'
     exclude_ids: list[str] | None = []  # service_id SHA256 hashes to exclude
     sort_by: str | None = "wri"       # 'wri' | 'score' | 'price' | 'tier'
     limit: int | None = 5
@@ -1171,7 +1164,6 @@ async def get_stats(request: Request, db=Depends(get_db)):
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
                 COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3,
-                COUNT(*) FILTER (WHERE payment_protocol = 'x402') as x402_count,
                 COUNT(*) FILTER (
                     WHERE endpoint_url NOT ILIKE '%github.com%'
                     AND endpoint_url NOT ILIKE '%glama.ai%'
@@ -1193,7 +1185,6 @@ async def get_stats(request: Request, db=Depends(get_db)):
         "real_apis": row["real_apis"],
         "tier2_services": row["tier2"],
         "tier3_services": row["tier3"],
-        "x402_services": row["x402_count"],
         "categories": row["categories"],
         "searches_7d": searches_7d,
         "mcp_tools": 9,
@@ -1212,7 +1203,6 @@ async def service_count(request: Request, db=Depends(get_db)):
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
                 COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3,
-                COUNT(*) FILTER (WHERE payment_protocol = 'x402') as x402,
                 COUNT(*) FILTER (
                     WHERE endpoint_url NOT ILIKE '%github.com%'
                     AND endpoint_url NOT ILIKE '%glama.ai%'
@@ -1229,7 +1219,6 @@ async def service_count(request: Request, db=Depends(get_db)):
         "real_apis": row["real_apis"],
         "tier2": row["tier2"],
         "tier3": row["tier3"],
-        "x402": row["x402"],
         "display": {
             "total": f"{row['real_apis']:,}+",
             "tier2": f"{row['tier2']}+",
@@ -1332,8 +1321,8 @@ async def leaderboard(request: Request, limit: int = 20, db=Depends(get_db)):
 
 class PayRequest(BaseModel):
     service_id: str
-    service_owner: str
-    amount_usdc: float
+    service_owner: str = ""
+    amount_usd: float = 0.0
     query_id: str = ""
     agent_id: str = ""
 
@@ -1343,7 +1332,7 @@ class SubmitRequest(BaseModel):
     description: str
     endpoint_url: str
     category: str
-    pricing_usdc: float = 0.0
+    price_per_call: float = 0.0
     contact_email: str | None = None
 
 
@@ -1360,7 +1349,7 @@ class Tier3Application(BaseModel):
     contact_email: str
     website: str = ""
     endpoint_url: str
-    monthly_volume_usdc: float = 0.0
+    monthly_volume_usd: float = 0.0
     sla_uptime_target: float = 99.9
 
 
@@ -1408,7 +1397,7 @@ async def submit_service(request: Request, req: SubmitRequest):
             service_id = await conn.fetchval(
                 """INSERT INTO services (name, description, endpoint_url, category, pricing_usdc, source, coverage_tier)
                    VALUES ($1, $2, $3, $4, $5, 'submitted', 0) RETURNING id""",
-                req.name, req.description, req.endpoint_url, req.category, req.pricing_usdc,
+                req.name, req.description, req.endpoint_url, req.category, req.price_per_call,
             )
             await conn.execute(
                 """INSERT INTO service_submissions (service_id, contact_email, ip_address)
@@ -1624,7 +1613,6 @@ async def admin_services(request: Request, key: str = "", db=Depends(get_db)):
             COUNT(*) as total,
             COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
             COUNT(*) FILTER (WHERE coverage_tier >= 1) as tier1,
-            COUNT(*) FILTER (WHERE payment_protocol = 'x402') as x402,
             COUNT(*) FILTER (
                 WHERE endpoint_url NOT ILIKE '%github.com%'
                 AND endpoint_url NOT ILIKE '%glama.ai%'
@@ -1703,9 +1691,7 @@ async def pricing_json(request: Request):
                 "price_monthly_usd": 0,
                 "rate_limit_per_minute": 10,
                 "monthly_quota": 1000,
-                "routing_fee_pct": 1.5,
-                "routing_fee_bps": 150,
-                "features": ["search", "query", "pay", "services", "memory", "identity"],
+                "features": ["search", "query", "services", "memory", "identity"],
                 "cta": "Get Free Key",
                 "cta_url": "https://gateway.wayforth.io/keys/create",
             },
@@ -1714,9 +1700,7 @@ async def pricing_json(request: Request):
                 "price_monthly_usd": 19,
                 "rate_limit_per_minute": 30,
                 "monthly_quota": 10000,
-                "routing_fee_pct": 1.25,
-                "routing_fee_bps": 125,
-                "features": ["search", "query", "pay", "services", "memory", "identity", "intelligence", "webhooks"],
+                "features": ["search", "query", "services", "memory", "identity", "intelligence", "webhooks"],
                 "cta": "Contact Us",
                 "cta_url": "https://wayforth.io/contact",
             },
@@ -1725,9 +1709,7 @@ async def pricing_json(request: Request):
                 "price_monthly_usd": 99,
                 "rate_limit_per_minute": 100,
                 "monthly_quota": 100000,
-                "routing_fee_pct": 1.0,
-                "routing_fee_bps": 100,
-                "features": ["search", "query", "pay", "services", "memory", "identity", "intelligence", "webhooks", "history", "graph"],
+                "features": ["search", "query", "services", "memory", "identity", "intelligence", "webhooks", "history", "graph"],
                 "cta": "Contact Us",
                 "cta_url": "https://wayforth.io/contact",
             },
@@ -1736,14 +1718,11 @@ async def pricing_json(request: Request):
                 "price_monthly_usd": None,
                 "rate_limit_per_minute": 500,
                 "monthly_quota": -1,
-                "routing_fee_pct": 0.75,
-                "routing_fee_bps": 75,
                 "features": ["everything", "sla", "private_catalog", "dedicated_infra", "custom_probing"],
                 "cta": "Contact Us",
                 "cta_url": "https://wayforth.io/contact",
             },
         ],
-        "routing_fee_note": "Routing fee applies to all payment transactions. Higher tiers receive reduced fees.",
     }
 
 
@@ -1824,7 +1803,7 @@ async def get_analytics(request: Request, key: str = ""):
 @app.get("/competitive")
 @limiter.limit("10/minute")
 async def competitive_intelligence_endpoint(request: Request, key: str = ""):
-    """Admin: x402 ecosystem growth signals and competitive intelligence."""
+    """Admin: competitive intelligence and ecosystem growth signals."""
     if key != ADMIN_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
@@ -1919,7 +1898,7 @@ async def tier3_apply(request: Request, body: Tier3Application):
             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
             RETURNING id
         """, body.service_name, body.company_name, body.contact_email,
-            body.website, body.endpoint_url, body.monthly_volume_usdc,
+            body.website, body.endpoint_url, body.monthly_volume_usd,
             body.sla_uptime_target)
 
     if os.getenv("RESEND_API_KEY"):
@@ -2224,34 +2203,10 @@ TIER_LIMITS = {
 }
 
 PACKAGES = {
-    "starter": {
-        "credits": 20000,
-        "price_usd": 19,
-        "wayf_bonus_pct": 0.15,
-        "fee_bps": 125,
-        "label": "Starter Pack"
-    },
-    "pro": {
-        "credits": 120000,
-        "price_usd": 99,
-        "wayf_bonus_pct": 0.15,
-        "fee_bps": 100,
-        "label": "Pro Pack"
-    },
-    "growth": {
-        "credits": 400000,
-        "price_usd": 299,
-        "wayf_bonus_pct": 0.15,
-        "fee_bps": 85,
-        "label": "Growth Pack"
-    },
-    "enterprise": {
-        "credits": -1,
-        "price_usd": None,
-        "wayf_bonus_pct": 0.15,
-        "fee_bps": 75,
-        "label": "Enterprise"
-    }
+    "starter": {"credits": 20000,  "price_usd": 19,  "label": "Starter Pack"},
+    "pro":     {"credits": 120000, "price_usd": 99,  "label": "Pro Pack"},
+    "growth":  {"credits": 400000, "price_usd": 299, "label": "Growth Pack"},
+    "enterprise": {"credits": -1,  "price_usd": None, "label": "Enterprise"},
 }
 
 CREDIT_COSTS = {
@@ -2313,12 +2268,11 @@ async def get_api_key(request: Request, db=Depends(get_db)):
 async def key_tiers():
     return {
         "tiers": [
-            {"tier": "free",       "price_monthly_usd": 0,    "rpm": 10,  "monthly_quota": 1000,   "routing_fee_pct": 1.5,  "features": ["search", "query", "pay", "services"]},
-            {"tier": "starter",    "price_monthly_usd": 19,   "rpm": 30,  "monthly_quota": 10000,  "routing_fee_pct": 1.25, "features": ["search", "query", "pay", "services", "intelligence", "webhooks"]},
-            {"tier": "pro",        "price_monthly_usd": 99,   "rpm": 100, "monthly_quota": 100000, "routing_fee_pct": 1.0,  "features": ["search", "query", "pay", "services", "intelligence", "webhooks", "history", "graph"]},
-            {"tier": "enterprise", "price_monthly_usd": None, "rpm": 500, "monthly_quota": -1,     "routing_fee_pct": 0.75, "features": ["everything", "sla", "private_catalog", "dedicated_infra", "custom_probing"]},
+            {"tier": "free",       "price_monthly_usd": 0,    "rpm": 10,  "monthly_quota": 1000,   "features": ["search", "query", "services"]},
+            {"tier": "starter",    "price_monthly_usd": 19,   "rpm": 30,  "monthly_quota": 10000,  "features": ["search", "query", "services", "intelligence", "webhooks"]},
+            {"tier": "pro",        "price_monthly_usd": 99,   "rpm": 100, "monthly_quota": 100000, "features": ["search", "query", "services", "intelligence", "webhooks", "history", "graph"]},
+            {"tier": "enterprise", "price_monthly_usd": None, "rpm": 500, "monthly_quota": -1,     "features": ["everything", "sla", "private_catalog", "dedicated_infra", "custom_probing"]},
         ],
-        "note": "Routing fee applies to all payment transactions. Higher tiers receive reduced fees."
     }
 
 
@@ -2439,7 +2393,7 @@ async def get_identity(request: Request, agent_id: str, db=Depends(get_db)):
     """Get agent identity and reputation."""
     identity = await db.fetchrow("""
         SELECT agent_id, display_name, total_searches, total_payments,
-               total_spend_usdc, trust_score, created_at, last_active_at
+               total_spend_usdc as total_spend_usd, trust_score, created_at, last_active_at
         FROM agent_identities WHERE agent_id = $1
     """, agent_id)
 
@@ -2465,7 +2419,7 @@ async def get_identity(request: Request, agent_id: str, db=Depends(get_db)):
         "reputation_tier": tier,
         "total_searches": identity["total_searches"],
         "total_payments": identity["total_payments"],
-        "total_spend_usdc": identity["total_spend_usdc"],
+        "total_spend_usd": identity["total_spend_usd"],
         "member_since": identity["created_at"].isoformat(),
         "last_active": identity["last_active_at"].isoformat(),
     }
@@ -2610,7 +2564,6 @@ async def dashboard(request: Request, db=Depends(get_db)):
             "monthly_limit": limits['monthly'],
             "pct_used": round((searches_this_month / limits['monthly'] * 100), 1) if limits['monthly'] > 0 else 0,
             "rate_limit_rpm": limits['rpm'],
-            "routing_fee_pct": limits['fee_pct'],
         },
         "recent_searches": [
             {"query": r['query'], "at": r['created_at'].isoformat()}
@@ -2647,7 +2600,6 @@ async def get_balance(request: Request, db=Depends(get_db)):
         "lifetime_credits": credits['lifetime_credits'] if credits else 0,
         "package_tier": credits['package_tier'] if credits else 'free',
         "payment_method": credits['payment_method'] if credits else None,
-        "fee_bps": PACKAGES.get(credits['package_tier'] if credits else 'free', {}).get('fee_bps', 150),
         "email": key_record['email'],
     }
 
@@ -2663,12 +2615,6 @@ async def get_packages(request: Request):
             "label": pkg['label'],
             "credits": pkg['credits'],
             "price_usd": pkg['price_usd'],
-            "price_card_usd": pkg['price_usd'],
-            "price_usdc": pkg['price_usd'],
-            "wayf_bonus_pct": pkg['wayf_bonus_pct'],
-            "credits_with_wayf": int(pkg['credits'] * (1 + pkg['wayf_bonus_pct'])),
-            "fee_bps": pkg['fee_bps'],
-            "fee_pct": pkg['fee_bps'] / 100,
         })
     return {"packages": result}
 
