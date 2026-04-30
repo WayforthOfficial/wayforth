@@ -1385,7 +1385,7 @@ class AgentIdentityRequest(BaseModel):
 
 @app.post("/pay")
 @limiter.limit("20/minute")
-async def pay(request: Request, req: PayRequest):
+async def pay(request: Request, req: PayRequest, db=Depends(get_db)):
     if req.amount_usdc <= 0.000066:
         raise HTTPException(
             status_code=400,
@@ -1399,28 +1399,67 @@ async def pay(request: Request, req: PayRequest):
             status_code=400,
             detail="service_id must be a valid bytes32 hex string (0x + 64 hex chars)",
         )
-    logger.info(f"pay amount={req.amount_usdc} service={req.service_id[:10]}")
-    result = build_payment_calldata(req.service_id, req.service_owner, req.amount_usdc)
+
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not raw_key:
+        raise HTTPException(status_code=401, detail="API key required for payment routing")
+
+    key_row = await db.fetchrow(
+        "SELECT user_id, tier FROM api_keys WHERE key_hash = $1 AND active = TRUE",
+        hashlib.sha256(raw_key.encode()).hexdigest()
+    )
+    if not key_row:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    user_id = str(key_row["user_id"])
+    fee_bps = TIER_LIMITS.get(key_row["tier"], {}).get("fee_bps", 150)
+    credit_cost = max(1, round(req.amount_usdc * CREDIT_COSTS["payment_routing"]))
+
+    success, balance_after = await check_and_deduct_credits(
+        db, user_id, credit_cost, "/pay", req.service_id
+    )
+    if not success:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "insufficient_credits",
+                "message": "Insufficient credits to route this payment.",
+                "balance": balance_after,
+                "required": credit_cost,
+                "top_up_url": "https://wayforth.io/dashboard/billing",
+                "packages_url": "https://wayforth.io/pricing",
+            }
+        )
+
+    # Stub broadcast — treasury wallet goes live mainnet Q3 2026
+    tx_hash = "0x" + secrets.token_hex(32)
+    broadcast_status = "stub"
+
+    amount_units = int(req.amount_usdc * 10**6)
+    fee_units = (amount_units * fee_bps) // 10000
+    net_units = amount_units - fee_units
+
+    logger.info(f"pay amount={req.amount_usdc} service={req.service_id[:10]} user={user_id[:8]} credits={credit_cost}")
     if app.state.pool:
         asyncio.create_task(_record_payment(app.state.pool, req.service_id))
     if app.state.pool and req.query_id:
         asyncio.create_task(_mark_search_converted(app.state.pool, req.query_id, req.service_id))
     if app.state.pool and req.agent_id:
         asyncio.create_task(_update_identity_payment(app.state.pool, req.agent_id, req.amount_usdc))
-    fee_bps = 150
-    raw_key = request.headers.get("X-Wayforth-API-Key", "")
-    if raw_key and app.state.pool:
-        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-        async with app.state.pool.acquire() as conn:
-            key_row = await conn.fetchrow(
-                "SELECT tier FROM api_keys WHERE key_hash=$1 AND active=TRUE", key_hash
-            )
-            if key_row:
-                fee_bps = TIER_LIMITS.get(key_row["tier"], {}).get("fee_bps", 150)
-    result["fee_bps"] = fee_bps
-    result["fee_pct"] = fee_bps / 100
-    result["payment"] = {"fee_bps": fee_bps}
-    return result
+
+    return {
+        "tx_hash": tx_hash,
+        "status": broadcast_status,
+        "amount_usdc": req.amount_usdc,
+        "fee_usdc": round(fee_units / 10**6, 6),
+        "net_usdc": round(net_units / 10**6, 6),
+        "fee_bps": fee_bps,
+        "credits_deducted": credit_cost,
+        "credits_remaining": balance_after,
+        "network": "base-sepolia",
+        "service_id": req.service_id,
+        "service_owner": req.service_owner,
+    }
 
 
 @app.post("/submit")

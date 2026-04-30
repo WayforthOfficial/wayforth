@@ -8,6 +8,7 @@ from mcp.server.fastmcp import FastMCP
 load_dotenv()
 
 API_BASE = os.getenv("WAYFORTH_API_URL", "https://gateway.wayforth.io")
+WAYFORTH_API_KEY = os.getenv("WAYFORTH_API_KEY", "")
 
 mcp = FastMCP("wayforth")
 
@@ -134,14 +135,17 @@ async def wayforth_pay(
     amount_usdc: float,
 ) -> str:
     """
-    Get payment calldata to route USDC through Wayforth Escrow.
-    Returns two transactions to broadcast: approve USDC, then routePayment.
+    Route a USDC payment through Wayforth treasury on behalf of the developer.
+    Wayforth broadcasts the payment and deducts credits (100 per $1 routed).
 
     Args:
         service_id: bytes32 service identifier from wayforth_search
         service_owner: Ethereum address of the service owner
         amount_usdc: Amount in USDC (e.g. 1.0 for 1 USDC)
     """
+    if not WAYFORTH_API_KEY:
+        return "Payment error: WAYFORTH_API_KEY not set. Set it in your MCP server environment."
+
     async with httpx.AsyncClient(timeout=10) as client:
         try:
             response = await client.post(
@@ -151,28 +155,32 @@ async def wayforth_pay(
                     "service_owner": service_owner,
                     "amount_usdc": amount_usdc,
                 },
+                headers={"X-Wayforth-API-Key": WAYFORTH_API_KEY},
             )
             response.raise_for_status()
             data = response.json()
 
-            steps = data["steps"]
-            summary = data["summary"]
-
             return (
-                f"Payment calldata for {summary['gross_usdc']} USDC "
-                f"(fee: {summary['fee_usdc']} USDC, net: {summary['net_usdc']} USDC):\n\n"
-                f"Step 1 — Approve USDC:\n"
-                f"  To: {steps[0]['to']}\n"
-                f"  Calldata: {steps[0]['calldata']}\n\n"
-                f"Step 2 — Route Payment:\n"
-                f"  To: {steps[1]['to']}\n"
-                f"  Calldata: {steps[1]['calldata']}\n\n"
-                f"Network: {summary['network']} | "
-                f"Fee: {summary['fee_pct']}% | "
-                f"USDC decimals: {summary['usdc_decimals']}"
+                f"Payment routed.\n\n"
+                f"tx_hash: {data['tx_hash']}\n"
+                f"status: {data['status']}\n"
+                f"amount: {data['amount_usdc']} USDC "
+                f"(fee: {data['fee_usdc']} USDC, net: {data['net_usdc']} USDC)\n"
+                f"credits_deducted: {data['credits_deducted']}\n"
+                f"credits_remaining: {data['credits_remaining']}\n"
+                f"network: {data['network']}"
             )
+        except httpx.HTTPStatusError as e:
+            detail = e.response.json().get("detail", str(e))
+            if isinstance(detail, dict):
+                return (
+                    f"Payment failed: {detail.get('error', 'unknown')} — "
+                    f"{detail.get('message', '')} "
+                    f"(balance: {detail.get('balance', '?')}, required: {detail.get('required', '?')})"
+                )
+            return f"Payment failed: {detail}"
         except Exception as e:
-            return f"Payment calldata error: {str(e)}"
+            return f"Payment error: {str(e)}"
 
 
 @mcp.tool()
