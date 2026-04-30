@@ -129,7 +129,7 @@ See [`examples/research_agent.py`](examples/research_agent.py) for the full impl
 
 1 credit = $0.001 USD. Every search costs 1 credit. wayforth_pay() deducts credits equal to the service's per-request price.
 
-New accounts receive 1,000 free credits. Top up at [wayforth.io/dashboard](https://wayforth.io/dashboard).
+New accounts receive 2,000 free credits. Top up at [wayforth.io/dashboard](https://wayforth.io/dashboard).
 
 | Package | Credits | Price |
 |---------|---------|-------|

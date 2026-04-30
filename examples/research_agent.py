@@ -80,7 +80,7 @@ async def research(topic: str) -> dict:
 
     print(f"\n   Best services for this research task:")
     for i, svc in enumerate(structured.get("results", [])[:5], 1):
-        price = svc.get("pricing_usdc", 0)
+        price = (svc.get("pricing") or {}).get("per_call_usd") or svc.get("pricing_usdc") or 0
         price_str = f"${price:.7f}/req" if price and price > 0 else "Free"
         print(f"   {i}. {svc['name']} — WRI: {svc.get('wri', 'N/A')} | {price_str}")
 
