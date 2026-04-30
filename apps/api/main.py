@@ -1570,7 +1570,7 @@ async def wayforth_call_endpoint(request: Request, db=Depends(get_db)):
     proxy = SERVICE_PROXIES[service_key]
 
     service_api_key = os.environ.get(proxy["key_env"], "")
-    if not service_api_key and proxy["cost_per_unit_usd"] > 0:
+    if not service_api_key:
         raise HTTPException(
             status_code=503,
             detail={
