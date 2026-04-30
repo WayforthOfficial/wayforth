@@ -1,146 +1,113 @@
 # Wayforth
 
-**The search engine for AI agents.**
+**The discovery and payment rail for AI agents.**
+
+Search 270+ verified APIs. Pay via card or crypto. One MCP install.
+
+## Install
 
 ```bash
 uvx wayforth-mcp
-
-# Or visit the dashboard
-open https://wayforth.io/dashboard
+# or
+claude mcp add wayforth -- uvx wayforth-mcp
 ```
 
-Works with Claude Code, Cursor, Windsurf, and any MCP-compatible runtime.
-
-**Full quickstart guide:** https://gateway.wayforth.io/quickstart
-
-## What It Does
+## The Three Calls
 
 ```python
-# Find the best service for your need
+# 1. Discover — semantic search with WayforthRank scoring
 wayforth_search("translate text to Spanish")
-# → DeepL API (score: 98, wri: 82), Azure Translator (96), LibreTranslate (90)
+# → DeepL        WRI:82  Tier 2  $0.00003/call
+# → LibreTranslate  WRI:71  Tier 2  Free
 
-# Pay using credits
-wayforth_pay(service_id, amount_usd)
-# → Deducts from your credit balance (1 credit = $0.001 USD)
-# → Returns credits_remaining after deduction.
+# 2. Pay — card or crypto, your choice
+wayforth_pay("deepl", 0.001, track="card")   # Stripe Treasury, no crypto
+wayforth_pay("deepl", 0.001, track="crypto") # Base calldata, non-custodial
+
+# 3. Execute — service receives payment, returns result
 ```
 
-## What's Live
+## Payment Tracks
 
-- **200+ real API endpoints indexed** — MCP servers, REST APIs, verified services
-- **147 Tier 2 verified** — automated 90%+ uptime, probed every 6 hours, auto-demoted on failure
-- **WayforthRank** — proprietary multi-signal ranking engine
-- **WayforthQL** — declarative query language for structured service discovery
-- **Coverage tiers 0–3** — the only automated reliability verification system in any agent registry
-- **Credits-based payments** — pre-paid credits, Stripe checkout, 1 credit = $0.001 USD
-- **API keys** — free tier included, paid tiers at wayforth.io/pricing
+**Track A — Card (mainstream developers):**
+- Fund with credit card at wayforth.io/dashboard
+- Stripe Treasury backs your balance (FDIC insured)
+- Agent pays automatically — no crypto knowledge needed
+- 1.5% routing fee
 
-## MCP Tools
+**Track B — Crypto (crypto-native developers):**
+- Your own Base wallet with USDC
+- wayforth_pay() returns calldata
+- Agent broadcasts from your wallet — fully non-custodial
+- 1.5% routing fee captured on-chain
 
-| Tool | Description |
-|------|-------------|
-| `wayforth_search` | Semantic search — ranked results 0–100 with WRI scores |
-| `wayforth_pay` | Pay for a service using credits |
-| `wayforth_list` | Browse catalog with filters |
-| `wayforth_stats` | Catalog statistics |
-| `wayforth_status` | API health check |
-| `wayforth_remember` | Save a service to agent memory |
-| `wayforth_recall` | Retrieve saved services |
-| `wayforth_similar` | Services co-used with a given service |
-| `wayforth_identity` | Get or create agent identity with trust score and reputation tier |
+## What's Live Today
 
-## WayforthQL
-
-```http
-POST https://gateway.wayforth.io/query
-Content-Type: application/json
-
-{
-  "query": "fast inference for coding",
-  "tier_min": 2,
-  "sort_by": "wri",
-  "limit": 5
-}
-```
-
-Full spec: https://gateway.wayforth.io/wayforthql-spec
-
-## Coverage Tiers
-
-| Tier | Name | Criteria |
-|------|------|----------|
-| 0 | Discovered | Indexed, not yet verified |
-| 1 | Tested | Endpoint responds |
-| 2 | Executable | 90%+ uptime, 7-day verified — default search results |
-| 3 | Verified | KYB complete, SLA signed |
-
-Verification runs automatically every 6 hours. No manual review. No paid placement. Ever.
-
-## REST API
-
-Base URL: `https://gateway.wayforth.io`
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /search?q=...` | Semantic search |
-| `POST /query` | WayforthQL structured query |
-| `GET /billing/balance` | Credit balance and tier |
-| `GET /billing/packages` | Available credit packages |
-| `GET /stats` | Catalog stats |
-| `GET /leaderboard` | Most searched by agents |
-| `GET /services/similar/{id}` | Co-usage recommendations |
-| `GET /services/{id}/history` | WRI trend over time |
-| `POST /memory` | Save agent memory |
-| `POST /webhooks/register` | Register tier change webhooks |
-| `POST /tier3/apply` | Apply for Tier 3 verification |
-| `GET /keys/tiers` | API key tier limits |
-
-Full docs: https://gateway.wayforth.io/docs
-
-## SDKs
-
-```bash
-pip install wayforth-sdk       # Python
-npm install wayforth-sdk       # TypeScript / JavaScript
-uvx wayforth-mcp               # MCP server
-```
-
-## Examples
-
-### Research Agent
-A complete working example — an agent that discovers and uses multiple services through Wayforth:
-
-```bash
-pip install wayforth-sdk
-python examples/research_agent.py "What are the best vector databases for RAG in 2026?"
-```
-
-See [`examples/research_agent.py`](examples/research_agent.py) for the full implementation.
-
-**What it demonstrates:**
-- Natural language service discovery across 200+ real API endpoints
-- WayforthRank scoring — best service rises to the top automatically  
-- WayforthQL structured queries with tier filters
-- Credits-based payment via wayforth_pay()
-- The full search → pay attribution loop via query_id
+- **274+ real API endpoints** across 18 categories
+- **232+ Tier 2 verified** — probed every 6h, auto-demoted on failure
+- **WayforthRank** — payment-signal ranking engine (patent pending WF-2026-001)
+- **Credits system** — 2,000 free on signup, card purchases live
+- **Dual-track payments** — Stripe Treasury (card) + Base calldata (crypto)
+- **Smart contracts** — Base Sepolia (mainnet Q3 2026)
+- **Free tier** — 2,000 credits on signup, no credit card required
 
 ## Credits
 
-1 credit = $0.001 USD. Every search costs 1 credit. wayforth_pay() deducts credits equal to the service's per-request price.
+```
+1 credit = $0.001 USD (for search quota)
 
-New accounts receive 2,000 free credits. Top up at [wayforth.io/dashboard](https://wayforth.io/dashboard).
+Starter:  $19  → 50,000 credits
+Pro:      $99  → 300,000 credits
+Growth:   $299 → 1,000,000 credits
 
-| Package | Credits | Price |
-|---------|---------|-------|
-| Starter | 10,000 | $10 |
-| Pro | 60,000 | $50 |
-| Growth | 150,000 | $100 |
+1 search query = 1 credit
+```
+
+## Routing Fee
+
+```
+1.5% on all payments
+30% → $WAYF burn (post-mainnet)
+70% → Wayforth operations
+```
+
+## $WAYF Token (post-mainnet)
+
+- 30% of routing fees buy + burn $WAYF permanently
+- Stake $WAYF to operate a Verifier node
+- Hold $WAYF for fee discounts
+- Tier 3 service certification requires $WAYF bond
+
+## Resources
+
+- **Website:** https://wayforth.io
+- **Dashboard:** https://wayforth.io/dashboard
+- **Quickstart:** https://wayforth.io/quickstart
+- **Leaderboard:** https://wayforth.io/leaderboard
+- **Whitepaper:** https://wayforth.io/wayforth-whitepaper-v3.pdf
+- **GitHub:** https://github.com/WayforthOfficial/wayforth
+- **dev.to:** https://dev.to/wayforthofficial
+
+## Architecture
+
+```
+DEVELOPER
+├── Card Track  → Stripe Treasury → Service (Stripe payout)
+└── Crypto Track → Base Wallet → calldata → broadcast → service (USDC)
+
+WAYFORTH LAYER
+├── wayforth_search() → WayforthRank → ranked results
+├── wayforth_pay()    → routes to Track A or B
+└── Routing fee (1.5%) → 30% $WAYF burn + 70% operations
+
+DATA FLYWHEEL
+Payment outcomes → WayforthRank update → better rankings
+→ more developer trust → more payments → flywheel spins
+```
 
 ## License
 
-Core: BSL 1.1 — source visible, no competing use for 4 years. OpenAPI spec: MIT.
+BSL 1.1 — Licensor: Wayforth LTD
+Converts to Apache 2.0 on April 25, 2030.
 
----
-
-[wayforth.io](https://wayforth.io) · [dashboard](https://wayforth.io/dashboard) · [docs](https://gateway.wayforth.io/docs) · [Contact Us](https://wayforth.io/contact)
+© 2026 Wayforth LTD

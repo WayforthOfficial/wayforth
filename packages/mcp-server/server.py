@@ -129,111 +129,111 @@ async def wayforth_search(query: str, limit: int = 5, tier_min: int = 2, categor
 
 
 @mcp.tool()
-async def wayforth_pay(service_id: str, amount_usd: float) -> str:
-    """Pay for a service using Wayforth credits. 1 credit = $0.001 USD. Credits purchased at wayforth.io/dashboard
+async def wayforth_pay(
+    service_id: str,
+    amount_usd: float,
+    track: str = "card",
+    query_id: str = None,
+) -> str:
+    """
+    Pay for a service through Wayforth.
+
+    Two payment tracks:
+
+    track='card' (default — no crypto needed):
+      - Deducts from your Wayforth credit balance
+      - Stripe Treasury processes the payment to the service
+      - Get credits at wayforth.io/dashboard → Billing → Card Track
+
+    track='crypto' (non-custodial — your wallet):
+      - Returns Base calldata for you to broadcast
+      - Your USDC, your wallet, fully on-chain
+      - Non-custodial — Wayforth never holds your funds
+
+    Routing fee: 1.5% on all tracks
+    30% of fee allocated to $WAYF burn
 
     Args:
-        service_id: Service identifier from wayforth_search
-        amount_usd: Amount in USD (e.g. 0.01 for 1 cent = 10 credits)
+        service_id: Service to pay (from wayforth_search results)
+        amount_usd: Amount to pay in USD (e.g. 0.001)
+        track: Payment track — 'card' or 'crypto' (default: 'card')
+        query_id: Optional query ID from wayforth_search for WayforthRank signal
     """
     api_key = os.environ.get("WAYFORTH_API_KEY", "")
     if not api_key:
-        return "Error: WAYFORTH_API_KEY not set. Get your key at wayforth.io/dashboard"
+        return "Error: WAYFORTH_API_KEY not set. Get your free key at wayforth.io/dashboard"
 
-    credits_needed = max(1, round(amount_usd * 1000))
-
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
-            f"{API_BASE}/billing/deduct",
-            headers={"X-Wayforth-API-Key": api_key},
+            f"{API_BASE}/pay",
+            headers={
+                "X-Wayforth-API-Key": api_key,
+                "Content-Type": "application/json",
+            },
             json={
                 "service_id": service_id,
                 "amount_usd": amount_usd,
-                "credits": credits_needed,
+                "track": track,
+                "query_id": query_id,
             },
-            timeout=10.0,
         )
 
     if resp.status_code == 402:
-        data = resp.json()
-        return f"Insufficient credits. Balance: {data.get('balance', 0)} credits. Top up at wayforth.io/dashboard"
-
-    if resp.status_code == 200:
-        data = resp.json()
-        return f"Payment processed. Credits deducted: {data['credits_deducted']}. Remaining: {data['credits_remaining']}"
-
-    return f"Payment error: {resp.status_code}"
-
-
-@mcp.tool()
-async def wayforth_call(service: str, params: dict) -> str:
-    """
-    Execute an API call through Wayforth proxy.
-
-    Wayforth holds the API key for you.
-    Credits are deducted automatically.
-    No external API account needed.
-
-    Available services: deepl, groq, openweather, newsapi, libretranslate
-
-    Examples:
-        wayforth_call("deepl", {"text": "Hello world", "target_lang": "ES"})
-        wayforth_call("groq", {"messages": [{"role": "user", "content": "Hello"}]})
-        wayforth_call("openweather", {"city": "Las Vegas"})
-        wayforth_call("newsapi", {"query": "AI agents", "language": "en"})
-
-    Args:
-        service: Service to call (deepl/groq/openweather/newsapi/libretranslate)
-        params: Parameters to pass to the service
-    """
-    api_key = os.getenv("WAYFORTH_API_KEY", "")
-    if not api_key:
-        return "Error: WAYFORTH_API_KEY not set. Get your free API key at wayforth.io/dashboard"
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{API_BASE}/call",
-                headers={"X-Wayforth-API-Key": api_key, "Content-Type": "application/json"},
-                json={"service": service, "params": params},
-            )
-    except Exception as e:
-        return f"Error connecting to Wayforth: {e}"
-
-    if resp.status_code == 402:
         data = resp.json().get("detail", {})
+        balance = data.get("credits_balance", 0)
+        needed = data.get("credits_needed", 0)
         return (
-            f"Insufficient credits. "
-            f"Need: {data.get('credits_needed', '?')} credits. "
-            f"Balance: {data.get('credits_balance', '?')} credits. "
-            f"Top up at wayforth.io/dashboard"
+            f"Insufficient credits for card track.\n"
+            f"Balance: {balance} credits. Needed: {needed} credits.\n"
+            f"Top up at wayforth.io/dashboard\n"
+            f"Or switch to crypto track: wayforth_pay('{service_id}', {amount_usd}, track='crypto')"
         )
-
-    if resp.status_code == 404:
-        data = resp.json().get("detail", {})
-        available = data.get("available", [])
-        return f"Service '{service}' not found. Available: {', '.join(available)}"
-
-    if resp.status_code == 503:
-        return f"Service '{service}' coming soon. Check wayforth.io for updates."
 
     if resp.status_code != 200:
-        return f"Error {resp.status_code}: {resp.text[:300]}"
+        return f"Payment error {resp.status_code}: {resp.text[:200]}"
 
     data = resp.json()
-    result = data.get("result", {})
-    credits_used = data.get("credits_deducted", 0)
-    credits_left = data.get("credits_remaining", 0)
-    latency = data.get("latency_ms", 0)
+    payment_track = data.get("payment_track", "unknown")
+    service_name = data.get("service_name", service_id)
+    routing_fee = data.get("routing_fee_usd", 0)
+    burn = data.get("wayf_burn_allocation_usd", 0)
 
-    import json as _json
-    result_str = _json.dumps(result, indent=2, ensure_ascii=False)
+    if payment_track == "card":
+        credits_left = data.get("credits_remaining", 0)
+        tx_ref = data.get("tx_ref", "")
+        return (
+            f"Card payment processed — {service_name}\n\n"
+            f"Amount: ${amount_usd}\n"
+            f"Routing fee (1.5%): ${routing_fee}\n"
+            f"$WAYF burn allocation: ${burn}\n"
+            f"Credits deducted: {data.get('credits_deducted', 0)}\n"
+            f"Credits remaining: {credits_left}\n"
+            f"Reference: {tx_ref}"
+        )
 
-    return (
-        f"✅ {data.get('service_name', service)} response ({latency}ms)\n\n"
-        f"{result_str}\n\n"
-        f"Credits: -{credits_used} used · {credits_left} remaining"
-    )
+    if payment_track == "crypto":
+        return (
+            f"Crypto calldata ready — {service_name}\n\n"
+            f"Amount: ${amount_usd} USDC\n"
+            f"Routing fee (1.5%): ${routing_fee}\n"
+            f"$WAYF burn allocation: ${burn}\n"
+            f"Network: Base Sepolia\n\n"
+            f"Step 1 — Approve USDC:\n{data.get('approve_calldata', '')}\n\n"
+            f"Step 2 — Route payment:\n{data.get('payment_calldata', '')}\n\n"
+            f"Broadcast both transactions from your wallet."
+        )
+
+    if payment_track == "x402":
+        return (
+            f"x402 payment ready — {service_name}\n\n"
+            f"Amount: ${amount_usd} USDC\n"
+            f"Routing fee (1.5%): ${routing_fee}\n"
+            f"Protocol: x402 via Coinbase facilitator\n\n"
+            f"Use x402 client library to complete payment."
+        )
+
+    return f"Payment processed: {data}"
+
 
 
 @mcp.tool()
@@ -456,55 +456,57 @@ async def wayforth_quickstart() -> str:
     Get the Wayforth developer quickstart guide.
     Returns step-by-step instructions for using Wayforth in an agent.
     """
-    return """# Wayforth Quickstart
+    return """Wayforth — Discovery and Payment Rail for AI Agents
 
-## What is Wayforth?
-The search engine for AI agents.
-200+ verified API endpoints. 154 Tier 2 verified. Semantic intent ranking.
+STEP 1 — Install (one time):
+  uvx wayforth-mcp
+  # or: claude mcp add wayforth -- uvx wayforth-mcp
 
-## Install
-uvx wayforth-mcp
+  Set your API key:
+  export WAYFORTH_API_KEY=wf_live_...
+  (Get free key at wayforth.io/dashboard)
 
-## Step 1 — Search
-wayforth_search("translate text to Spanish")
-→ Returns ranked services with WRI scores (0-100)
-→ WRI = Wayforth Reliability Index — uptime + usage signals
+STEP 2 — Discover:
+  wayforth_search("translate text to Spanish")
+  → DeepL        WRI:82  Tier 2  $0.00003/call
+  → LibreTranslate  WRI:71  Tier 2  Free
 
-## Step 2 — Pay
-wayforth_pay(service_id, amount_usd)
-→ Deducts credits from your balance (1 credit = $0.001 USD)
-→ Returns credits_remaining after deduction.
-→ Top up credits at wayforth.io/dashboard
+STEP 3 — Pay (choose your track):
 
-## Step 3 — Execute (no API key needed)
-wayforth_call("deepl", {"text": "Hello", "target_lang": "ES"})
-→ Translation returned, credits deducted automatically
-wayforth_call("groq", {"messages": [{"role": "user", "content": "Hello"}]})
-→ LLM response, no Groq account needed
-wayforth_call("openweather", {"city": "Las Vegas"})
-→ Live weather data
+  Card track (no crypto needed):
+    wayforth_pay("deepl", 0.001, track="card")
+    → Credits deducted, Stripe Treasury pays service
 
-## WayforthQL (structured queries)
-POST https://gateway.wayforth.io/query
-{"query": "fast inference", "tier_min": 2, "sort_by": "wri", "limit": 5}
+  Crypto track (your wallet, non-custodial):
+    wayforth_pay("deepl", 0.001, track="crypto")
+    → Returns Base calldata → broadcast from your wallet
 
-## All 11 tools
-wayforth_search      — semantic service discovery
-wayforth_pay         — pay for a service using credits
-wayforth_call        — execute an API call via Wayforth proxy (no API key needed)
-wayforth_list        — browse catalog with filters
-wayforth_similar     — co-used services (Service Graph)
-wayforth_identity    — agent trust score and reputation
-wayforth_remember    — save a service to agent memory
-wayforth_recall      — retrieve saved services
-wayforth_stats       — catalog statistics
-wayforth_status      — API health check
-wayforth_quickstart  — this guide
+PAYMENT SETUP:
+  Card:   wayforth.io/dashboard → Billing → Card Track → Add card
+  Crypto: Fund a Base wallet with USDC, connect at wayforth.io/dashboard
 
-## Links
-Demo: https://wayforth.io/demo
-Docs: https://gateway.wayforth.io/docs
-GitHub: https://github.com/WayforthOfficial/wayforth
+CREDITS (for search quota):
+  1 credit = $0.001 USD
+  2,000 free on signup
+  Buy more: $19/50K · $99/300K · $299/1M
+
+ROUTING FEE: 1.5% on all payments
+  30% → $WAYF burn (post-mainnet)
+  70% → Wayforth operations
+
+270+ verified APIs · 232+ Tier 2 · 18 categories
+
+All tools:
+  wayforth_search      — semantic service discovery
+  wayforth_pay         — pay via card or crypto (dual-track)
+  wayforth_list        — browse catalog with filters
+  wayforth_similar     — co-used services (Service Graph)
+  wayforth_identity    — agent trust score and reputation
+  wayforth_remember    — save a service to agent memory
+  wayforth_recall      — retrieve saved services
+  wayforth_stats       — catalog statistics
+  wayforth_status      — API health check
+  wayforth_quickstart  — this guide
 """
 
 
