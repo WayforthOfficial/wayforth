@@ -166,6 +166,77 @@ async def wayforth_pay(service_id: str, amount_usd: float) -> str:
 
 
 @mcp.tool()
+async def wayforth_call(service: str, params: dict) -> str:
+    """
+    Execute an API call through Wayforth proxy.
+
+    Wayforth holds the API key for you.
+    Credits are deducted automatically.
+    No external API account needed.
+
+    Available services: deepl, groq, openweather, newsapi, libretranslate
+
+    Examples:
+        wayforth_call("deepl", {"text": "Hello world", "target_lang": "ES"})
+        wayforth_call("groq", {"messages": [{"role": "user", "content": "Hello"}]})
+        wayforth_call("openweather", {"city": "Las Vegas"})
+        wayforth_call("newsapi", {"query": "AI agents", "language": "en"})
+
+    Args:
+        service: Service to call (deepl/groq/openweather/newsapi/libretranslate)
+        params: Parameters to pass to the service
+    """
+    api_key = os.getenv("WAYFORTH_API_KEY", "")
+    if not api_key:
+        return "Error: WAYFORTH_API_KEY not set. Get your free API key at wayforth.io/dashboard"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{API_BASE}/call",
+                headers={"X-Wayforth-API-Key": api_key, "Content-Type": "application/json"},
+                json={"service": service, "params": params},
+            )
+    except Exception as e:
+        return f"Error connecting to Wayforth: {e}"
+
+    if resp.status_code == 402:
+        data = resp.json().get("detail", {})
+        return (
+            f"Insufficient credits. "
+            f"Need: {data.get('credits_needed', '?')} credits. "
+            f"Balance: {data.get('credits_balance', '?')} credits. "
+            f"Top up at wayforth.io/dashboard"
+        )
+
+    if resp.status_code == 404:
+        data = resp.json().get("detail", {})
+        available = data.get("available", [])
+        return f"Service '{service}' not found. Available: {', '.join(available)}"
+
+    if resp.status_code == 503:
+        return f"Service '{service}' coming soon. Check wayforth.io for updates."
+
+    if resp.status_code != 200:
+        return f"Error {resp.status_code}: {resp.text[:300]}"
+
+    data = resp.json()
+    result = data.get("result", {})
+    credits_used = data.get("credits_deducted", 0)
+    credits_left = data.get("credits_remaining", 0)
+    latency = data.get("latency_ms", 0)
+
+    import json as _json
+    result_str = _json.dumps(result, indent=2, ensure_ascii=False)
+
+    return (
+        f"✅ {data.get('service_name', service)} response ({latency}ms)\n\n"
+        f"{result_str}\n\n"
+        f"Credits: -{credits_used} used · {credits_left} remaining"
+    )
+
+
+@mcp.tool()
 async def wayforth_list(category: str = None, tier_min: int = 2, limit: int = 10) -> str:
     """Browse the Wayforth service catalog.
 
@@ -405,13 +476,22 @@ wayforth_pay(service_id, amount_usd)
 → Returns credits_remaining after deduction.
 → Top up credits at wayforth.io/dashboard
 
+## Step 3 — Execute (no API key needed)
+wayforth_call("deepl", {"text": "Hello", "target_lang": "ES"})
+→ Translation returned, credits deducted automatically
+wayforth_call("groq", {"messages": [{"role": "user", "content": "Hello"}]})
+→ LLM response, no Groq account needed
+wayforth_call("openweather", {"city": "Las Vegas"})
+→ Live weather data
+
 ## WayforthQL (structured queries)
 POST https://gateway.wayforth.io/query
 {"query": "fast inference", "tier_min": 2, "sort_by": "wri", "limit": 5}
 
-## All 10 tools
+## All 11 tools
 wayforth_search      — semantic service discovery
 wayforth_pay         — pay for a service using credits
+wayforth_call        — execute an API call via Wayforth proxy (no API key needed)
 wayforth_list        — browse catalog with filters
 wayforth_similar     — co-used services (Service Graph)
 wayforth_identity    — agent trust score and reputation
