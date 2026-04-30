@@ -1517,12 +1517,12 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
             },
         )
 
-    # Look up service
+    # Look up service (match by name or DB id; wayforth_id is computed not stored)
     service = await db.fetchrow(
         """
         SELECT id, name, payment_protocol, pricing_usdc, x402_supported
         FROM services
-        WHERE wayforth_id = $1 OR name ILIKE $1 OR id::text = $1
+        WHERE name ILIKE $1 OR id::text = $1
         LIMIT 1
         """,
         service_id,
