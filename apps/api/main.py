@@ -406,7 +406,7 @@ async def health(request: Request, db=Depends(get_db)):
     return {
         "status": "ok" if db_status == "ok" else "degraded",
         "service": "wayforth-api",
-        "version": "0.1.5",
+        "version": "0.1.9",
         "db_status": db_status,
         "catalog": {
             "total": total,
@@ -431,7 +431,7 @@ async def system_status(db=Depends(get_db)):
     """)
     return {
         "status": "operational",
-        "version": "0.1.5",
+        "version": "0.1.9",
         "services": {
             "total": stats["total_services"],
             "tier2": stats["tier2_services"],
