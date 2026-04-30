@@ -28,9 +28,9 @@ import stripe
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 STRIPE_PACKAGES = {
-    "starter": {"price_cents": 1900,  "credits": 20000,  "label": "Starter Pack"},
-    "pro":     {"price_cents": 9900,  "credits": 120000, "label": "Pro Pack"},
-    "growth":  {"price_cents": 29900, "credits": 400000, "label": "Growth Pack"},
+    "starter": {"price_cents": 1900,  "credits": 50000,   "label": "Starter Pack"},
+    "pro":     {"price_cents": 9900,  "credits": 300000,  "label": "Pro Pack"},
+    "growth":  {"price_cents": 29900, "credits": 1000000, "label": "Growth Pack"},
 }
 from db import check_db
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
@@ -214,26 +214,30 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Wayforth API",
     description="""
-## The Search Engine for AI Agents
+## Wayforth — The search engine and API execution layer for AI agents
 
-Wayforth provides semantic service discovery and credits-based payments for AI agents.
-
-### Key Features
-- **WayforthQL** — Declarative query language for agent service discovery
-- **WayforthRank** — Proprietary multi-signal ranking engine
-- **Coverage Tiers** — Automated reliability verification (0–3)
-- **Non-custodial payments** — Agent signs, Wayforth routes, Base settles
+270+ verified APIs across 18 categories. Credits-based billing.
 
 ### Authentication
-Most endpoints are open with per-IP rate limits.
-Add `X-Wayforth-API-Key: wf_free_...` header for higher limits.
+All endpoints require `X-Wayforth-API-Key` header.
+Get your free API key at https://wayforth.io/dashboard
+
+### Credits
+- 1 credit = $0.001 USD
+- 2,000 free credits on signup
+- Packages: $19/50K · $99/300K · $299/1M
 
 ### Quick Start
 ```bash
+pip install wayforth-sdk
+# or
 uvx wayforth-mcp
 ```
+
+### Support
+https://wayforth.io/contact
 """,
-    version="0.1.5",
+    version="0.1.9",
     contact={"name": "Wayforth", "url": "https://wayforth.io/contact"},
     license_info={"name": "BSL 1.1", "url": "https://wayforth.io/license"},
     lifespan=lifespan,
@@ -439,7 +443,7 @@ async def system_status(db=Depends(get_db)):
         "billing": {
             "stripe": "active",
             "credits_per_dollar": 1000,
-            "free_credits_on_signup": 1000,
+            "free_credits_on_signup": 2000,
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -491,7 +495,7 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str, s
         if not row:
             await db.execute("""
                 INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier)
-                VALUES ($1::uuid, 1000, 1000, 'free')
+                VALUES ($1::uuid, 2000, 2000, 'free')
                 ON CONFLICT (user_id) DO NOTHING
             """, user_id)
             row = await db.fetchrow(
@@ -2203,10 +2207,10 @@ TIER_LIMITS = {
 }
 
 PACKAGES = {
-    "starter": {"credits": 20000,  "price_usd": 19,  "label": "Starter Pack"},
-    "pro":     {"credits": 120000, "price_usd": 99,  "label": "Pro Pack"},
-    "growth":  {"credits": 400000, "price_usd": 299, "label": "Growth Pack"},
-    "enterprise": {"credits": -1,  "price_usd": None, "label": "Enterprise"},
+    "starter":    {"credits": 50000,   "price_usd": 19,  "wayf_bonus_pct": 0.15, "fee_bps": 125, "label": "Starter Pack"},
+    "pro":        {"credits": 300000,  "price_usd": 99,  "wayf_bonus_pct": 0.15, "fee_bps": 100, "label": "Pro Pack"},
+    "growth":     {"credits": 1000000, "price_usd": 299, "wayf_bonus_pct": 0.15, "fee_bps": 85,  "label": "Growth Pack"},
+    "enterprise": {"credits": -1,      "price_usd": None,"wayf_bonus_pct": 0.15, "fee_bps": 75,  "label": "Enterprise"},
 }
 
 CREDIT_COSTS = {
@@ -2479,14 +2483,14 @@ async def register_user(request: Request, db=Depends(get_db)):
 
     await db.execute("""
         INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier)
-        VALUES ($1, 1000, 1000, 'free')
+        VALUES ($1, 2000, 2000, 'free')
         ON CONFLICT (user_id) DO NOTHING
     """, user['id'])
 
     await db.execute("""
         INSERT INTO credit_transactions
         (user_id, amount, balance_after, type, description)
-        VALUES ($1, 1000, 1000, 'bonus', 'Free signup credits')
+        VALUES ($1, 2000, 2000, 'bonus', 'Free signup credits')
     """, user['id'])
 
     asyncio.create_task(asyncio.to_thread(
@@ -2615,6 +2619,7 @@ async def get_packages(request: Request):
             "label": pkg['label'],
             "credits": pkg['credits'],
             "price_usd": pkg['price_usd'],
+            "price_per_credit": round(pkg['price_usd'] / pkg['credits'], 8),
         })
     return {"packages": result}
 
