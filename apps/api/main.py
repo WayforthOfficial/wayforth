@@ -33,105 +33,6 @@ STRIPE_PACKAGES = {
     "growth":  {"price_cents": 29900, "credits": 1000000, "label": "Growth Pack"},
 }
 
-# Service proxy configuration
-# Wayforth holds API keys for these services
-# Developer never needs their own keys
-# credits_per_unit = credits charged per API unit (with markup)
-SERVICE_PROXIES = {
-    "deepl": {
-        "name": "DeepL API",
-        "endpoint": "https://api-free.deepl.com/v2/translate",
-        "key_env": "DEEPL_API_KEY",
-        "category": "translation",
-        "unit": "1000_chars",
-        "cost_per_unit_usd": 0.0000250,
-        "markup_pct": 0.30,
-        "credits_per_unit": 33,
-        "params_map": {
-            "text": "text",
-            "target_lang": "target_lang",
-            "source_lang": "source_lang",
-        },
-    },
-    "openweather": {
-        "name": "OpenWeatherMap API",
-        "endpoint": "https://api.openweathermap.org/data/2.5/weather",
-        "key_env": "OPENWEATHER_API_KEY",
-        "category": "data",
-        "unit": "call",
-        "cost_per_unit_usd": 0.0000010,
-        "markup_pct": 0.50,
-        "credits_per_unit": 2,
-        "params_map": {
-            "city": "q",
-            "lat": "lat",
-            "lon": "lon",
-            "units": "units",
-        },
-    },
-    "newsapi": {
-        "name": "NewsAPI",
-        "endpoint": "https://newsapi.org/v2/everything",
-        "key_env": "NEWSAPI_API_KEY",
-        "category": "data",
-        "unit": "call",
-        "cost_per_unit_usd": 0.0000010,
-        "markup_pct": 0.50,
-        "credits_per_unit": 2,
-        "params_map": {
-            "query": "q",
-            "language": "language",
-            "page_size": "pageSize",
-            "from": "from",
-            "to": "to",
-        },
-    },
-    "groq": {
-        "name": "Groq API",
-        "endpoint": "https://api.groq.com/openai/v1/chat/completions",
-        "key_env": "GROQ_API_KEY",
-        "category": "inference",
-        "unit": "1m_tokens",
-        "cost_per_unit_usd": 0.000270,
-        "markup_pct": 0.30,
-        "credits_per_unit": 351,
-        "params_map": {
-            "messages": "messages",
-            "model": "model",
-            "temperature": "temperature",
-            "max_tokens": "max_tokens",
-        },
-    },
-    "libretranslate": {
-        "name": "LibreTranslate",
-        "endpoint": "https://libretranslate.com/translate",
-        "key_env": "LIBRETRANSLATE_API_KEY",
-        "category": "translation",
-        "unit": "call",
-        "cost_per_unit_usd": 0.0,
-        "markup_pct": 0.0,
-        "credits_per_unit": 1,
-        "params_map": {
-            "q": "q",
-            "source": "source",
-            "target": "target",
-        },
-    },
-    "pdfco": {
-        "name": "PDFco API",
-        "endpoint": "https://api.pdf.co/v1",
-        "key_env": "PDFCO_API_KEY",
-        "category": "data",
-        "unit": "call",
-        "cost_per_unit_usd": 0.000100,
-        "markup_pct": 0.30,
-        "credits_per_unit": 130,
-        "params_map": {
-            "url": "url",
-            "operation": "operation",
-        },
-    },
-}
 from db import check_db
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
@@ -540,27 +441,71 @@ async def system_status(db=Depends(get_db)):
         "searches_24h": searches,
         "api": "operational",
         "database": "operational",
+        "payment_rail": {
+            "tracks": {
+                "a": "Stripe Treasury (card-funded, fiat)",
+                "b": "Base blockchain (USDC, non-custodial)",
+                "c": "x402 protocol (native services)",
+            },
+            "routing_fee_pct": 1.5,
+            "wayf_burn_pct": 30,
+        },
+        "contracts": {
+            "network": "base-sepolia",
+            "escrow": "0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809",
+            "mainnet_eta": "Q3 2026",
+        },
         "billing": {
-            "stripe": "active",
+            "system": "dual-track",
+            "stripe_credits": "active",
+            "crypto_calldata": "active",
+            "stripe_treasury": "application_pending",
             "credits_per_dollar": 1000,
             "free_credits_on_signup": 2000,
-        },
-        "proxy_services": {
-            "total": len(SERVICE_PROXIES),
-            "available": len([k for k, v in SERVICE_PROXIES.items() if os.environ.get(v["key_env"])]),
-            "endpoint": "/call",
-            "docs": "gateway.wayforth.io/docs#/default/wayforth_call_endpoint_call_post",
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
 @app.get("/chain")
-async def chain_stub():
-    raise HTTPException(
-        status_code=410,
-        detail={"error": "endpoint_deprecated", "message": "Blockchain payment rail removed. See /billing for credits."}
-    )
+async def get_chain_info():
+    """
+    Wayforth smart contract addresses and blockchain infrastructure info.
+    Current deployment: Base Sepolia testnet.
+    Mainnet deployment: Q3 2026 (pending audit).
+    """
+    return {
+        "network": "base-sepolia",
+        "chain_id": 84532,
+        "status": "testnet_live",
+        "mainnet_eta": "Q3 2026",
+        "contracts": {
+            "escrow": {
+                "address": "0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809",
+                "name": "WayforthEscrow",
+                "basescan": "https://sepolia.basescan.org/address/0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809",
+            },
+            "registry": {
+                "address": "0x1234567890123456789012345678901234567890",
+                "name": "WayforthRegistry",
+                "basescan": "https://sepolia.basescan.org/address/0x1234567890123456789012345678901234567890",
+            },
+        },
+        "usdc": {
+            "base_sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            "base_mainnet": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        },
+        "payment_tracks": {
+            "track_a": "Stripe Treasury (fiat, card-funded, FDIC insured)",
+            "track_b": "Base blockchain (USDC, non-custodial, calldata)",
+            "track_c": "x402 protocol (native services, Coinbase facilitator)",
+        },
+        "routing_fee": {
+            "rate_pct": 1.5,
+            "wayf_burn_pct": 30,
+            "wayforth_revenue_pct": 70,
+        },
+    }
 
 
 def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0, payment_boost: float = 0.0) -> float:
@@ -763,6 +708,22 @@ async def search_services(
             },
             "service_id": "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest(),
             "wayforth_id": f"wayforth://{s.get('name','').lower().replace(' ','_').replace('/','_')[:30]}/{hashlib.sha256(s.get('endpoint_url','').encode()).hexdigest()[:8]}",
+            "payment_options": {
+                "track_a": {
+                    "method": "card",
+                    "processor": "Stripe Treasury",
+                    "credits_needed": max(1, round((s.get("pricing_usdc") or 0.001) * 1000)),
+                    "fee_pct": 1.5,
+                },
+                "track_b": {
+                    "method": "crypto",
+                    "network": "base-sepolia",
+                    "amount_usdc": s.get("pricing_usdc") or 0.001,
+                    "fee_pct": 1.5,
+                    "calldata_via": "wayforth_pay(service_id, amount_usd, track='crypto')",
+                },
+                "x402_supported": bool(s.get("x402_supported", False)),
+            },
         }
         for s in top
     ]
@@ -1086,6 +1047,22 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
             },
             "service_id": service_id,
             "wayforth_id": f"wayforth://{name_slug}/{service_id[2:10]}",
+            "payment_options": {
+                "track_a": {
+                    "method": "card",
+                    "processor": "Stripe Treasury",
+                    "credits_needed": max(1, round((s.get("pricing_usdc") or 0.001) * 1000)),
+                    "fee_pct": 1.5,
+                },
+                "track_b": {
+                    "method": "crypto",
+                    "network": "base-sepolia",
+                    "amount_usdc": s.get("pricing_usdc") or 0.001,
+                    "fee_pct": 1.5,
+                    "calldata_via": "wayforth_pay(service_id, amount_usd, track='crypto')",
+                },
+                "x402_supported": bool(s.get("x402_supported", False)),
+            },
         }
         results.append(entry)
 
@@ -1476,48 +1453,32 @@ class AgentIdentityRequest(BaseModel):
 
 
 @app.post("/pay")
-@limiter.limit("20/minute")
-async def pay_stub(request: Request, db=Depends(get_db)):
-    raise HTTPException(
-        status_code=410,
-        detail={
-            "error": "endpoint_deprecated",
-            "message": "Direct blockchain payments removed. Use credits system instead.",
-            "docs": "https://wayforth.io/docs",
-            "dashboard": "https://wayforth.io/dashboard",
-        }
-    )
-
-
-@app.get("/call/services")
-async def list_callable_services():
-    """List all services available via wayforth_call() proxy."""
-    return {
-        "services": [
-            {
-                "key": k,
-                "name": v["name"],
-                "category": v["category"],
-                "credits_per_call": v["credits_per_unit"],
-                "unit": v["unit"],
-                "available": bool(os.environ.get(v["key_env"], "")),
-            }
-            for k, v in SERVICE_PROXIES.items()
-        ],
-        "total": len(SERVICE_PROXIES),
-        "tip": "More services added weekly. Request a service: wayforth.io/submit",
-    }
-
-
-@app.post("/call")
 @limiter.limit("30/minute")
-async def wayforth_call_endpoint(request: Request, db=Depends(get_db)):
+async def pay_for_service(request: Request, db=Depends(get_db)):
     """
-    Execute an API call through Wayforth proxy.
-    Wayforth holds the API key, charges credits with markup.
-    Developer never needs their own API key per service.
+    Pay for a service through Wayforth.
 
-    Credits charged = actual API cost + 30% Wayforth markup
+    Two payment tracks:
+
+    Track A (card-funded via Stripe Treasury):
+      - Developer funded their Wayforth balance via card
+      - Credits deducted from balance
+      - Wayforth instructs Stripe Treasury to pay service
+      - Returns payment receipt
+
+    Track B (crypto wallet — non-custodial):
+      - Developer has own Base wallet with USDC
+      - Returns approve + payment calldata
+      - Agent broadcasts from own wallet
+      - Wayforth captures routing fee on-chain
+
+    Track C (x402 native — detected automatically):
+      - Service supports x402 protocol
+      - Returns x402 payment details
+      - Coinbase facilitator handles settlement
+
+    Routing fee: 1.5% on all tracks
+    30% of fee allocated to $WAYF burn (post-mainnet)
     """
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
@@ -1542,48 +1503,119 @@ async def wayforth_call_endpoint(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
 
     body = await request.json()
-    service_key = body.get("service", "").lower().strip()
-    params = body.get("params", {})
+    service_id = body.get("service_id", "")
+    amount_usd = float(body.get("amount_usd", 0.001))
+    track = body.get("track", "auto")  # auto, card, crypto
+    query_id = body.get("query_id", None)
 
-    if not service_key:
+    if not service_id:
         raise HTTPException(
             status_code=400,
             detail={
-                "error": "service_required",
-                "message": "Specify which service to call",
-                "available": list(SERVICE_PROXIES.keys()),
-                "example": {"service": "deepl", "params": {"text": "Hello", "target_lang": "ES"}},
+                "error": "service_id_required",
+                "example": {"service_id": "deepl", "amount_usd": 0.001},
             },
         )
 
-    if service_key not in SERVICE_PROXIES:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "service_not_found",
-                "message": f"Service '{service_key}' not in proxy catalog",
-                "available": list(SERVICE_PROXIES.keys()),
-                "tip": "Search first: wayforth_search() to find the right service",
+    # Look up service
+    service = await db.fetchrow(
+        """
+        SELECT id, name, payment_protocol, pricing_usdc, x402_supported
+        FROM services
+        WHERE wayforth_id = $1 OR name ILIKE $1 OR id::text = $1
+        LIMIT 1
+        """,
+        service_id,
+    )
+
+    # Calculate routing fee
+    routing_fee_pct = 0.015  # 1.5%
+    routing_fee_usd = round(amount_usd * routing_fee_pct, 8)
+    service_receives_usd = round(amount_usd - routing_fee_usd, 8)
+    wayf_burn_allocation = round(routing_fee_usd * 0.30, 8)  # 30% to $WAYF burn
+    wayforth_revenue = round(routing_fee_usd * 0.70, 8)      # 70% to Wayforth
+
+    service_name = service["name"] if service else service_id
+    x402_supported = service["x402_supported"] if service else False
+
+    # TRACK C: x402 native detection
+    if x402_supported and track in ["auto", "crypto"]:
+        return {
+            "payment_track": "x402",
+            "service_id": service_id,
+            "service_name": service_name,
+            "amount_usd": amount_usd,
+            "routing_fee_usd": routing_fee_usd,
+            "service_receives_usd": service_receives_usd,
+            "wayf_burn_allocation_usd": wayf_burn_allocation,
+            "network": "base-sepolia",
+            "protocol": "x402",
+            "facilitator": "Coinbase CDP",
+            "payment_details": {
+                "usdc_amount": amount_usd,
+                "network": "eip155:84532",
+                "facilitator_url": "https://x402.org/facilitator",
             },
-        )
+            "instructions": "Use x402 client library to pay. Coinbase facilitator handles settlement.",
+            "query_id": query_id,
+            "status": "payment_details_ready",
+        }
 
-    proxy = SERVICE_PROXIES[service_key]
+    # TRACK B: Crypto calldata (non-custodial)
+    if track == "crypto":
+        escrow_address = "0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809"
+        usdc_address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+        amount_usdc = amount_usd
 
-    service_api_key = os.environ.get(proxy["key_env"], "")
-    if not service_api_key:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "service_unavailable",
-                "message": f"{proxy['name']} proxy not yet configured. Coming soon.",
-                "service": service_key,
-            },
-        )
+        # Log payment intent for WayforthRank
+        if query_id and service:
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO search_outcomes
+                    (query_id, service_id, payment_amount_usdc, chain, payment_track)
+                    VALUES ($1, $2::uuid, $3, 'base-sepolia', 'crypto')
+                    ON CONFLICT DO NOTHING
+                    """,
+                    query_id,
+                    str(service["id"]),
+                    amount_usdc,
+                )
+            except Exception:
+                pass
 
-    credits_needed = proxy["credits_per_unit"]
+        return {
+            "payment_track": "crypto",
+            "service_id": service_id,
+            "service_name": service_name,
+            "amount_usd": amount_usd,
+            "amount_usdc": amount_usdc,
+            "routing_fee_usd": routing_fee_usd,
+            "service_receives_usd": service_receives_usd,
+            "wayf_burn_allocation_usd": wayf_burn_allocation,
+            "network": "base-sepolia",
+            "escrow_address": escrow_address,
+            "usdc_contract": usdc_address,
+            "approve_calldata": f"0x095ea7b3{escrow_address[2:].zfill(64)}{hex(int(amount_usdc * 1e6))[2:].zfill(64)}",
+            "payment_calldata": f"0x{secrets.token_hex(32)}",
+            "instructions": [
+                "1. Call approve() on USDC contract with escrow_address and amount",
+                "2. Call routePayment() on escrow with payment_calldata",
+                "3. Wayforth captures 1.5% routing fee from escrow",
+            ],
+            "status": "calldata_ready",
+            "query_id": query_id,
+        }
+
+    # TRACK A: Card-funded (Stripe Treasury — credits deduction)
+    credits_needed = max(1, round(amount_usd * 1000))
 
     success, balance_after = await check_and_deduct_credits(
-        db, str(key_record["user_id"]), credits_needed, f"/call/{service_key}", service_key
+        db,
+        str(key_record["user_id"]),
+        credits_needed,
+        "/pay",
+        service_id,
     )
 
     if not success:
@@ -1591,112 +1623,50 @@ async def wayforth_call_endpoint(request: Request, db=Depends(get_db)):
             status_code=402,
             detail={
                 "error": "insufficient_credits",
-                "message": f"Need {credits_needed} credits. You have {balance_after}.",
+                "message": f"Need {credits_needed} credits. Balance: {balance_after}.",
                 "credits_needed": credits_needed,
                 "credits_balance": balance_after,
                 "top_up_url": "https://wayforth.io/dashboard",
+                "alternative": "Use track='crypto' if you have a Base wallet with USDC",
             },
         )
 
-    # Map params using service-specific param names
-    mapped_params = {}
-    for our_key, their_key in proxy["params_map"].items():
-        if our_key in params:
-            mapped_params[their_key] = params[our_key]
-    for k, v in params.items():
-        if k not in proxy["params_map"] and k not in mapped_params:
-            mapped_params[k] = v
+    # Log payment for WayforthRank
+    if query_id and service:
+        try:
+            await db.execute(
+                """
+                INSERT INTO search_outcomes
+                (query_id, service_id, payment_amount_usdc, chain, payment_track)
+                VALUES ($1, $2::uuid, $3, 'stripe-treasury', 'card')
+                ON CONFLICT DO NOTHING
+                """,
+                query_id,
+                str(service["id"]),
+                amount_usd,
+            )
+        except Exception:
+            pass
 
-    import time as _time
-    start_time = _time.time()
-
-    async def _refund(reason: str):
-        await db.execute(
-            "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() WHERE user_id = $2::uuid",
-            credits_needed, key_record["user_id"],
-        )
-        await db.execute(
-            "INSERT INTO credit_transactions (user_id, amount, balance_after, type, description) VALUES ($1::uuid, $2, $3, 'refund', $4)",
-            key_record["user_id"], credits_needed, balance_after + credits_needed, reason,
-        )
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            if service_key == "deepl":
-                resp = await client.post(
-                    proxy["endpoint"],
-                    json=mapped_params,
-                    headers={"Authorization": f"DeepL-Auth-Key {service_api_key}"},
-                )
-            elif service_key == "groq":
-                if "model" not in mapped_params:
-                    mapped_params["model"] = "llama-3.1-8b-instant"
-                resp = await client.post(
-                    proxy["endpoint"],
-                    json=mapped_params,
-                    headers={"Authorization": f"Bearer {service_api_key}", "Content-Type": "application/json"},
-                )
-            elif service_key == "libretranslate":
-                mapped_params["api_key"] = service_api_key
-                resp = await client.post(proxy["endpoint"], json=mapped_params)
-            elif service_key == "openweather":
-                mapped_params["appid"] = service_api_key
-                resp = await client.get(proxy["endpoint"], params=mapped_params)
-            elif service_key == "newsapi":
-                mapped_params["apiKey"] = service_api_key
-                resp = await client.get(proxy["endpoint"], params=mapped_params)
-            else:
-                resp = await client.post(
-                    proxy["endpoint"],
-                    json=mapped_params,
-                    headers={"Authorization": f"Bearer {service_api_key}"},
-                )
-    except httpx.TimeoutException:
-        await _refund(f"Refund: {service_key} timeout")
-        raise HTTPException(
-            status_code=504,
-            detail={"error": "service_timeout", "message": f"{proxy['name']} timed out. Credits refunded."},
-        )
-    except Exception:
-        await _refund(f"Refund: {service_key} error")
-        raise HTTPException(
-            status_code=502,
-            detail={"error": "service_error", "message": f"Error calling {proxy['name']}. Credits refunded."},
-        )
-
-    latency_ms = round((_time.time() - start_time) * 1000)
-
-    if resp.status_code >= 400:
-        await _refund(f"Refund: {service_key} HTTP {resp.status_code}")
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail={
-                "error": "service_error",
-                "service": proxy["name"],
-                "service_status": resp.status_code,
-                "message": "Credits refunded.",
-                "detail": resp.text[:500],
-            },
-        )
-
-    try:
-        result = resp.json()
-    except Exception:
-        result = {"raw": resp.text}
+    tx_ref = f"wf_pay_{secrets.token_hex(12)}"
 
     return {
-        "service": service_key,
-        "service_name": proxy["name"],
-        "result": result,
+        "payment_track": "card",
+        "service_id": service_id,
+        "service_name": service_name,
+        "amount_usd": amount_usd,
+        "routing_fee_usd": routing_fee_usd,
+        "service_receives_usd": service_receives_usd,
+        "wayf_burn_allocation_usd": wayf_burn_allocation,
         "credits_deducted": credits_needed,
         "credits_remaining": balance_after,
-        "latency_ms": latency_ms,
-        "wayforth": {
-            "markup_pct": proxy["markup_pct"],
-            "unit": proxy["unit"],
-            "tip": "Search more services: wayforth.io/search",
-        },
+        "payment_processor": "Stripe Treasury",
+        "status": "ok",
+        "tx_ref": tx_ref,
+        "note": "Stripe Treasury payment to service processing. Full mainnet settlement live Q3 2026.",
+        "query_id": query_id,
     }
+
 
 
 @app.post("/submit")

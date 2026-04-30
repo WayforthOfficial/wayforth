@@ -1,0 +1,2 @@
+ALTER TABLE search_outcomes ADD COLUMN IF NOT EXISTS payment_track TEXT DEFAULT 'unknown';
+ALTER TABLE services ADD COLUMN IF NOT EXISTS x402_supported BOOLEAN DEFAULT false;
