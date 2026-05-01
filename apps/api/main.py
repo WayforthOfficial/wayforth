@@ -242,7 +242,7 @@ Get your free API key at https://wayforth.io/dashboard
 
 ### Credits
 - 1 credit = $0.001 USD
-- 2,000 free credits on signup
+- 100 free credits on signup
 - Packages: $19/50K · $99/300K · $299/1M
 
 ### Quick Start
@@ -478,7 +478,7 @@ async def system_status(db=Depends(get_db)):
             "crypto_calldata": "active",
             "stripe_treasury": "application_pending",
             "credits_per_dollar": 1000,
-            "free_credits_on_signup": 2000,
+            "free_credits_on_signup": 100,
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -561,7 +561,7 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str, s
         if not row:
             await db.execute("""
                 INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier)
-                VALUES ($1::uuid, 2000, 2000, 'free')
+                VALUES ($1::uuid, 100, 100, 'free')
                 ON CONFLICT (user_id) DO NOTHING
             """, user_id)
             row = await db.fetchrow(
@@ -1675,6 +1675,99 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
     }
 
 
+# ── BYOK KEY STORAGE ─────────────────────────────────────────────────────────
+
+async def _resolve_user(db, api_key: str):
+    """Return user_id for a valid active API key, or raise 401."""
+    key_record = await db.fetchrow(
+        "SELECT user_id FROM api_keys WHERE key_hash=$1 AND active=true",
+        hashlib.sha256(api_key.encode()).hexdigest(),
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+    return key_record["user_id"]
+
+
+@app.get("/call/keys")
+@limiter.limit("30/minute")
+async def list_service_keys(request: Request, db=Depends(get_db)):
+    """List the caller's stored BYOK service keys (active only)."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401)
+    user_id = await _resolve_user(db, api_key)
+
+    rows = await db.fetch("""
+        SELECT service_slug, service_name, key_preview,
+               total_calls, last_used_at, active, created_at
+        FROM user_service_keys
+        WHERE user_id=$1::uuid AND active=true
+        ORDER BY created_at DESC
+    """, user_id)
+    return {"service_keys": [dict(r) for r in rows], "total": len(rows)}
+
+
+@app.post("/call/keys/add")
+@limiter.limit("10/minute")
+async def add_service_key(request: Request, db=Depends(get_db)):
+    """Store an encrypted BYOK API key for a third-party service."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401)
+    user_id = await _resolve_user(db, api_key)
+
+    body = await request.json()
+    service_slug = body.get("service_slug", "").strip().lower()
+    service_name = body.get("service_name", "").strip()
+    raw_key = body.get("api_key", "").strip()
+
+    if not service_slug or not raw_key:
+        raise HTTPException(status_code=400, detail={"error": "service_slug and api_key required"})
+
+    preview = raw_key[:4] + "****" + raw_key[-4:] if len(raw_key) >= 8 else "****"
+
+    try:
+        f = get_fernet()
+        encrypted = f.encrypt(raw_key.encode()).decode()
+    except Exception:
+        logger.warning("BYOK: ENCRYPTION_KEY not set — storing plaintext key for %s", service_slug)
+        encrypted = raw_key
+
+    await db.execute("""
+        INSERT INTO user_service_keys
+            (user_id, service_slug, service_name, encrypted_key, key_preview)
+        VALUES ($1::uuid, $2, $3, $4, $5)
+        ON CONFLICT (user_id, service_slug)
+        DO UPDATE SET
+            service_name=EXCLUDED.service_name,
+            encrypted_key=EXCLUDED.encrypted_key,
+            key_preview=EXCLUDED.key_preview,
+            active=true,
+            updated_at=NOW()
+    """, user_id, service_slug, service_name or service_slug, encrypted, preview)
+
+    return {"service_slug": service_slug, "service_name": service_name or service_slug, "key_preview": preview, "created": True}
+
+
+@app.delete("/call/keys/{service_slug}")
+@limiter.limit("10/minute")
+async def deactivate_service_key(request: Request, service_slug: str, db=Depends(get_db)):
+    """Soft-delete a stored service key (sets active=false)."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401)
+    user_id = await _resolve_user(db, api_key)
+
+    result = await db.execute("""
+        UPDATE user_service_keys
+        SET active=false, updated_at=NOW()
+        WHERE user_id=$1::uuid AND service_slug=$2 AND active=true
+    """, user_id, service_slug)
+
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail={"error": "key_not_found"})
+    return {"service_slug": service_slug, "deactivated": True}
+
 
 @app.post("/submit")
 @limiter.limit("5/minute")
@@ -2776,14 +2869,14 @@ async def register_user(request: Request, db=Depends(get_db)):
 
     await db.execute("""
         INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier)
-        VALUES ($1, 2000, 2000, 'free')
+        VALUES ($1, 100, 100, 'free')
         ON CONFLICT (user_id) DO NOTHING
     """, user['id'])
 
     await db.execute("""
         INSERT INTO credit_transactions
         (user_id, amount, balance_after, type, description)
-        VALUES ($1, 2000, 2000, 'bonus', 'Free signup credits')
+        VALUES ($1, 100, 100, 'bonus', 'Free signup credits')
     """, user['id'])
 
     asyncio.create_task(asyncio.to_thread(
