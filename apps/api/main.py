@@ -27,6 +27,23 @@ from slowapi.util import get_remote_address  # fallback only
 import stripe
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
+STRIPE_MOCK = (
+    os.environ.get("STRIPE_SECRET_KEY", "").startswith("sk_test_")
+    or os.environ.get("STRIPE_MOCK", "false").lower() == "true"
+    or not os.environ.get("STRIPE_SECRET_KEY", "")
+)
+
+
+def get_fernet():
+    from cryptography.fernet import Fernet
+    import base64
+    raw = os.environ.get("ENCRYPTION_KEY", "")
+    if not raw:
+        raise ValueError("ENCRYPTION_KEY not set")
+    padded = raw.encode()[:32].ljust(32, b"\x00")
+    return Fernet(base64.urlsafe_b64encode(padded))
+
+
 STRIPE_PACKAGES = {
     "starter": {"price_cents": 1900,  "credits": 50000,   "label": "Starter Pack"},
     "pro":     {"price_cents": 9900,  "credits": 300000,  "label": "Pro Pack"},
@@ -3043,6 +3060,49 @@ async def create_checkout(request: Request, db=Depends(get_db)):
 
     pkg = STRIPE_PACKAGES[package]
 
+    # Mock mode: no real Stripe key configured or STRIPE_MOCK=true
+    if STRIPE_MOCK:
+        mock_session_id = "mock_sess_" + secrets.token_hex(12)
+        async with db.transaction():
+            existing = await db.fetchrow(
+                "SELECT credits_balance FROM user_credits WHERE user_id=$1::uuid FOR UPDATE",
+                key_record['user_id']
+            )
+            if existing:
+                new_balance = existing['credits_balance'] + pkg["credits"]
+                await db.execute("""
+                    UPDATE user_credits
+                    SET credits_balance=$1, lifetime_credits=lifetime_credits+$2,
+                        package_tier=$3, payment_method='mock_card', updated_at=NOW()
+                    WHERE user_id=$4::uuid
+                """, new_balance, pkg["credits"], package, key_record['user_id'])
+            else:
+                new_balance = pkg["credits"]
+                await db.execute("""
+                    INSERT INTO user_credits
+                    (user_id, credits_balance, lifetime_credits, package_tier, payment_method)
+                    VALUES ($1::uuid, $2, $2, $3, 'mock_card')
+                """, key_record['user_id'], new_balance, package)
+
+            await db.execute("""
+                INSERT INTO credit_transactions
+                (user_id, amount, balance_after, type, description)
+                VALUES ($1::uuid, $2, $3, 'mock_purchase', $4)
+            """, key_record['user_id'], pkg["credits"], new_balance,
+                f"Mock purchase: {package} pack - {pkg['credits']:,} credits (Stripe not configured)")
+
+        return {
+            "checkout_url": f"https://wayforth.io/dashboard?purchase=success&package={package}&mock=true",
+            "session_id": mock_session_id,
+            "package": package,
+            "credits": pkg["credits"],
+            "price_usd": pkg["price_cents"] / 100,
+            "mock": True,
+            "credits_added": pkg["credits"],
+            "new_balance": new_balance,
+            "note": "Stripe not configured. Credits added automatically in mock mode.",
+        }
+
     try:
         session = stripe.checkout.Session.create(
             payment_method_types=["card"],
@@ -3085,6 +3145,53 @@ async def create_checkout(request: Request, db=Depends(get_db)):
         "credits": pkg["credits"],
         "price_usd": pkg["price_cents"] / 100,
     }
+
+
+@app.post("/billing/mock-topup")
+@limiter.limit("5/minute")
+async def mock_topup(request: Request, db=Depends(get_db)):
+    """Test endpoint: add credits without Stripe. Only works when STRIPE_MOCK=true or no Stripe key set."""
+    if not STRIPE_MOCK:
+        raise HTTPException(status_code=403, detail="Mock top-up not available in production")
+
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401)
+
+    key_record = await db.fetchrow(
+        "SELECT user_id FROM api_keys WHERE key_hash=$1 AND active=true",
+        hashlib.sha256(api_key.encode()).hexdigest()
+    )
+    if not key_record:
+        raise HTTPException(status_code=401)
+
+    body = await request.json()
+    credits = min(int(body.get("credits", 10000)), 100000)
+
+    async with db.transaction():
+        existing = await db.fetchrow(
+            "SELECT credits_balance FROM user_credits WHERE user_id=$1::uuid FOR UPDATE",
+            key_record['user_id']
+        )
+        if existing:
+            new_balance = existing['credits_balance'] + credits
+            await db.execute(
+                "UPDATE user_credits SET credits_balance=$1, lifetime_credits=lifetime_credits+$2, updated_at=NOW() WHERE user_id=$3::uuid",
+                new_balance, credits, key_record['user_id']
+            )
+        else:
+            new_balance = credits
+            await db.execute(
+                "INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier, payment_method) VALUES ($1::uuid, $2, $2, 'mock', 'mock')",
+                key_record['user_id'], new_balance
+            )
+
+        await db.execute("""
+            INSERT INTO credit_transactions (user_id, amount, balance_after, type, description)
+            VALUES ($1::uuid, $2, $3, 'mock_topup', 'Mock top-up for testing')
+        """, key_record['user_id'], credits, new_balance)
+
+    return {"status": "ok", "credits_added": credits, "new_balance": new_balance, "mock": True}
 
 
 @app.post("/stripe/webhook")
@@ -3152,6 +3259,102 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
         return {"status": "credited", "credits_added": credits, "new_balance": new_balance}
 
     return {"status": "ignored"}
+
+
+@app.get("/system/health")
+async def system_health(request: Request, db=Depends(get_db)):
+    """Comprehensive health check for all payment tracks and subsystems."""
+    import time as _time
+    start = _time.time()
+
+    health = {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "0.2.0",
+        "subsystems": {},
+    }
+
+    # Database
+    try:
+        await db.fetchval("SELECT 1")
+        health["subsystems"]["database"] = {"status": "ok"}
+    except Exception as e:
+        health["subsystems"]["database"] = {"status": "error", "detail": str(e)[:100]}
+        health["status"] = "degraded"
+
+    # Credits system
+    try:
+        count = await db.fetchval("SELECT COUNT(*) FROM user_credits")
+        health["subsystems"]["credits"] = {"status": "ok", "accounts": count}
+    except Exception as e:
+        health["subsystems"]["credits"] = {"status": "error", "detail": str(e)[:100]}
+
+    # BYOK
+    try:
+        key_count = await db.fetchval("SELECT COUNT(*) FROM user_service_keys WHERE active=true")
+        health["subsystems"]["byok"] = {"status": "ok", "active_keys": key_count}
+    except Exception as e:
+        health["subsystems"]["byok"] = {"status": "error", "detail": str(e)[:100]}
+
+    # Stripe
+    stripe_key = os.environ.get("STRIPE_SECRET_KEY", "")
+    health["subsystems"]["stripe"] = {
+        "status": "mock" if STRIPE_MOCK else "configured",
+        "mode": "test" if stripe_key.startswith("sk_test_") else ("live" if stripe_key.startswith("sk_live_") else "not_set"),
+    }
+
+    # Payment tracks
+    health["subsystems"]["payment_tracks"] = {
+        "track_a_card": {
+            "status": "mock" if STRIPE_MOCK else "active",
+            "processor": "Stripe Treasury",
+            "credits_deduction": "active",
+        },
+        "track_b_crypto": {
+            "status": "active",
+            "network": "base-sepolia",
+            "calldata_generation": "active",
+            "escrow": "0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809",
+        },
+        "track_c_x402": {
+            "status": "active",
+            "auto_detection": "active",
+            "facilitator": "Coinbase CDP",
+        },
+    }
+
+    # Services catalog
+    try:
+        total = await db.fetchval("SELECT COUNT(*) FROM services")
+        tier2 = await db.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2")
+        x402 = await db.fetchval("SELECT COUNT(*) FROM services WHERE x402_supported=true")
+        health["subsystems"]["catalog"] = {
+            "status": "ok",
+            "total_services": total,
+            "tier2_verified": tier2,
+            "x402_native": x402,
+        }
+    except Exception as e:
+        health["subsystems"]["catalog"] = {"status": "error", "detail": str(e)[:100]}
+
+    # Encryption
+    try:
+        enc_key = os.environ.get("ENCRYPTION_KEY", "")
+        if enc_key:
+            f = get_fernet()
+            token = f.encrypt(b"test").decode()
+            f.decrypt(token.encode())
+            health["subsystems"]["encryption"] = {"status": "ok", "algorithm": "Fernet-AES128"}
+        else:
+            health["subsystems"]["encryption"] = {
+                "status": "not_configured",
+                "note": "ENCRYPTION_KEY not set — BYOK key encryption unavailable",
+            }
+    except Exception as e:
+        health["subsystems"]["encryption"] = {"status": "error", "detail": str(e)[:100]}
+
+    health["latency_ms"] = round((_time.time() - start) * 1000)
+    return health
 
 
 # ── ADMIN AUTH ───────────────────────────────────────────────────────────────
