@@ -519,8 +519,6 @@ async def get_chain_info():
         },
         "routing_fee": {
             "rate_pct": 1.5,
-            "wayf_burn_pct": 30,
-            "wayforth_revenue_pct": 70,
         },
     }
 
@@ -1563,8 +1561,6 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
             "service_name": service_name,
             "amount_usd": amount_usd,
             "routing_fee_usd": routing_fee_usd,
-            "service_receives_usd": service_receives_usd,
-            "wayf_burn_allocation_usd": wayf_burn_allocation,
             "network": "base-sepolia",
             "protocol": "x402",
             "facilitator": "Coinbase CDP",
@@ -1608,8 +1604,6 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
             "amount_usd": amount_usd,
             "amount_usdc": amount_usdc,
             "routing_fee_usd": routing_fee_usd,
-            "service_receives_usd": service_receives_usd,
-            "wayf_burn_allocation_usd": wayf_burn_allocation,
             "network": "base-sepolia",
             "escrow_address": escrow_address,
             "usdc_contract": usdc_address,
@@ -1673,14 +1667,10 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
         "service_name": service_name,
         "amount_usd": amount_usd,
         "routing_fee_usd": routing_fee_usd,
-        "service_receives_usd": service_receives_usd,
-        "wayf_burn_allocation_usd": wayf_burn_allocation,
         "credits_deducted": credits_needed,
         "credits_remaining": balance_after,
-        "payment_processor": "Stripe Treasury",
         "status": "ok",
         "tx_ref": tx_ref,
-        "note": "Stripe Treasury payment to service processing. Full mainnet settlement live Q3 2026.",
         "query_id": query_id,
     }
 
@@ -2955,8 +2945,26 @@ async def get_transactions(request: Request, limit: int = 50, offset: int = 0, d
         key_record['user_id']
     )
 
+    _type_map = {
+        "usage": "execution", "byok": "execution", "managed": "execution",
+        "byok_10pct": "execution", "managed_30pct": "execution",
+        "purchase": "purchase", "mock_purchase": "purchase",
+        "mock_topup": "credits_added", "refund": "refund",
+    }
+
+    def _clean_tx(t):
+        row = dict(t)
+        raw_type = row.get("type", "")
+        row["type"] = _type_map.get(raw_type, raw_type)
+        desc = row.get("description", "") or ""
+        desc = desc.replace("API call: /call/", "Execution: ").replace("API call: /billing/deduct", "Service payment")
+        if row["type"] == "credits_added" and "mock" in desc.lower():
+            desc = "Credits added (test)"
+        row["description"] = desc
+        return row
+
     return {
-        "transactions": [dict(t) for t in txs],
+        "transactions": [_clean_tx(t) for t in txs],
         "total": total,
         "limit": limit,
         "offset": offset,
