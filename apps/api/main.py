@@ -504,11 +504,6 @@ async def get_chain_info():
                 "name": "WayforthEscrow",
                 "basescan": "https://sepolia.basescan.org/address/0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809",
             },
-            "registry": {
-                "address": "0x1234567890123456789012345678901234567890",
-                "name": "WayforthRegistry",
-                "basescan": "https://sepolia.basescan.org/address/0x1234567890123456789012345678901234567890",
-            },
         },
         "usdc": {
             "base_sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
@@ -1470,6 +1465,63 @@ class AgentIdentityRequest(BaseModel):
     display_name: str = ""
 
 
+async def _x402_settle_cdp(service_endpoint: str, amount_usd: float) -> dict:
+    """Attempt x402 settlement via Coinbase CDP. Returns {settled, tx_hash?, reason?}."""
+    cdp_key_name = os.environ.get("CDP_API_KEY_NAME", "")
+    cdp_private_key = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "")
+    if not cdp_key_name or not cdp_private_key:
+        return {"settled": False, "reason": "CDP credentials not configured"}
+    try:
+        from cdp import Cdp, Wallet  # cdp-sdk
+
+        loop = asyncio.get_event_loop()
+
+        # Step 1: initial request to service — expect 402 with payment details
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(service_endpoint)
+
+        if r.status_code != 402:
+            return {"settled": False, "reason": f"Service returned {r.status_code}, expected 402"}
+
+        try:
+            payment_info = r.json()
+        except Exception:
+            payment_info = {}
+
+        recipient = (
+            payment_info.get("recipient")
+            or payment_info.get("payment_address")
+            or r.headers.get("x-payment-address")
+            or r.headers.get("X-Payment-Address")
+        )
+        amount_usdc = float(payment_info.get("amount_usdc", amount_usd))
+        network_id = "base-sepolia"
+
+        if not recipient:
+            return {"settled": False, "reason": "Could not parse payment recipient from 402 response"}
+
+        # Step 2: configure CDP and submit USDC transfer (sync SDK — run in executor)
+        def _cdp_transfer():
+            Cdp.configure(cdp_key_name, cdp_private_key)
+            wallet = Wallet.create(network_id=network_id)
+            transfer = wallet.transfer(amount_usdc, "usdc", recipient)
+            transfer.wait(timeout_seconds=15, interval_seconds=0.5)
+            return transfer.transaction_hash
+
+        tx_hash = await asyncio.wait_for(
+            loop.run_in_executor(None, _cdp_transfer),
+            timeout=20.0,
+        )
+        return {"settled": True, "tx_hash": tx_hash, "network": network_id}
+
+    except asyncio.TimeoutError:
+        return {"settled": False, "reason": "x402 settlement timed out after 20 seconds"}
+    except ImportError:
+        return {"settled": False, "reason": "cdp-sdk not installed"}
+    except Exception as e:
+        return {"settled": False, "reason": str(e)[:200]}
+
+
 @app.post("/pay")
 @limiter.limit("30/minute")
 async def pay_for_service(request: Request, db=Depends(get_db)):
@@ -1538,7 +1590,7 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
     # Look up service (match by name or DB id; wayforth_id is computed not stored)
     service = await db.fetchrow(
         """
-        SELECT id, name, payment_protocol, pricing_usdc, x402_supported
+        SELECT id, name, payment_protocol, pricing_usdc, x402_supported, endpoint_url
         FROM services
         WHERE name ILIKE $1 OR id::text = $1
         LIMIT 1
@@ -1556,26 +1608,55 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
     service_name = service["name"] if service else service_id
     x402_supported = service["x402_supported"] if service else False
 
-    # TRACK C: x402 native detection
+    # TRACK C: x402 native — attempt real CDP settlement, fall back to Track A if unconfigured
+    x402_fallback_note = None
     if x402_supported and track in ["auto", "crypto"]:
-        return {
-            "payment_track": "x402",
-            "service_id": service_id,
-            "service_name": service_name,
-            "amount_usd": amount_usd,
-            "routing_fee_usd": routing_fee_usd,
-            "network": "base-sepolia",
-            "protocol": "x402",
-            "facilitator": "Coinbase CDP",
-            "payment_details": {
-                "usdc_amount": amount_usd,
-                "network": "eip155:84532",
-                "facilitator_url": "https://x402.org/facilitator",
-            },
-            "instructions": "Use x402 client library to pay. Coinbase facilitator handles settlement.",
-            "query_id": query_id,
-            "status": "payment_details_ready",
-        }
+        cdp_configured = bool(
+            os.environ.get("CDP_API_KEY_NAME") and os.environ.get("CDP_API_KEY_PRIVATE_KEY")
+        )
+        if not cdp_configured:
+            x402_fallback_note = "CDP not configured, routed via card"
+        else:
+            endpoint_url = service["endpoint_url"] if service else None
+            if not endpoint_url:
+                x402_fallback_note = "x402 settlement unavailable (no service endpoint), routed via card"
+            else:
+                settlement = await _x402_settle_cdp(endpoint_url, amount_usd)
+                if settlement["settled"]:
+                    credits_needed = max(1, round(amount_usd * 1000))
+                    ok, bal_after = await check_and_deduct_credits(
+                        db, str(key_record["user_id"]), credits_needed, "/pay", service_id
+                    )
+                    if query_id and service:
+                        try:
+                            await db.execute(
+                                """
+                                INSERT INTO search_outcomes
+                                (query_id, service_id, payment_amount_usdc, chain, payment_track)
+                                VALUES ($1, $2::uuid, $3, 'base-sepolia', 'x402')
+                                ON CONFLICT DO NOTHING
+                                """,
+                                query_id,
+                                str(service["id"]),
+                                amount_usd,
+                            )
+                        except Exception:
+                            pass
+                    return {
+                        "payment_track": "x402",
+                        "status": "ok",
+                        "service_id": service_id,
+                        "service_name": service_name,
+                        "amount_usd": amount_usd,
+                        "facilitator": "Coinbase CDP",
+                        "tx_hash": settlement["tx_hash"],
+                        "network": settlement.get("network", "base-sepolia"),
+                        "credits_deducted": credits_needed if ok else 0,
+                        "credits_remaining": bal_after,
+                        "query_id": query_id,
+                    }
+                else:
+                    x402_fallback_note = f"x402 failed ({settlement['reason']}), routed via card"
 
     # TRACK B: Crypto calldata (non-custodial)
     if track == "crypto":
@@ -1664,7 +1745,7 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
 
     tx_ref = f"wf_pay_{secrets.token_hex(12)}"
 
-    return {
+    card_response = {
         "payment_track": "card",
         "service_id": service_id,
         "service_name": service_name,
@@ -1676,6 +1757,9 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
         "tx_ref": tx_ref,
         "query_id": query_id,
     }
+    if x402_fallback_note:
+        card_response["x402_fallback"] = x402_fallback_note
+    return card_response
 
 
 # ── BYOK KEY STORAGE ─────────────────────────────────────────────────────────
@@ -3550,9 +3634,10 @@ async def system_health(request: Request, db=Depends(get_db)):
             "escrow": "0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809",
         },
         "track_c_x402": {
-            "status": "active",
+            "status": "active" if (os.environ.get("CDP_API_KEY_NAME") and os.environ.get("CDP_API_KEY_PRIVATE_KEY")) else "fallback_to_card",
             "auto_detection": "active",
             "facilitator": "Coinbase CDP",
+            "settlement": "live" if (os.environ.get("CDP_API_KEY_NAME") and os.environ.get("CDP_API_KEY_PRIVATE_KEY")) else "not_configured",
         },
     }
 
@@ -3599,6 +3684,21 @@ async def system_health(request: Request, db=Depends(get_db)):
         "status": "ok" if configured else "degraded",
         "configured": configured,
         "missing": missing,
+    }
+
+    # x402 / Coinbase CDP
+    cdp_key_name = os.environ.get("CDP_API_KEY_NAME", "")
+    cdp_private_key = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "")
+    cdp_configured = bool(cdp_key_name and cdp_private_key)
+    try:
+        x402_count = await db.fetchval("SELECT COUNT(*) FROM services WHERE x402_supported=true")
+    except Exception:
+        x402_count = 0
+    health["subsystems"]["x402"] = {
+        "status": "configured" if cdp_configured else "not_configured",
+        "facilitator": "Coinbase CDP",
+        "cdp_credentials": "set" if cdp_configured else "missing",
+        "services_supported": x402_count,
     }
 
     health["latency_ms"] = round((_time.time() - start) * 1000)

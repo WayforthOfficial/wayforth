@@ -22,4 +22,5 @@ dependencies = [
     "stripe>=7.0.0",
     "web3>=7.15.0",
     "cryptography>=47.0.0",
+    "cdp-sdk>=0.0.16",
 ]
