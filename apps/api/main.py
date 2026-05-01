@@ -1820,6 +1820,17 @@ async def execute_service(request: Request, db=Depends(get_db)):
         except Exception:
             svc_key = row["encrypted_key"]
 
+    # Validate key is ASCII-safe (HTTP headers require ASCII)
+    try:
+        svc_key.encode("ascii")
+    except UnicodeEncodeError as enc_err:
+        raise HTTPException(status_code=503, detail={
+            "error": (
+                f"API key for '{service_slug}' contains non-ASCII characters at position {enc_err.start}. "
+                "Re-paste the key in Railway environment variables using plain text (avoid rich text editors)."
+            )
+        })
+
     success, balance_after = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/execute",
         service_id=service_slug, tx_type="execution",
@@ -1871,7 +1882,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
                 (user_id, amount, balance_after, type, description, api_endpoint, service_id)
                 VALUES ($1::uuid, $2, $3, 'execution_refund', $4, '/execute', $5)
             """, user_id, credit_cost, refunded_balance,
-                f"Refund: {service_slug} failed — {error_msg[:100]}", service_slug)
+                f"Refund: {service_slug} failed - {error_msg[:100]}", service_slug)
         raise HTTPException(status_code=503, detail={
             "status": "error",
             "service": service_slug,
