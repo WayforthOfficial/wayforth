@@ -32,9 +32,10 @@ Then two tool calls from any agent:
     → LibreTranslate  WRI: 71  Tier 2 Verified  Free
     → ModernMT        WRI: 68  Tier 2 Verified  $0.000003/req
 
-    # Pay
-    wayforth_pay(service_id, amount_usd=0.001)
-    → Deducts from your credit balance. 1 credit = $0.001 USD.
+    # Pay — card or crypto
+    wayforth_pay(service_id, amount_usd=0.001)               # card default
+    wayforth_pay(service_id, amount_usd=0.001, track="crypto") # non-custodial Base
+    → 1.5% routing fee. No fixed fee — works for micropayments.
 
 No API keys per provider. No billing relationships. No integration code.
 
@@ -42,17 +43,21 @@ No API keys per provider. No billing relationships. No integration code.
 
 What's live today:
 
-- 200+ real API endpoints indexed across 7 categories (inference, data,
-  translation, image, code, audio, embeddings)
-- 147 Tier 2 verified — automatically probed every 6 hours, 90%+ uptime
+- 274+ real API endpoints indexed across 18 categories (inference, translation,
+  data, image, audio, communication, payments, productivity, maps, identity,
+  devops, legal, healthcare, real_estate, social, analytics, code, embeddings)
+- 225+ Tier 2 verified — automatically probed every 6 hours, 90%+ uptime
   required, auto-demoted after 3 consecutive failures. No paid placement.
 - WayforthRank — proprietary ranking engine combining semantic relevance,
   reliability history, and real agent payment conversion signals. Rankings
-  improve with every query. (Patent pending)
-- WayforthQL — declarative query language for structured discovery:
-  POST /query {"query": "...", "tier_min": 2, "price_max": 0.001, "sort_by": "wri"}
+  improve with every real payment. (3 patents pending: WF-2026-001/002/003)
+- Dual-track payment rail — Track A: card credits via Stripe Treasury (fiat,
+  no crypto needed). Track B: non-custodial Base blockchain calldata. Track C:
+  x402 native. Same 1.5% routing fee on all tracks.
+- BYOK — add your own API key for any of 274+ catalog services. Wayforth
+  manages, proxies, retries. Keys encrypted at rest (Fernet AES-128).
 - Credits system — pre-paid credits via Stripe. 1 credit = $0.001.
-  1,000 free credits on signup.
+  100 free credits on signup. Starter $19 → 50K credits.
 
 Works in Claude Code, Cursor, Windsurf, and any MCP-compatible runtime.
 
@@ -67,13 +72,11 @@ with every real agent payment.
 
 ---
 
-Already being used by developers who found us before this post.
-
-Whitepaper:  https://wayforth.io/technology
+Whitepaper:  https://wayforth.io/wayforth-whitepaper-v5.pdf
 Leaderboard: https://wayforth.io/leaderboard
 GitHub:      https://github.com/WayforthOfficial/wayforth
 Docs:        https://wayforth.io/docs
 PyPI:        https://pypi.org/project/wayforth-mcp/
 
-Happy to go deep on the WayforthRank architecture, the credits payment
-design, or the coverage tier system.
+Happy to go deep on the WayforthRank architecture, the dual-track payment
+design, the BYOK system, or the coverage tier system.
