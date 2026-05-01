@@ -2245,6 +2245,142 @@ async def admin_page(key: str = ""):
     return FileResponse("static/admin.html")
 
 
+_CATALOG_SUGGESTED: dict = {
+    "communication": ["Twilio", "Vonage", "Sinch", "MessageBird", "Plivo"],
+    "payments":      ["Stripe", "PayPal", "Square", "Braintree", "Adyen"],
+    "identity":      ["Auth0", "Okta", "Persona", "Jumio", "Onfido"],
+    "inference":     ["OpenAI", "Anthropic", "Google Gemini", "Cohere", "Mistral"],
+    "image":         ["Stability AI", "DALL-E", "Replicate", "fal.ai"],
+    "audio":         ["ElevenLabs", "Deepgram", "AssemblyAI", "PlayHT"],
+    "translation":   ["DeepL", "Google Translate", "Azure Translator"],
+    "data":          ["SerpAPI", "Browserless", "Apify", "ScraperAPI"],
+    "code":          ["GitHub Copilot API", "Tabnine", "Codeium"],
+    "embeddings":    ["OpenAI Embeddings", "Cohere Embed", "Voyage AI"],
+    "location":      ["Google Maps", "Mapbox", "HERE", "TomTom"],
+    "devops":        ["GitHub Actions", "CircleCI", "Datadog", "PagerDuty"],
+    "legal":         ["LexisNexis", "Westlaw", "Clio", "ContractPodAi"],
+    "healthcare":    ["Redox", "Veeva", "Epic FHIR", "Healthix"],
+    "real_estate":   ["ATTOM Data", "CoreLogic", "Estated", "Regrid"],
+    "social":        ["Twitter/X API", "Meta Graph API", "LinkedIn API", "Reddit API"],
+    "analytics":     ["Mixpanel", "Amplitude", "Segment", "PostHog"],
+    "productivity":  ["Notion API", "Airtable API", "Zapier", "Make"],
+}
+
+
+@app.get("/admin/catalog/misses")
+@limiter.limit("10/minute")
+async def catalog_misses(request: Request, key: str = "", db=Depends(get_db)):
+    if not ADMIN_KEY or key != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        total = await db.fetchval("""
+            SELECT COUNT(*) FROM search_analytics
+            WHERE created_at > NOW() - INTERVAL '30 days'
+        """)
+        zero_results = await db.fetchval("""
+            SELECT COUNT(*) FROM search_analytics
+            WHERE created_at > NOW() - INTERVAL '30 days'
+              AND result_count = 0
+        """)
+        top_misses_rows = await db.fetch("""
+            SELECT query, COUNT(*) AS count, MAX(created_at) AS last_searched
+            FROM search_analytics
+            WHERE created_at > NOW() - INTERVAL '30 days'
+              AND (
+                result_count = 0
+                OR (results IS NOT NULL
+                    AND jsonb_array_length(results) > 0
+                    AND (results->0->>'score')::float < 40)
+              )
+            GROUP BY query
+            ORDER BY count DESC
+            LIMIT 20
+        """)
+        low_conf_total = await db.fetchval("""
+            SELECT COUNT(*) FROM search_analytics
+            WHERE created_at > NOW() - INTERVAL '30 days'
+              AND result_count > 0
+              AND results IS NOT NULL
+              AND jsonb_array_length(results) > 0
+              AND (results->0->>'score')::float < 40
+        """)
+        cat_rows = await db.fetch("""
+            SELECT s.category, COUNT(*) AS cnt
+            FROM search_analytics sa
+            JOIN services s ON s.id = sa.top_result_id
+            WHERE sa.created_at > NOW() - INTERVAL '30 days'
+              AND sa.result_count > 0
+              AND sa.results IS NOT NULL
+              AND jsonb_array_length(sa.results) > 0
+              AND (sa.results->0->>'score')::float < 40
+            GROUP BY s.category
+            ORDER BY cnt DESC
+        """)
+        total_misses = (zero_results or 0) + (low_conf_total or 0)
+        miss_rate = round(total_misses / total * 100, 1) if total else 0.0
+        return {
+            "period_days": 30,
+            "total_searches": total or 0,
+            "zero_result_searches": zero_results or 0,
+            "miss_rate_pct": miss_rate,
+            "top_misses": [
+                {
+                    "query": r["query"],
+                    "count": r["count"],
+                    "last_searched": r["last_searched"].isoformat() + "Z" if r["last_searched"] else None,
+                }
+                for r in top_misses_rows
+            ],
+            "miss_by_category": {r["category"]: r["cnt"] for r in cat_rows if r["category"]},
+        }
+    except Exception as e:
+        logger.error(f"catalog_misses error: {e}")
+        raise HTTPException(status_code=500, detail="query failed")
+
+
+@app.get("/admin/catalog/gaps")
+@limiter.limit("10/minute")
+async def catalog_gaps(request: Request, key: str = "", db=Depends(get_db)):
+    if not ADMIN_KEY or key != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        svc_rows = await db.fetch("""
+            SELECT category, COUNT(*) AS svc_count
+            FROM services
+            WHERE category IS NOT NULL
+            GROUP BY category
+        """)
+        search_rows = await db.fetch("""
+            SELECT s.category, COUNT(*) AS search_count
+            FROM search_analytics sa
+            JOIN services s ON s.id = sa.top_result_id
+            WHERE sa.created_at > NOW() - INTERVAL '7 days'
+              AND s.category IS NOT NULL
+            GROUP BY s.category
+        """)
+        svc_map = {r["category"]: r["svc_count"] for r in svc_rows}
+        search_map = {r["category"]: r["search_count"] for r in search_rows}
+        gaps = []
+        for cat, searches in search_map.items():
+            svc_count = svc_map.get(cat, 0)
+            if svc_count == 0:
+                continue
+            ratio = round(searches / svc_count, 1)
+            if ratio > 10:
+                gaps.append({
+                    "category": cat,
+                    "searches_7d": searches,
+                    "services_available": svc_count,
+                    "searches_per_service": ratio,
+                    "suggested_services": _CATALOG_SUGGESTED.get(cat, [])[:3],
+                })
+        gaps.sort(key=lambda x: x["searches_per_service"], reverse=True)
+        return {"gaps": gaps}
+    except Exception as e:
+        logger.error(f"catalog_gaps error: {e}")
+        raise HTTPException(status_code=500, detail="query failed")
+
+
 @app.get("/demo")
 async def demo():
     return FileResponse("static/demo.html")
