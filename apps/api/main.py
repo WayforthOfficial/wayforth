@@ -392,7 +392,7 @@ async def check_auth(request: Request) -> dict:
     if count >= _ANON_DAILY_LIMIT:
         raise _AuthError(429, {
             "error": "free_limit_reached",
-            "message": "You've used your 3 free searches. Sign up free for 1,000 searches/month — no credit card required.",
+            "message": "You've used your 3 free searches. Sign up free for 100 searches/month — no credit card required.",
             "signup_url": "https://wayforth.io/signup",
             "dashboard_url": "https://wayforth.io/dashboard",
         })
@@ -760,7 +760,7 @@ async def search_services(
         response["anonymous_searches_remaining"] = remaining
         if remaining > 0:
             response["signup_url"] = "https://wayforth.io/signup"
-            response["message"] = f"{remaining} free {'search' if remaining == 1 else 'searches'} remaining. Sign up free for 1,000/month."
+            response["message"] = f"{remaining} free {'search' if remaining == 1 else 'searches'} remaining. Sign up free for 100/month."
     return response
 
 
@@ -1134,7 +1134,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         response["anonymous_searches_remaining"] = remaining
         if remaining > 0:
             response["signup_url"] = "https://wayforth.io/signup"
-            response["message"] = f"{remaining} free {'search' if remaining == 1 else 'searches'} remaining. Sign up free for 1,000/month."
+            response["message"] = f"{remaining} free {'search' if remaining == 1 else 'searches'} remaining. Sign up free for 100/month."
     return response
 
 
