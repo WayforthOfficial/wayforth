@@ -33,6 +33,8 @@ STRIPE_MOCK = (
     or not os.environ.get("STRIPE_SECRET_KEY", "")
 )
 
+VERSION = "0.2.0"
+
 
 def get_fernet():
     from cryptography.fernet import Fernet
@@ -255,7 +257,7 @@ uvx wayforth-mcp
 ### Support
 https://wayforth.io/contact
 """,
-    version="0.1.9",
+    version=VERSION,
     contact={"name": "Wayforth", "url": "https://wayforth.io/contact"},
     license_info={"name": "BSL 1.1", "url": "https://wayforth.io/license"},
     lifespan=lifespan,
@@ -424,7 +426,7 @@ async def health(request: Request, db=Depends(get_db)):
     return {
         "status": "ok" if db_status == "ok" else "degraded",
         "service": "wayforth-api",
-        "version": "0.1.9",
+        "version": VERSION,
         "db_status": db_status,
         "catalog": {
             "total": total,
@@ -449,7 +451,7 @@ async def system_status(db=Depends(get_db)):
     """)
     return {
         "status": "operational",
-        "version": "0.1.9",
+        "version": VERSION,
         "services": {
             "total": stats["total_services"],
             "tier2": stats["tier2_services"],
@@ -465,7 +467,6 @@ async def system_status(db=Depends(get_db)):
                 "c": "x402 protocol (native services)",
             },
             "routing_fee_pct": 1.5,
-            "wayf_burn_pct": 30,
         },
         "contracts": {
             "network": "base-sepolia",
@@ -3371,7 +3372,7 @@ async def system_health(request: Request, db=Depends(get_db)):
     health = {
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "0.2.0",
+        "version": VERSION,
         "subsystems": {},
     }
 
