@@ -3499,10 +3499,20 @@ async def admin_get_user(request: Request, user_id: str, db=Depends(get_db)):
         ORDER BY created_at DESC LIMIT 10
     """)
 
-    return {
+    service_keys = await db.fetch("""
+        SELECT service_slug, service_name, key_preview,
+               total_calls, last_used_at, active, created_at
+        FROM user_service_keys
+        WHERE user_id=$1::uuid
+        ORDER BY created_at DESC
+    """, user_id)
+
+    result = {
         "user": dict(user),
-        "recent_searches": [dict(s) for s in searches]
+        "recent_searches": [dict(s) for s in searches],
+        "service_keys": [dict(k) for k in service_keys],
     }
+    return result
 
 
 @app.patch("/admin-api/users/{user_id}/tier")
@@ -3664,3 +3674,16 @@ async def admin_user_searches(request: Request, user_id: str, limit: int = 50, d
         "searches": [dict(s) for s in searches],
         "total": len(searches)
     }
+
+
+@app.get("/admin-api/users/{user_id}/service-keys")
+async def admin_get_user_service_keys(request: Request, user_id: str, db=Depends(get_db)):
+    session = await get_admin_session(request, db)
+    keys = await db.fetch("""
+        SELECT service_slug, service_name, key_preview,
+               total_calls, last_used_at, active, created_at
+        FROM user_service_keys
+        WHERE user_id=$1::uuid
+        ORDER BY created_at DESC
+    """, user_id)
+    return {"service_keys": [dict(k) for k in keys], "total": len(keys)}
