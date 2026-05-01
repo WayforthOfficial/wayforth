@@ -57,7 +57,10 @@ What's live today:
 - BYOK — add your own API key for any of 274+ catalog services. Wayforth
   manages, proxies, retries. Keys encrypted at rest (Fernet AES-128).
 - Credits system — pre-paid credits via Stripe. 1 credit = $0.001.
-  100 free credits on signup. Starter $19 → 50K credits.
+  100 free credits/month on signup. Starter $19 → 50K credits.
+- WayforthQL v1 — structured discovery with filters:
+  POST /query {"query": "...", "tier_min": 2, "price_max": 0.001, "sort_by": "wri"}
+  Returns ranked results with WRI scores, pricing, and payment options per service.
 
 Works in Claude Code, Cursor, Windsurf, and any MCP-compatible runtime.
 
