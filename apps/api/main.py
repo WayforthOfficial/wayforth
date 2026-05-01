@@ -53,6 +53,7 @@ STRIPE_PACKAGES = {
 }
 
 from db import check_db
+from service_adapters import ADAPTERS, SERVICE_CONFIGS
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
 
@@ -552,7 +553,8 @@ def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0,
     return round(min(score, 100), 1)
 
 
-async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str, service_id: str = None):
+async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
+                                   service_id: str = None, tx_type: str = "usage"):
     """Atomically check and deduct credits. Returns (success, balance_after)."""
     async with db.transaction():
         row = await db.fetchrow(
@@ -582,8 +584,8 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str, s
         await db.execute("""
             INSERT INTO credit_transactions
             (user_id, amount, balance_after, type, description, api_endpoint, service_id)
-            VALUES ($1::uuid, $2, $3, 'usage', $4, $5, $6)
-        """, user_id, -cost, new_balance, f"API call: {endpoint}", endpoint, service_id)
+            VALUES ($1::uuid, $2, $3, $7, $4, $5, $6)
+        """, user_id, -cost, new_balance, f"API call: {endpoint}", endpoint, service_id, tx_type)
 
         return True, new_balance
 
@@ -1768,6 +1770,124 @@ async def deactivate_service_key(request: Request, service_slug: str, db=Depends
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail={"error": "key_not_found"})
     return {"service_slug": service_slug, "deactivated": True}
+
+
+@app.post("/execute")
+@limiter.limit("60/minute")
+async def execute_service(request: Request, db=Depends(get_db)):
+    """Call a real external API using Wayforth-managed keys or user BYOK keys."""
+    import time as _time
+
+    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key_header:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
+
+    user_id = await _resolve_user(db, api_key_header)
+
+    body = await request.json()
+    service_slug = body.get("service_slug", "").strip().lower()
+    params = body.get("params", {})
+    key_source = body.get("key_source", "managed")
+
+    if service_slug not in SERVICE_CONFIGS:
+        raise HTTPException(status_code=400, detail={
+            "error": f"Unknown service '{service_slug}'. Supported: {sorted(SERVICE_CONFIGS)}"
+        })
+    if key_source not in ("managed", "byok"):
+        raise HTTPException(status_code=400, detail={"error": "key_source must be 'managed' or 'byok'"})
+
+    config = SERVICE_CONFIGS[service_slug]
+    credit_cost = config["credits"]
+
+    if key_source == "managed":
+        svc_key = os.environ.get(config["key_var"], "")
+        if not svc_key:
+            raise HTTPException(status_code=503, detail={
+                "error": f"Service '{service_slug}' is not configured on this server"
+            })
+    else:
+        row = await db.fetchrow(
+            "SELECT encrypted_key FROM user_service_keys WHERE user_id=$1::uuid AND service_slug=$2 AND active=true",
+            user_id, service_slug,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail={
+                "error": "No API key found for service. Add one at /call/keys/add"
+            })
+        try:
+            f = get_fernet()
+            svc_key = f.decrypt(row["encrypted_key"].encode()).decode()
+        except Exception:
+            svc_key = row["encrypted_key"]
+
+    success, balance_after = await check_and_deduct_credits(
+        db, str(user_id), credit_cost, "/execute",
+        service_id=service_slug, tx_type="execution",
+    )
+    if not success:
+        raise HTTPException(status_code=402, detail={
+            "error": "insufficient_credits",
+            "credits_balance": balance_after,
+            "credits_needed": credit_cost,
+        })
+
+    start = _time.time()
+    adapter = ADAPTERS[service_slug]
+    result = None
+    error_msg = None
+
+    if service_slug == "assemblyai":
+        try:
+            result = await asyncio.wait_for(adapter(params, svc_key), timeout=35.0)
+        except asyncio.TimeoutError:
+            error_msg = "Service timeout"
+        except Exception as e:
+            error_msg = str(e)[:300]
+    else:
+        for attempt in range(2):
+            try:
+                result = await asyncio.wait_for(adapter(params, svc_key), timeout=10.0)
+                break
+            except asyncio.TimeoutError:
+                if attempt == 0:
+                    continue
+                error_msg = "Service timeout"
+            except Exception as e:
+                error_msg = str(e)[:300]
+                break
+
+    execution_ms = round((_time.time() - start) * 1000)
+
+    if error_msg:
+        async with db.transaction():
+            refund_row = await db.fetchrow(
+                "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
+                "WHERE user_id = $2::uuid RETURNING credits_balance",
+                credit_cost, user_id,
+            )
+            refunded_balance = refund_row["credits_balance"] if refund_row else balance_after
+            await db.execute("""
+                INSERT INTO credit_transactions
+                (user_id, amount, balance_after, type, description, api_endpoint, service_id)
+                VALUES ($1::uuid, $2, $3, 'execution_refund', $4, '/execute', $5)
+            """, user_id, credit_cost, refunded_balance,
+                f"Refund: {service_slug} failed — {error_msg[:100]}", service_slug)
+        raise HTTPException(status_code=503, detail={
+            "status": "error",
+            "service": service_slug,
+            "error": error_msg,
+            "credits_deducted": 0,
+            "credits_remaining": refunded_balance,
+        })
+
+    return {
+        "status": "ok",
+        "service": service_slug,
+        "result": result,
+        "credits_deducted": credit_cost,
+        "credits_remaining": balance_after,
+        "execution_ms": execution_ms,
+    }
 
 
 @app.post("/submit")
@@ -3454,6 +3574,21 @@ async def system_health(request: Request, db=Depends(get_db)):
             }
     except Exception as e:
         health["subsystems"]["encryption"] = {"status": "error", "detail": str(e)[:100]}
+
+    # Managed services
+    managed_key_vars = {
+        "groq": "GROQ_API_KEY", "deepl": "DEEPL_API_KEY",
+        "openweather": "OPENWEATHER_API_KEY", "newsapi": "NEWSAPI_API_KEY",
+        "resend": "RESEND_API_KEY", "serper": "SERPER_API_KEY",
+        "assemblyai": "ASSEMBLYAI_API_KEY", "stability": "STABILITY_API_KEY",
+    }
+    configured = [s for s, v in managed_key_vars.items() if os.environ.get(v)]
+    missing = [s for s, v in managed_key_vars.items() if not os.environ.get(v)]
+    health["subsystems"]["managed_services"] = {
+        "status": "ok" if configured else "degraded",
+        "configured": configured,
+        "missing": missing,
+    }
 
     health["latency_ms"] = round((_time.time() - start) * 1000)
     return health
