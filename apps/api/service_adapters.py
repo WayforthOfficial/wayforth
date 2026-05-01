@@ -14,7 +14,7 @@ SERVICE_CONFIGS = {
 
 
 async def call_groq(params: dict, api_key: str) -> dict:
-    model = params.get("model", "llama3-8b-8192")
+    model = params.get("model", "llama-3.3-70b-versatile")
     messages = params.get("messages", [])
     max_tokens = params.get("max_tokens", 1024)
     if not messages:
