@@ -178,7 +178,11 @@ async def call_assemblyai(params: dict, api_key: str) -> dict:
         r = await client.post(
             "https://api.assemblyai.com/v2/transcript",
             headers=headers,
-            json={"audio_url": audio_url, "language_code": language_code},
+            json={
+                "audio_url": audio_url,
+                "language_code": language_code,
+                "speech_models": params.get("speech_models", ["universal-2"]),
+            },
         )
     if r.status_code != 200:
         raise Exception(f"AssemblyAI submit error {r.status_code}: {r.text[:200]}")
