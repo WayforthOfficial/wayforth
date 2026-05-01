@@ -451,6 +451,53 @@ async def wayforth_identity(agent_id: str) -> str:
 
 
 @mcp.tool()
+async def wayforth_execute(service_slug: str, params: dict, key_source: str = "managed") -> str:
+    """Execute a real API call through Wayforth.
+    Uses Wayforth-managed keys or your own BYOK key.
+
+    Supported services: groq, deepl, openweather, newsapi, resend, serper, assemblyai, stability
+
+    Args:
+        service_slug: Service to call (groq | deepl | openweather | newsapi | resend | serper | assemblyai | stability)
+        params: Service-specific parameters dict (see Wayforth docs for each service)
+        key_source: 'managed' (default, use Wayforth-hosted keys) or 'byok' (use your stored key)
+    """
+    api_key = os.environ.get("WAYFORTH_API_KEY", "")
+    if not api_key:
+        return "Error: WAYFORTH_API_KEY not set. Get your free key at wayforth.io/dashboard"
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            resp = await client.post(
+                f"{API_BASE}/execute",
+                headers={"X-Wayforth-API-Key": api_key, "Content-Type": "application/json"},
+                json={"service_slug": service_slug, "params": params, "key_source": key_source},
+            )
+    except Exception as e:
+        return f"Wayforth API not reachable: {e}"
+    if resp.status_code == 402:
+        d = resp.json().get("detail", {})
+        return (
+            f"Insufficient credits. Balance: {d.get('credits_balance', 0)}, "
+            f"needed: {d.get('credits_needed', 0)}. Top up at wayforth.io/dashboard"
+        )
+    if resp.status_code == 404:
+        return resp.json().get("detail", {}).get("error", "Service key not found. Add one at /call/keys/add")
+    if resp.status_code != 200:
+        detail = resp.json().get("detail", {})
+        if isinstance(detail, dict) and detail.get("status") == "error":
+            return f"Service error ({service_slug}): {detail.get('error', 'unknown')}"
+        return f"Execute error {resp.status_code}: {resp.text[:300]}"
+    data = resp.json()
+    return json.dumps({
+        "service": data.get("service"),
+        "result": data.get("result"),
+        "credits_deducted": data.get("credits_deducted"),
+        "credits_remaining": data.get("credits_remaining"),
+        "execution_ms": data.get("execution_ms"),
+    }, indent=2)
+
+
+@mcp.tool()
 async def wayforth_quickstart() -> str:
     """
     Get the Wayforth developer quickstart guide.
