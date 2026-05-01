@@ -84,7 +84,7 @@ Growth:   $299 → 1,000,000 credits
 - **Dashboard:** https://wayforth.io/dashboard
 - **Quickstart:** https://wayforth.io/quickstart
 - **Leaderboard:** https://wayforth.io/leaderboard
-- **Whitepaper:** https://wayforth.io/wayforth-whitepaper-v3.pdf
+- **Whitepaper:** https://wayforth.io/wayforth-whitepaper-v5.pdf
 - **GitHub:** https://github.com/WayforthOfficial/wayforth
 - **dev.to:** https://dev.to/wayforthofficial
 
