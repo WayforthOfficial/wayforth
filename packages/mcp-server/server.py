@@ -16,6 +16,8 @@ TIER_LABELS = {0: "free", 1: "basic", 2: "standard", 3: "premium"}
 
 MEMORY_FILE = os.path.expanduser("~/.wayforth_memory.json")
 
+_MANAGED_SLUGS = {"groq", "deepl", "openweather", "newsapi", "serper", "resend", "assemblyai", "stability"}
+
 _CATEGORY_PARAMS = {
     "translation": '{"text": "Hello world", "target_lang": "ES"}',
     "inference": '{"messages": [{"role": "user", "content": "Say hello"}]}',
@@ -151,28 +153,50 @@ async def wayforth_search(query: str, limit: int = 5, tier_min: int = 2, categor
     top = results[0]
     wayforth_id = top.get("wayforth_id", "")
     slug = wayforth_id.split("://")[1].split("/")[0] if "://" in wayforth_id else top.get("service_id", "unknown")
+    top_name = top.get("name", "")
+    top_wri = top.get("wri", "N/A")
     cat_key = (top.get("category") or "").lower().split("/")[0]
-    example_params = _CATEGORY_PARAMS.get(cat_key, "{}")
-    credits_per_call = (top.get("pricing") or {}).get("credits_per_call", 1)
     raw_credits = data.get("credits_remaining") or data.get("credits_balance")
-    credits_line = (
-        f"💳 Cost: {credits_per_call} credit(s) · You have {raw_credits} remaining."
-        if raw_credits is not None
-        else f"💳 Cost: {credits_per_call} credit(s) · Check balance at wayforth.io/dashboard"
-    )
 
-    lines.append(
-        f"\n---\n"
-        f"⚡ Top pick: {top['name']} (WRI: {top.get('wri', 'N/A')})\n\n"
-        f"Run this to execute instantly:\n"
-        f'wayforth_execute(\n'
-        f'  service_slug="{slug}",\n'
-        f'  params={example_params},\n'
-        f'  key_source="managed"\n'
-        f')\n\n'
-        f"{credits_line}\n"
-        f"---"
-    )
+    if slug in _MANAGED_SLUGS:
+        example_params = _CATEGORY_PARAMS.get(cat_key, "{}")
+        credits_per_call = (top.get("pricing") or {}).get("credits_per_call", 1)
+        credits_line = (
+            f"💳 Cost: {credits_per_call} credit(s) · You have {raw_credits} remaining."
+            if raw_credits is not None
+            else f"💳 Cost: {credits_per_call} credit(s) · Check balance at wayforth.io/dashboard"
+        )
+        next_step = (
+            f"\n---\n"
+            f"⚡ Top pick: {top_name} (WRI: {top_wri})\n\n"
+            f"Run this to execute instantly:\n"
+            f'wayforth_execute(\n'
+            f'  service_slug="{slug}",\n'
+            f'  params={example_params},\n'
+            f'  key_source="managed"\n'
+            f')\n\n'
+            f"{credits_line}\n"
+            f"---"
+        )
+    else:
+        next_step = (
+            f"\n---\n"
+            f"⚡ Top pick: {top_name} (WRI: {top_wri})\n\n"
+            f"To execute this service, add your own API key:\n"
+            f'wayforth_keys_add(\n'
+            f'  service_slug="{slug}",\n'
+            f'  service_name="{top_name}",\n'
+            f'  api_key="your_api_key_here"\n'
+            f')\n'
+            f'Then call: wayforth_execute(service_slug="{slug}",\n'
+            f'                            params={{...}},\n'
+            f'                            key_source="byok")\n\n'
+            f'Or search for a managed alternative:\n'
+            f'wayforth_search("{cat_key} API managed")\n'
+            f"---"
+        )
+
+    lines.append(next_step)
     return "\n".join(lines)
 
 
