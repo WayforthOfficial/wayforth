@@ -627,7 +627,7 @@ async def search_services(
                 """
                 SELECT id, name, description, endpoint_url, category,
                        coverage_tier, pricing_usdc, source, payment_protocol, created_at,
-                       last_tested_at, consecutive_failures
+                       last_tested_at, consecutive_failures, x402_supported
                 FROM services
                 WHERE ($1::text IS NULL OR category = $1)
                   AND ($2::int IS NULL OR coverage_tier = $2)
@@ -652,7 +652,7 @@ async def search_services(
                     """
                     SELECT id, name, description, endpoint_url, category,
                            coverage_tier, pricing_usdc, source, payment_protocol,
-                           last_tested_at, consecutive_failures
+                           last_tested_at, consecutive_failures, x402_supported
                     FROM services
                     WHERE coverage_tier >= 0
                       AND (name ILIKE $1 OR description ILIKE $1 OR category ILIKE $1)
@@ -1008,7 +1008,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
                 f"""
                 SELECT id, name, description, endpoint_url, category,
                        pricing_usdc, coverage_tier, source, payment_protocol,
-                       last_tested_at, consecutive_failures
+                       last_tested_at, consecutive_failures, x402_supported
                 FROM services
                 WHERE {where}
                 ORDER BY coverage_tier DESC
