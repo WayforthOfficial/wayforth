@@ -149,7 +149,8 @@ async def wayforth_search(query: str, limit: int = 5, tier_min: int = 2, categor
     lines.append(f"\nQuery ID: {data.get('query_id', '')} (use in wayforth_pay for conversion tracking)")
 
     top = results[0]
-    slug = (top.get("name") or "service").lower().split()[0]
+    wayforth_id = top.get("wayforth_id", "")
+    slug = wayforth_id.split("://")[1].split("/")[0] if "://" in wayforth_id else top.get("service_id", "unknown")
     cat_key = (top.get("category") or "").lower().split("/")[0]
     example_params = _CATEGORY_PARAMS.get(cat_key, "{}")
     credits_per_call = (top.get("pricing") or {}).get("credits_per_call", 1)
