@@ -5,7 +5,7 @@ Usage: python3 scripts/catalog_misses.py
 
 Requires env vars:
   ADMIN_KEY   — Wayforth admin key
-  API_URL     — optional, defaults to https://api.wayforth.io
+  API_URL     — optional, defaults to https://gateway.wayforth.io
 """
 import json
 import os
@@ -26,7 +26,7 @@ def bar(value: int, max_value: int, width: int = 20) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def fmt_dt(iso: str | None) -> str:
+def fmt_dt(iso) -> str:
     if not iso:
         return "—"
     try:
@@ -48,7 +48,7 @@ def main() -> None:
         print("ERROR: ADMIN_KEY env var not set.", file=sys.stderr)
         sys.exit(1)
 
-    base = os.environ.get("API_URL", "https://api.wayforth.io").rstrip("/")
+    base = os.environ.get("API_URL", "https://gateway.wayforth.io").rstrip("/")
     key_param = urllib.parse.urlencode({"key": admin_key})
     misses_url = f"{base}/admin/catalog/misses?{key_param}"
     gaps_url = f"{base}/admin/catalog/gaps?{key_param}"
