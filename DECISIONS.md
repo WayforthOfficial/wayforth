@@ -154,7 +154,7 @@ Crawl the first 100 entries from mcp-get.com and one page (10) from Glama per ru
 
 - Different catalog with curated entries; provides diversification vs mcp-get
 - Consistent JSON structure (`id`, `name`, `description`, `url`, `repository`) with cursor-based pagination for future multi-page crawls
-- Discovered as a working alternative after Smithery's API returned HTML (no public JSON endpoint)
+- Discovered as a working alternative after the primary registry returned HTML instead of JSON
 
 ### Why keyword-based category inference
 
