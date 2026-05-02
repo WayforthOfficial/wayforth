@@ -1,0 +1,3 @@
+*.sol linguist-language=Solidity
+*.sol linguist-detectable=false
+contracts/ linguist-vendored=true

@@ -1,113 +1,119 @@
 # Wayforth
 
-**The discovery and payment rail for AI agents.**
+**Search engine and payment rail for AI agents.**
 
-Search 270+ verified APIs. Pay via card or crypto. One MCP install.
+274+ verified APIs. Pay via card or crypto. One MCP install.
+
+```bash
+uvx wayforth-mcp
+```
+
+## What It Does
+
+```python
+# Discover
+wayforth_search("translate text to Spanish")
+→ DeepL  WRI:82  Tier 2 ✓  $0.00003/call  [card|crypto]
+
+# Structured discovery (WayforthQL v1)
+POST /query {"query": "translate text", "tier_min": 2, "sort_by": "wri"}
+→ protocol: WayforthQL/1.0
+
+# Pay — card or crypto
+wayforth_pay("deepl", 0.001)               # card default
+wayforth_pay("deepl", 0.001, track="crypto") # non-custodial Base
+
+# Execute — 8 managed services, no API keys needed
+POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
+→ {content: "...", credits_deducted: 3, credits_remaining: 997}
+```
+
+## Live Now
+
+- **274+ APIs** indexed across 18 categories
+- **225+ Tier 2 verified** — probed every 6h, auto-demoted after failures
+- **42 x402 native services** — sourced from x402.org/ecosystem
+- **8 managed services** — Groq, DeepL, OpenWeather, NewsAPI, Serper, Resend, AssemblyAI, Stability AI
+- **WayforthQL v1** — structured discovery with tier/price/protocol filters
+- **Dual-track payments** — Stripe Treasury (card) + Base blockchain (non-custodial)
+- **BYOK** — bring your own key for any of 274+ services, encrypted at rest (Fernet AES-128)
+- **3 provisional patents** filed (WF-2026-001, WF-2026-002, WF-2026-003)
 
 ## Install
 
 ```bash
+# Run directly
 uvx wayforth-mcp
-# or
+
+# Add to Claude Code
 claude mcp add wayforth -- uvx wayforth-mcp
+
+# Set API key
+export WAYFORTH_API_KEY=wf_live_...
 ```
 
-## The Three Calls
+Get your API key: [wayforth.io/signup](https://wayforth.io/signup)
 
-```python
-# 1. Discover — semantic search with WayforthRank scoring
-wayforth_search("translate text to Spanish")
-# → DeepL        WRI:82  Tier 2  $0.00003/call
-# → LibreTranslate  WRI:71  Tier 2  Free
+## Credit Packages
 
-# 2. Pay — card or crypto, your choice
-wayforth_pay("deepl", 0.001, track="card")   # Stripe Treasury, no crypto
-wayforth_pay("deepl", 0.001, track="crypto") # Base calldata, non-custodial
+| Plan | Price | Credits |
+|------|-------|---------|
+| Free | $0/mo | 100/month |
+| Starter | $19 | 50,000 |
+| Pro | $99 | 300,000 |
+| Growth | $299 | 1,000,000 |
 
-# 3. Execute — service receives payment, returns result
-```
+1 credit = $0.001. Credits never expire.
 
 ## Payment Tracks
 
-**Track A — Card (mainstream developers):**
-- Fund with credit card at wayforth.io/dashboard
-- Stripe Treasury backs your balance (FDIC insured)
-- Agent pays automatically — no crypto knowledge needed
-- 1.5% routing fee
+| Track | Method | How |
+|-------|--------|-----|
+| A — Card | Stripe Treasury (fiat) | Buy credits, no crypto |
+| B — Crypto | Base blockchain (USDC) | Non-custodial calldata |
+| C — x402 | Native HTTP 402 | Auto-detected, Coinbase CDP |
 
-**Track B — Crypto (crypto-native developers):**
-- Your own Base wallet with USDC
-- wayforth_pay() returns calldata
-- Agent broadcasts from your wallet — fully non-custodial
-- 1.5% routing fee captured on-chain
+All tracks earn Wayforth the same 1.5% routing fee.
 
-## What's Live Today
+## Execution — 8 Managed Services
 
-- **274+ real API endpoints** across 18 categories
-- **232+ Tier 2 verified** — probed every 6h, auto-demoted on failure
-- **WayforthRank** — payment-signal ranking engine (patent pending WF-2026-001)
-- **Credits system** — 2,000 free on signup, card purchases live
-- **Dual-track payments** — Stripe Treasury (card) + Base calldata (crypto)
-- **Smart contracts** — Base Sepolia (mainnet Q3 2026)
-- **Free tier** — 2,000 credits on signup, no credit card required
-
-## Credits
-
-```
-1 credit = $0.001 USD (for search quota)
-
-Starter:  $19  → 50,000 credits
-Pro:      $99  → 300,000 credits
-Growth:   $299 → 1,000,000 credits
-
-1 search query = 1 credit
-```
-
-## Routing Fee
-
-```
-1.5% on all payments
-30% → $WAYF burn (post-mainnet)
-70% → Wayforth operations
-```
-
-## $WAYF Token (post-mainnet)
-
-- 30% of routing fees buy + burn $WAYF permanently
-- Stake $WAYF to operate a Verifier node
-- Hold $WAYF for fee discounts
-- Tier 3 service certification requires $WAYF bond
-
-## Resources
-
-- **Website:** https://wayforth.io
-- **Dashboard:** https://wayforth.io/dashboard
-- **Quickstart:** https://wayforth.io/quickstart
-- **Leaderboard:** https://wayforth.io/leaderboard
-- **Whitepaper:** https://wayforth.io/wayforth-whitepaper-v5.pdf
-- **GitHub:** https://github.com/WayforthOfficial/wayforth
-- **dev.to:** https://dev.to/wayforthofficial
+| Service | Category | Credits/Call |
+|---------|----------|-------------|
+| Groq | LLM inference | 3 |
+| DeepL | Translation | 1 |
+| OpenWeatherMap | Weather data | 1 |
+| NewsAPI | News search | 1 |
+| Serper | Google search | 1 |
+| Resend | Email | 2 |
+| AssemblyAI | Speech-to-text | 5 |
+| Stability AI | Image generation | 10 |
 
 ## Architecture
 
 ```
-DEVELOPER
-├── Card Track  → Stripe Treasury → Service (Stripe payout)
-└── Crypto Track → Base Wallet → calldata → broadcast → service (USDC)
-
-WAYFORTH LAYER
-├── wayforth_search() → WayforthRank → ranked results
-├── wayforth_pay()    → routes to Track A or B
-└── Routing fee (1.5%) → 30% $WAYF burn + 70% operations
-
-DATA FLYWHEEL
-Payment outcomes → WayforthRank update → better rankings
-→ more developer trust → more payments → flywheel spins
+wayforth_search() / POST /query (WayforthQL v1)
+↓
+WayforthRank (payment-signal ranking, patent pending)
+↓
+wayforth_pay() — Track A (card) | Track B (crypto) | Track C (x402)
+↓
+POST /execute — managed keys | BYOK (encrypted)
+↓
+Real API result + WayforthRank signal update
 ```
+
+## Links
+
+- **Dashboard:** [wayforth.io/dashboard](https://wayforth.io/dashboard)
+- **Docs:** [wayforth.io/docs](https://wayforth.io/docs)
+- **Whitepaper:** [wayforth.io/wayforth-whitepaper-v5.pdf](https://wayforth.io/wayforth-whitepaper-v5.pdf)
+- **PyPI:** [pypi.org/project/wayforth-mcp](https://pypi.org/project/wayforth-mcp/)
+- **Contact:** dor@wayforth.io
 
 ## License
 
-BSL 1.1 — Licensor: Wayforth LTD
-Converts to Apache 2.0 on April 25, 2030.
+Business Source License 1.1 (BSL 1.1)
+Converts to Apache 2.0 on April 25, 2030
+Licensor: Wayforth LTD
 
-© 2026 Wayforth LTD
+Smart contracts: [WayforthEscrow on Base Sepolia](https://sepolia.basescan.org/address/0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809)
