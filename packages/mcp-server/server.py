@@ -16,6 +16,28 @@ TIER_LABELS = {0: "free", 1: "basic", 2: "standard", 3: "premium"}
 
 MEMORY_FILE = os.path.expanduser("~/.wayforth_memory.json")
 
+_CATEGORY_PARAMS = {
+    "translation": '{"text": "Hello world", "target_lang": "ES"}',
+    "inference": '{"messages": [{"role": "user", "content": "Say hello"}]}',
+    "data": '{"q": "New York"}',
+    "search": '{"q": "your search query"}',
+    "image": '{"prompt": "a futuristic city at night"}',
+    "audio": '{"audio_url": "https://assembly.ai/sports_injuries.mp3"}',
+    "communication": '{"from": "noreply@wayforth.io", "to": "you@example.com", "subject": "Test", "html": "<p>Hello</p>"}',
+}
+
+_EXECUTE_NEXT_QUERIES = {
+    "groq": ["run code analysis", "summarize a document", "answer a question"],
+    "deepl": ["translate to French", "translate to Japanese", "translate to German"],
+    "openweather": ["weather in London", "weather in Tokyo", "weather in Paris"],
+    "newsapi": ["latest AI news", "crypto news today", "tech startup news"],
+    "serper": ["search for competitors", "find API documentation", "search recent papers"],
+    "resend": ["send a newsletter", "send a confirmation email", "send an alert"],
+    "assemblyai": ["transcribe a podcast", "transcribe a meeting", "transcribe an interview"],
+    "stability": ["generate a logo", "generate a landscape", "generate a portrait"],
+}
+_EXECUTE_NEXT_DEFAULT = ["search for translation APIs", "search for inference APIs", "search for data APIs"]
+
 
 def _load_memory() -> dict:
     if os.path.exists(MEMORY_FILE):
@@ -125,6 +147,31 @@ async def wayforth_search(query: str, limit: int = 5, tier_min: int = 2, categor
         )
 
     lines.append(f"\nQuery ID: {data.get('query_id', '')} (use in wayforth_pay for conversion tracking)")
+
+    top = results[0]
+    slug = (top.get("name") or "service").lower().split()[0]
+    cat_key = (top.get("category") or "").lower().split("/")[0]
+    example_params = _CATEGORY_PARAMS.get(cat_key, "{}")
+    credits_per_call = (top.get("pricing") or {}).get("credits_per_call", 1)
+    raw_credits = data.get("credits_remaining") or data.get("credits_balance")
+    credits_line = (
+        f"💳 Cost: {credits_per_call} credit(s) · You have {raw_credits} remaining."
+        if raw_credits is not None
+        else f"💳 Cost: {credits_per_call} credit(s) · Check balance at wayforth.io/dashboard"
+    )
+
+    lines.append(
+        f"\n---\n"
+        f"⚡ Top pick: {top['name']} (WRI: {top.get('wri', 'N/A')})\n\n"
+        f"Run this to execute instantly:\n"
+        f'wayforth_execute(\n'
+        f'  service_slug="{slug}",\n'
+        f'  params={example_params},\n'
+        f'  key_source="managed"\n'
+        f')\n\n'
+        f"{credits_line}\n"
+        f"---"
+    )
     return "\n".join(lines)
 
 
@@ -452,15 +499,14 @@ async def wayforth_identity(agent_id: str) -> str:
 
 @mcp.tool()
 async def wayforth_execute(service_slug: str, params: dict, key_source: str = "managed") -> str:
-    """Execute a real API call through Wayforth.
-    Uses Wayforth-managed keys or your own BYOK key.
-
-    Supported services: groq, deepl, openweather, newsapi, resend, serper, assemblyai, stability
+    """Execute a real API call through Wayforth managed services or your own BYOK key.
+    Returns real results — translation, inference, weather, search, email, audio, images.
+    Credits deducted on success only.
 
     Args:
-        service_slug: Service to call (groq | deepl | openweather | newsapi | resend | serper | assemblyai | stability)
-        params: Service-specific parameters dict (see Wayforth docs for each service)
-        key_source: 'managed' (default, use Wayforth-hosted keys) or 'byok' (use your stored key)
+        service_slug: Service to call: groq, deepl, openweather, newsapi, serper, resend, assemblyai, stability
+        params: Parameters for the service. Varies by service.
+        key_source: Use Wayforth managed key ('managed', default) or your own BYOK key ('byok')
     """
     api_key = os.environ.get("WAYFORTH_API_KEY", "")
     if not api_key:
@@ -488,13 +534,25 @@ async def wayforth_execute(service_slug: str, params: dict, key_source: str = "m
             return f"Service error ({service_slug}): {detail.get('error', 'unknown')}"
         return f"Execute error {resp.status_code}: {resp.text[:300]}"
     data = resp.json()
-    return json.dumps({
+    result_str = json.dumps({
         "service": data.get("service"),
         "result": data.get("result"),
         "credits_deducted": data.get("credits_deducted"),
         "credits_remaining": data.get("credits_remaining"),
         "execution_ms": data.get("execution_ms"),
     }, indent=2)
+
+    credits_ded = data.get("credits_deducted", "?")
+    credits_rem = data.get("credits_remaining", "—")
+    queries = _EXECUTE_NEXT_QUERIES.get(service_slug, _EXECUTE_NEXT_DEFAULT)
+    suggestions = (
+        f"\n---\n"
+        f"✅ Done · {credits_ded} credit(s) used · {credits_rem} remaining\n\n"
+        f"Try next:\n"
+        + "".join(f'- wayforth_search("{q}")\n' for q in queries)
+        + "---"
+    )
+    return result_str + suggestions
 
 
 @mcp.tool()
@@ -557,7 +615,58 @@ All tools:
 """
 
 
+def _fetch_credits_sync() -> int | None:
+    api_key = os.getenv("WAYFORTH_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            r = client.get(
+                f"{API_BASE}/keys/usage",
+                headers={"X-Wayforth-API-Key": api_key},
+            )
+            if r.status_code == 200:
+                d = r.json()
+                return d.get("credits_balance") or d.get("credits_remaining")
+    except Exception:
+        pass
+    return None
+
+
 def main():
+    import sys
+    banner = (
+        "╔════════════════════════════════════════╗\n"
+        "║         WAYFORTH MCP SERVER            ║\n"
+        "║   Search · Pay · Execute · Repeat      ║\n"
+        "╚════════════════════════════════════════╝"
+    )
+    print(banner, file=sys.stderr)
+
+    api_key = os.getenv("WAYFORTH_API_KEY", "")
+    if api_key:
+        credits = _fetch_credits_sync()
+        if credits is not None:
+            print(f"\nYour credits: {credits} · wayforth.io/dashboard", file=sys.stderr)
+        else:
+            print("\nCredits unavailable · wayforth.io/dashboard", file=sys.stderr)
+        print(
+            '\nTry this first:\n'
+            '  wayforth_search("translate text to Spanish")\n\n'
+            'Then:\n'
+            '  wayforth_execute(service_slug="deepl",\n'
+            '                   params={"text": "Hello", "target_lang": "ES"},\n'
+            '                   key_source="managed")\n\n'
+            'Need more credits? → wayforth.io/pricing\n',
+            file=sys.stderr,
+        )
+    else:
+        print(
+            '\n  Set your API key: export WAYFORTH_API_KEY=wf_live_...\n'
+            '  Get one free at: wayforth.io/signup\n',
+            file=sys.stderr,
+        )
+
     mcp.run()
 
 
