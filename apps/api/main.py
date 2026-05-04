@@ -38,12 +38,16 @@ VERSION = "0.2.0"
 
 def get_fernet():
     from cryptography.fernet import Fernet
-    import base64
     raw = os.environ.get("ENCRYPTION_KEY", "")
     if not raw:
         raise ValueError("ENCRYPTION_KEY not set")
-    padded = raw.encode()[:32].ljust(32, b"\x00")
-    return Fernet(base64.urlsafe_b64encode(padded))
+    try:
+        return Fernet(raw.encode())
+    except Exception:
+        raise ValueError(
+            "ENCRYPTION_KEY is not a valid Fernet key. "
+            "Generate one with: python3 -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
 
 
 ROUTING_FEE = 0.015  # 1.5% flat, all tiers
@@ -64,6 +68,7 @@ load_dotenv()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
 if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
@@ -77,6 +82,11 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("wayforth")
+if not SUPABASE_JWT_SECRET:
+    logger.warning(
+        "SUPABASE_JWT_SECRET not set — /auth/me JWTs are decoded without signature "
+        "verification. Set this env var in Railway for production security."
+    )
 
 
 async def log_query(pool, service_id: str, query_text: str, score: int):
@@ -285,8 +295,6 @@ app.add_middleware(
         "https://www.wayforth.io",
         "http://localhost:3000",
         "http://localhost:5173",
-        "http://localhost:8080",
-        "*",  # MCP server calls from any agent runtime
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -306,6 +314,11 @@ async def add_request_id(request: Request, call_next):
     response.headers["X-Wayforth-Version"] = "0.1.5"
     response.headers["X-RateLimit-Tier"] = str(getattr(request.state, "rate_limit_tier", "free"))
     response.headers["X-RateLimit-Limit"] = str(getattr(request.state, "rate_limit_rpm", "10"))
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), camera=()"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     return response
 
 
@@ -1820,9 +1833,12 @@ async def add_service_key(request: Request, db=Depends(get_db)):
     try:
         f = get_fernet()
         encrypted = f.encrypt(raw_key.encode()).decode()
-    except Exception:
-        logger.warning("BYOK: ENCRYPTION_KEY not set — storing plaintext key for %s", service_slug)
-        encrypted = raw_key
+    except Exception as _enc_err:
+        logger.error("BYOK: failed to encrypt key for %s: %s", service_slug, _enc_err)
+        raise HTTPException(status_code=500, detail={
+            "error": "encryption_unavailable",
+            "message": "Service key could not be stored securely. Check ENCRYPTION_KEY configuration.",
+        })
 
     await db.execute("""
         INSERT INTO user_service_keys
@@ -1905,8 +1921,12 @@ async def execute_service(request: Request, db=Depends(get_db)):
         try:
             f = get_fernet()
             svc_key = f.decrypt(row["encrypted_key"].encode()).decode()
-        except Exception:
-            svc_key = row["encrypted_key"]
+        except Exception as _dec_err:
+            logger.error("BYOK: failed to decrypt key for service %s: %s", service_slug, _dec_err)
+            raise HTTPException(status_code=500, detail={
+                "error": "decryption_failed",
+                "message": "Could not decrypt service key. Contact support.",
+            })
 
     # Validate key is ASCII-safe (HTTP headers require ASCII)
     try:
@@ -2070,7 +2090,7 @@ async def get_service(request: Request, service_id: str):
 async def admin_stats(request: Request, key: str = ""):
     admin_key_header = request.headers.get("X-Admin-Key", "")
     provided_key = admin_key_header or key
-    if not ADMIN_KEY or provided_key != ADMIN_KEY:
+    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         async with app.state.pool.acquire() as conn:
@@ -2223,7 +2243,7 @@ async def admin_stats(request: Request, key: str = ""):
 @app.get("/admin/health")
 @limiter.limit("5/minute")
 async def admin_health(request: Request, key: str = "", db=Depends(get_db)):
-    if key != ADMIN_KEY:
+    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     checks = {}
@@ -2258,7 +2278,7 @@ async def admin_health(request: Request, key: str = "", db=Depends(get_db)):
 @app.get("/admin/services")
 @limiter.limit("10/minute")
 async def admin_services(request: Request, key: str = "", db=Depends(get_db)):
-    if key != ADMIN_KEY:
+    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
     rows = await db.fetch("""
         SELECT
@@ -2287,7 +2307,7 @@ async def admin_services(request: Request, key: str = "", db=Depends(get_db)):
 
 @app.get("/admin")
 async def admin_page(key: str = ""):
-    if not ADMIN_KEY or key != ADMIN_KEY:
+    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return FileResponse("static/admin.html")
 
@@ -2317,7 +2337,7 @@ _CATALOG_SUGGESTED: dict = {
 @app.get("/admin/catalog/misses")
 @limiter.limit("10/minute")
 async def catalog_misses(request: Request, key: str = "", db=Depends(get_db)):
-    if not ADMIN_KEY or key != ADMIN_KEY:
+    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         total = await db.fetchval("""
@@ -2388,7 +2408,7 @@ async def catalog_misses(request: Request, key: str = "", db=Depends(get_db)):
 @app.get("/admin/catalog/gaps")
 @limiter.limit("10/minute")
 async def catalog_gaps(request: Request, key: str = "", db=Depends(get_db)):
-    if not ADMIN_KEY or key != ADMIN_KEY:
+    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         svc_rows = await db.fetch("""
@@ -2528,7 +2548,7 @@ async def health_page():
 @app.get("/analytics")
 @limiter.limit("10/minute")
 async def get_analytics(request: Request, key: str = ""):
-    if key != ADMIN_KEY:
+    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         async with app.state.pool.acquire() as conn:
@@ -2593,7 +2613,7 @@ async def get_analytics(request: Request, key: str = ""):
 @limiter.limit("10/minute")
 async def competitive_intelligence_endpoint(request: Request, key: str = ""):
     """Admin: competitive intelligence and ecosystem growth signals."""
-    if key != ADMIN_KEY:
+    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         async with app.state.pool.acquire() as conn:
@@ -2620,46 +2640,52 @@ async def competitive_intelligence_endpoint(request: Request, key: str = ""):
 
 @app.post("/memory")
 @limiter.limit("30/minute")
-async def save_memory(request: Request, body: MemoryItem):
-    """Save a service to agent memory."""
-    async with app.state.pool.acquire() as db:
-        await db.execute(
-            """
-            INSERT INTO agent_memory (agent_id, service_id, service_name, note, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, NOW(), NOW())
-            ON CONFLICT (agent_id, service_id)
-            DO UPDATE SET note=$4, updated_at=NOW()
-            """,
-            body.agent_id or "anonymous", body.service_id, body.service_name, body.note,
-        )
+async def save_memory(request: Request, body: MemoryItem, db=Depends(get_db)):
+    """Save a service to agent memory. Requires X-Wayforth-API-Key."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
+    await _resolve_user(db, api_key)
+    await db.execute(
+        """
+        INSERT INTO agent_memory (agent_id, service_id, service_name, note, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, NOW(), NOW())
+        ON CONFLICT (agent_id, service_id)
+        DO UPDATE SET note=$4, updated_at=NOW()
+        """,
+        body.agent_id or "anonymous", body.service_id, body.service_name, body.note,
+    )
     return {"status": "saved", "service_id": body.service_id, "service_name": body.service_name}
 
 
 @app.get("/memory")
 @limiter.limit("30/minute")
-async def get_memory(request: Request, agent_id: str = "anonymous", q: str = ""):
-    """Retrieve agent's saved services."""
-    async with app.state.pool.acquire() as db:
-        if q:
-            rows = await db.fetch(
-                """
-                SELECT service_id, service_name, note, created_at
-                FROM agent_memory
-                WHERE agent_id = $1
-                AND (LOWER(service_name) LIKE $2 OR LOWER(note) LIKE $2)
-                ORDER BY created_at DESC LIMIT 20
-                """,
-                agent_id, f"%{q.lower()}%",
-            )
-        else:
-            rows = await db.fetch(
-                """
-                SELECT service_id, service_name, note, created_at
-                FROM agent_memory WHERE agent_id = $1
-                ORDER BY created_at DESC LIMIT 20
-                """,
-                agent_id,
-            )
+async def get_memory(request: Request, agent_id: str = "anonymous", q: str = "", db=Depends(get_db)):
+    """Retrieve agent's saved services. Requires X-Wayforth-API-Key."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
+    await _resolve_user(db, api_key)
+    if q:
+        rows = await db.fetch(
+            """
+            SELECT service_id, service_name, note, created_at
+            FROM agent_memory
+            WHERE agent_id = $1
+            AND (LOWER(service_name) LIKE $2 OR LOWER(note) LIKE $2)
+            ORDER BY created_at DESC LIMIT 20
+            """,
+            agent_id, f"%{q.lower()}%",
+        )
+    else:
+        rows = await db.fetch(
+            """
+            SELECT service_id, service_name, note, created_at
+            FROM agent_memory WHERE agent_id = $1
+            ORDER BY created_at DESC LIMIT 20
+            """,
+            agent_id,
+        )
     return {"agent_id": agent_id, "services": [dict(r) for r in rows], "total": len(rows)}
 
 
@@ -2730,7 +2756,7 @@ async def tier3_status(request: Request, email: str):
 @limiter.limit("10/minute")
 async def tier3_admin(request: Request, key: str = "", status: str = "pending"):
     """Admin view of Tier 3 applications filtered by KYB status."""
-    if not ADMIN_KEY or key != ADMIN_KEY:
+    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
     async with app.state.pool.acquire() as db:
         apps = await db.fetch("""
@@ -2813,7 +2839,7 @@ async def similar_services(request: Request, service_id: str, limit: int = 5):
 @limiter.limit("10/minute")
 async def service_intelligence(request: Request, service_id: str, api_key: str = ""):
     """Wayforth Intelligence API — market data for service providers."""
-    if not ADMIN_KEY or api_key != ADMIN_KEY:
+    if not ADMIN_KEY or not secrets.compare_digest(api_key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Intelligence API key required. Contact us at https://wayforth.io/contact")
 
     async with app.state.pool.acquire() as db:
@@ -2968,14 +2994,28 @@ async def register_webhook(request: Request, body: WebhookRegistration):
 
 @app.delete("/webhooks/{webhook_id}")
 @limiter.limit("10/minute")
-async def delete_webhook(request: Request, webhook_id: str):
-    """Deactivate a registered webhook."""
-    async with app.state.pool.acquire() as conn:
-        result = await conn.execute(
-            "UPDATE provider_webhooks SET active = FALSE WHERE id = $1::uuid", webhook_id
-        )
-    if result == "UPDATE 0":
+async def delete_webhook(request: Request, webhook_id: str, db=Depends(get_db)):
+    """Deactivate a registered webhook. Requires the API key of the registrant."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
+    user_id = await _resolve_user(db, api_key)
+
+    owner = await db.fetchrow(
+        "SELECT owner_email FROM api_keys WHERE user_id = $1 AND active = true LIMIT 1", user_id
+    )
+    webhook = await db.fetchrow(
+        "SELECT id, contact_email FROM provider_webhooks WHERE id = $1::uuid AND active = true",
+        webhook_id,
+    )
+    if not webhook:
         raise HTTPException(status_code=404, detail="Webhook not found")
+    if not owner or webhook["contact_email"] != owner["owner_email"]:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this webhook")
+
+    await db.execute(
+        "UPDATE provider_webhooks SET active = FALSE WHERE id = $1::uuid", webhook_id
+    )
     return {"webhook_id": webhook_id, "status": "deactivated"}
 
 
@@ -3068,7 +3108,7 @@ async def key_tiers():
 @app.post("/keys/create")
 @limiter.limit("5/minute")
 async def create_api_key(request: Request, body: ApiKeyRequest, db=Depends(get_db)):
-    if body.tier != "free" and body.admin_key != ADMIN_KEY:
+    if body.tier != "free" and (not ADMIN_KEY or not secrets.compare_digest(body.admin_key, ADMIN_KEY)):
         raise HTTPException(status_code=403, detail="Admin key required for non-free tiers")
 
     if body.tier not in TIER_LIMITS:
@@ -3182,7 +3222,7 @@ async def get_identity(request: Request, agent_id: str, db=Depends(get_db)):
     """Get agent identity and reputation."""
     identity = await db.fetchrow("""
         SELECT agent_id, display_name, total_searches, total_payments,
-               total_spend_usdc as total_spend_usd, trust_score, created_at, last_active_at
+               trust_score, created_at
         FROM agent_identities WHERE agent_id = $1
     """, agent_id)
 
@@ -3208,9 +3248,7 @@ async def get_identity(request: Request, agent_id: str, db=Depends(get_db)):
         "reputation_tier": tier,
         "total_searches": identity["total_searches"],
         "total_payments": identity["total_payments"],
-        "total_spend_usd": identity["total_spend_usd"],
         "member_since": identity["created_at"].isoformat(),
-        "last_active": identity["last_active_at"].isoformat(),
     }
 
 
@@ -3319,20 +3357,36 @@ async def auth_me(request: Request, db=Depends(get_db)):
 
     token = auth_header.removeprefix("Bearer ").strip()
 
-    # Decode JWT payload without signature verification.
-    # The DB lookup on supabase_id is the trust anchor — an unknown sub returns 401.
-    try:
-        import base64 as _b64, json as _json
-        parts = token.split(".")
-        if len(parts) != 3:
-            raise ValueError("malformed jwt")
-        padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
-        claims = _json.loads(_b64.urlsafe_b64decode(padded))
-        supabase_sub = claims.get("sub", "")
-        if not supabase_sub:
-            raise ValueError("no sub")
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    if SUPABASE_JWT_SECRET:
+        # Cryptographic verification — signature, expiry, and audience are all checked.
+        try:
+            import jwt as _jwt
+            claims = _jwt.decode(
+                token,
+                SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                audience="authenticated",
+            )
+            supabase_sub = claims.get("sub", "")
+            if not supabase_sub:
+                raise ValueError("no sub")
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    else:
+        # SUPABASE_JWT_SECRET not configured — falling back to unverified decode.
+        # Expired and forged tokens will pass. Set SUPABASE_JWT_SECRET in Railway.
+        try:
+            import base64 as _b64, json as _json
+            parts = token.split(".")
+            if len(parts) != 3:
+                raise ValueError("malformed jwt")
+            padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
+            claims = _json.loads(_b64.urlsafe_b64decode(padded))
+            supabase_sub = claims.get("sub", "")
+            if not supabase_sub:
+                raise ValueError("no sub")
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid token")
 
     row = await db.fetchrow("""
         SELECT u.email, k.key_prefix, k.encrypted_key, k.tier,
@@ -3350,7 +3404,6 @@ async def auth_me(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail={
             "detail": "No account found. Please register first.",
             "code": "account_not_found",
-            "supabase_id": supabase_sub,
         })
 
     if row["encrypted_key"]:
@@ -3364,12 +3417,16 @@ async def auth_me(request: Request, db=Depends(get_db)):
 
     tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
 
-    return {
+    # api_key is returned here intentionally so the frontend can display it once on login.
+    # It is transmitted over HTTPS only. Cache-Control: no-store prevents proxy/browser caching.
+    response = JSONResponse(content={
         "email": row["email"],
         "api_key": api_key,
         "tier": tier,
         "credits_remaining": row["credits_balance"] or 0,
-    }
+    })
+    response.headers["Cache-Control"] = "no-store, no-cache"
+    return response
 
 
 @app.get("/dashboard")
@@ -4015,6 +4072,7 @@ async def mock_topup(request: Request, db=Depends(get_db)):
 
 
 @app.post("/stripe/webhook")
+@limiter.limit("100/minute")
 async def stripe_webhook(request: Request, db=Depends(get_db)):
     payload = await request.body()
     sig = request.headers.get("stripe-signature", "")
@@ -4753,6 +4811,8 @@ async def admin_user_searches(request: Request, user_id: str, limit: int = 50, d
 @app.get("/admin-api/users/{user_id}/service-keys")
 async def admin_get_user_service_keys(request: Request, user_id: str, db=Depends(get_db)):
     session = await get_admin_session(request, db)
+    if session['role'] not in ['ceo', 'support']:
+        raise HTTPException(status_code=403)
     keys = await db.fetch("""
         SELECT service_slug, service_name, key_preview,
                total_calls, last_used_at, active, created_at
