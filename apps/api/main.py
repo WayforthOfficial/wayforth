@@ -4316,7 +4316,13 @@ async def admin_users_list(
                k.usage_this_month, k.monthly_quota,
                k.subscription_status
         FROM users u
-        LEFT JOIN api_keys k ON k.user_id = u.id
+        LEFT JOIN LATERAL (
+            SELECT tier, owner_email, key_prefix, usage_this_month, monthly_quota, subscription_status
+            FROM api_keys
+            WHERE user_id = u.id AND active = true
+            ORDER BY (encrypted_key IS NOT NULL) DESC, created_at DESC
+            LIMIT 1
+        ) k ON true
         WHERE u.email NOT LIKE '%@wayforth.test'
           AND u.email NOT LIKE 'probe-%'
         ORDER BY u.created_at DESC
