@@ -3261,12 +3261,17 @@ async def register_user(request: Request, db=Depends(get_db)):
     raw_key = "wf_live_" + secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     key_prefix = raw_key[:12]
+    try:
+        _f = get_fernet()
+        encrypted_key = _f.encrypt(raw_key.encode()).decode()
+    except Exception:
+        encrypted_key = None
 
     await db.execute("""
-        INSERT INTO api_keys (key_hash, key_prefix, tier, user_id, owner_email)
-        VALUES ($1, $2, 'free', $3, $4)
+        INSERT INTO api_keys (key_hash, key_prefix, tier, user_id, owner_email, encrypted_key)
+        VALUES ($1, $2, 'free', $3, $4, $5)
         ON CONFLICT DO NOTHING
-    """, key_hash, key_prefix, str(user['id']), email)
+    """, key_hash, key_prefix, str(user['id']), email, encrypted_key)
 
     await db.execute("""
         INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier)
@@ -3322,24 +3327,34 @@ async def auth_me(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
     row = await db.fetchrow("""
-        SELECT u.email, k.key_prefix, k.tier, uc.package_tier, uc.credits_balance, uc.lifetime_credits
+        SELECT u.email, k.key_prefix, k.encrypted_key, k.tier,
+               uc.package_tier, uc.credits_balance, uc.lifetime_credits
         FROM users u
         JOIN api_keys k ON k.user_id = u.id
         LEFT JOIN user_credits uc ON uc.user_id = u.id
         WHERE u.supabase_id = $1
           AND k.active = true
-        ORDER BY k.created_at DESC
+        ORDER BY (k.encrypted_key IS NOT NULL) DESC, k.created_at DESC
         LIMIT 1
     """, supabase_sub)
 
     if not row:
         raise HTTPException(status_code=401, detail="No Wayforth account linked to this token")
 
+    if row["encrypted_key"]:
+        try:
+            _f = get_fernet()
+            api_key = _f.decrypt(row["encrypted_key"].encode()).decode()
+        except Exception:
+            api_key = row["key_prefix"] + "..."
+    else:
+        api_key = row["key_prefix"] + "..."
+
     tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
 
     return {
         "email": row["email"],
-        "api_key": row["key_prefix"] + "...",
+        "api_key": api_key,
         "tier": tier,
         "credits_remaining": row["credits_balance"] or 0,
     }
