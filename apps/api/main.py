@@ -90,7 +90,7 @@ async def log_query(pool, service_id: str, query_text: str, score: int):
         logger.error(f"Query log error: {e}")
 
 
-async def _record_search(pool, q, results, session_id="", query_id=""):
+async def _record_search(pool, q, results, session_id="", query_id="", user_id=None):
     try:
         async with pool.acquire() as conn:
             is_return = False
@@ -103,8 +103,8 @@ async def _record_search(pool, q, results, session_id="", query_id=""):
 
             await conn.execute("""
                 INSERT INTO search_analytics
-                (id, query, results, top_result_id, result_count, rank_scores, session_id, created_at)
-                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, NOW())
+                (id, query, results, top_result_id, result_count, rank_scores, session_id, user_id, created_at)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::uuid, NOW())
             """,
                 query_id or str(uuid_lib.uuid4()),
                 q,
@@ -113,6 +113,7 @@ async def _record_search(pool, q, results, session_id="", query_id=""):
                 len(results),
                 json_lib.dumps({str(r.get("service_id", "")): r.get("score", 0) for r in results[:10]}),
                 session_id or None,
+                user_id or None,
             )
 
             if is_return:
@@ -675,7 +676,7 @@ async def search_services(
     if ranked and pool:
         asyncio.create_task(log_query(pool, str(ranked[0]["id"]), q, ranked[0].get("score", 0)))
     if pool:
-        asyncio.create_task(_record_search(pool, q, ranked, session_id, query_id))
+        asyncio.create_task(_record_search(pool, q, ranked, session_id, query_id, auth.get("user_id")))
     if pool and agent_id:
         asyncio.create_task(_update_identity_search(pool, agent_id))
     popular_ids: dict = {}
@@ -3252,6 +3253,13 @@ async def register_user(request: Request, db=Depends(get_db)):
     if existing:
         raise HTTPException(status_code=409, detail={"error": "account already exists", "code": 409})
 
+    sub_conflict = await db.fetchrow("SELECT email FROM users WHERE supabase_id = $1", supabase_id)
+    if sub_conflict:
+        raise HTTPException(status_code=409, detail={
+            "error": "supabase_id already linked to another account",
+            "code": "supabase_id_conflict",
+        })
+
     user = await db.fetchrow("""
         INSERT INTO users (email, supabase_id)
         VALUES ($1, $2)
@@ -3339,7 +3347,11 @@ async def auth_me(request: Request, db=Depends(get_db)):
     """, supabase_sub)
 
     if not row:
-        raise HTTPException(status_code=401, detail="No Wayforth account linked to this token")
+        raise HTTPException(status_code=401, detail={
+            "detail": "No account found. Please register first.",
+            "code": "account_not_found",
+            "supabase_id": supabase_sub,
+        })
 
     if row["encrypted_key"]:
         try:
@@ -3545,6 +3557,159 @@ async def account_tier(request: Request, db=Depends(get_db)):
         "credits_remaining": balance,
         "credits_total": lifetime,
         "features": _TIER_FEATURES[tier],
+    }
+
+
+def _account_auth_key(request: Request):
+    """Return (raw_key, key_hash) from X-Wayforth-API-Key header, or raise 401."""
+    raw = request.headers.get("X-Wayforth-API-Key", "")
+    if not raw:
+        raise HTTPException(status_code=401, detail="API key required")
+    return raw, hashlib.sha256(raw.encode()).hexdigest()
+
+
+@app.get("/account/analytics")
+@limiter.limit("30/minute")
+async def account_analytics(request: Request, db=Depends(get_db)):
+    """Per-user analytics — Pro and Growth tiers only."""
+    raw_key, key_hash = _account_auth_key(request)
+    key_record = await db.fetchrow(
+        "SELECT k.user_id FROM api_keys k WHERE k.key_hash = $1 AND k.active = true", key_hash
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    user_id = key_record["user_id"]
+
+    credits = await db.fetchrow(
+        "SELECT credits_balance, lifetime_credits, package_tier FROM user_credits WHERE user_id = $1", user_id
+    )
+    tier = _credits_to_tier(credits["lifetime_credits"] or 0 if credits else 0, credits["package_tier"] if credits else None)
+    if not _TIER_FEATURES[tier]["analytics"]:
+        raise HTTPException(status_code=403, detail="Analytics requires Pro or Growth tier")
+
+    # searches (via credit_transactions where api_endpoint='/search')
+    searches_total = await db.fetchval(
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND api_endpoint='/search'", user_id) or 0
+    searches_7d = await db.fetchval(
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND api_endpoint='/search' AND created_at > NOW()-INTERVAL '7 days'", user_id) or 0
+    searches_24h = await db.fetchval(
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND api_endpoint='/search' AND created_at > NOW()-INTERVAL '24 hours'", user_id) or 0
+    top_query_rows = await db.fetch(
+        "SELECT query, COUNT(*) as count FROM search_analytics WHERE user_id=$1 GROUP BY query ORDER BY count DESC LIMIT 5", user_id)
+
+    # executions
+    exec_total = await db.fetchval(
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND type='execution'", user_id) or 0
+    exec_7d = await db.fetchval(
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND type='execution' AND created_at > NOW()-INTERVAL '7 days'", user_id) or 0
+    exec_24h = await db.fetchval(
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND type='execution' AND created_at > NOW()-INTERVAL '24 hours'", user_id) or 0
+    top_svc_rows = await db.fetch(
+        "SELECT service_id, COUNT(*) as count FROM credit_transactions WHERE user_id=$1 AND type='execution' AND service_id IS NOT NULL GROUP BY service_id ORDER BY count DESC LIMIT 5", user_id)
+
+    # credits this month
+    consumed_month = await db.fetchval(
+        "SELECT COALESCE(SUM(ABS(amount)),0) FROM credit_transactions WHERE user_id=$1 AND type IN ('usage','execution') AND created_at >= date_trunc('month', NOW())", user_id) or 0
+    import datetime
+    today = datetime.date.today()
+    if today.month == 12:
+        reset = datetime.date(today.year + 1, 1, 1)
+    else:
+        reset = datetime.date(today.year, today.month + 1, 1)
+
+    return {
+        "searches": {
+            "total": searches_total,
+            "last_7_days": searches_7d,
+            "last_24h": searches_24h,
+            "top_queries": [{"query": r["query"], "count": r["count"]} for r in top_query_rows],
+        },
+        "executions": {
+            "total": exec_total,
+            "last_7_days": exec_7d,
+            "last_24h": exec_24h,
+            "top_services": [{"service": r["service_id"], "count": r["count"]} for r in top_svc_rows],
+        },
+        "credits": {
+            "consumed_this_month": consumed_month,
+            "remaining": credits["credits_balance"] if credits else 0,
+            "total": credits["lifetime_credits"] if credits else 0,
+            "reset_date": reset.isoformat(),
+        },
+    }
+
+
+@app.get("/account/searches")
+@limiter.limit("30/minute")
+async def account_searches(request: Request, db=Depends(get_db)):
+    """Authenticated user's own search history — all tiers."""
+    raw_key, key_hash = _account_auth_key(request)
+    key_record = await db.fetchrow(
+        "SELECT k.user_id FROM api_keys k WHERE k.key_hash = $1 AND k.active = true", key_hash
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    user_id = key_record["user_id"]
+
+    rows = await db.fetch("""
+        SELECT sa.query, sa.created_at, sa.result_count,
+               s.name as top_result
+        FROM search_analytics sa
+        LEFT JOIN services s ON s.id = sa.top_result_id
+        WHERE sa.user_id = $1
+        ORDER BY sa.created_at DESC
+        LIMIT 100
+    """, user_id)
+    total = await db.fetchval(
+        "SELECT COUNT(*) FROM search_analytics WHERE user_id = $1", user_id) or 0
+
+    return {
+        "searches": [
+            {
+                "query": r["query"],
+                "timestamp": r["created_at"].isoformat(),
+                "results_count": r["result_count"] or 0,
+                "top_result": r["top_result"],
+            }
+            for r in rows
+        ],
+        "total": total,
+    }
+
+
+@app.get("/account/executions")
+@limiter.limit("30/minute")
+async def account_executions(request: Request, db=Depends(get_db)):
+    """Authenticated user's own execution history — all tiers."""
+    raw_key, key_hash = _account_auth_key(request)
+    key_record = await db.fetchrow(
+        "SELECT k.user_id FROM api_keys k WHERE k.key_hash = $1 AND k.active = true", key_hash
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    user_id = key_record["user_id"]
+
+    rows = await db.fetch("""
+        SELECT service_id, created_at, ABS(amount) as credits_used, type
+        FROM credit_transactions
+        WHERE user_id = $1 AND type IN ('execution', 'execution_refund')
+        ORDER BY created_at DESC
+        LIMIT 100
+    """, user_id)
+    total = await db.fetchval(
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND type IN ('execution','execution_refund')", user_id) or 0
+
+    return {
+        "executions": [
+            {
+                "service": r["service_id"],
+                "timestamp": r["created_at"].isoformat(),
+                "credits_used": r["credits_used"],
+                "status": "refunded" if r["type"] == "execution_refund" else "success",
+            }
+            for r in rows
+        ],
+        "total": total,
     }
 
 
