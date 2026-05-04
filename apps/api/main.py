@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 
 import asyncpg
 import httpx
+import jwt
+import requests
 import sentry_sdk
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -50,6 +52,43 @@ def get_fernet():
         )
 
 
+_JWKS_URL = "https://oafqjvdvamcygiqbnoby.supabase.co/auth/v1/.well-known/jwks.json"
+_jwks_cache: dict = {"keys": [], "fetched_at": 0}
+
+
+def get_jwks() -> list:
+    import time
+    if time.time() - _jwks_cache["fetched_at"] > 3600:
+        resp = requests.get(_JWKS_URL, timeout=5)
+        resp.raise_for_status()
+        _jwks_cache["keys"] = resp.json()["keys"]
+        _jwks_cache["fetched_at"] = time.time()
+    return _jwks_cache["keys"]
+
+
+def verify_supabase_jwt(token: str) -> dict:
+    """Asymmetric verification via Supabase JWKS. Supports RS256 and ES256.
+    Checks signature, expiry, and audience."""
+    from jwt.algorithms import RSAAlgorithm, ECAlgorithm
+    header = jwt.get_unverified_header(token)
+    kid = header.get("kid")
+    keys = get_jwks()
+    key = next((k for k in keys if k["kid"] == kid), None)
+    if not key:
+        raise ValueError("No matching JWKS key found")
+    alg = key.get("alg", header.get("alg", "RS256"))
+    if alg.startswith("ES"):
+        public_key = ECAlgorithm.from_jwk(key)
+    else:
+        public_key = RSAAlgorithm.from_jwk(key)
+    return jwt.decode(
+        token,
+        public_key,
+        algorithms=[alg],
+        audience="authenticated",
+    )
+
+
 ROUTING_FEE = 0.015  # 1.5% flat, all tiers
 
 STRIPE_PACKAGES = {
@@ -68,7 +107,6 @@ load_dotenv()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
 if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
@@ -82,11 +120,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("wayforth")
-if not SUPABASE_JWT_SECRET:
-    logger.warning(
-        "SUPABASE_JWT_SECRET not set — /auth/me JWTs are decoded without signature "
-        "verification. Set this env var in Railway for production security."
-    )
 
 
 async def log_query(pool, service_id: str, query_text: str, score: int):
@@ -226,6 +259,11 @@ async def _cleanup_anon_searches_loop(app: "FastAPI"):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Wayforth API starting, environment={ENVIRONMENT}")
+    try:
+        await asyncio.to_thread(get_jwks)
+        logger.info("JWKS cache pre-warmed (%d keys)", len(_jwks_cache["keys"]))
+    except Exception as _jwks_err:
+        logger.warning("JWKS pre-warm failed (will retry on first request): %s", _jwks_err)
     ok = check_db()
     if not ok:
         logger.warning("DB connection check failed — starting anyway")
@@ -3357,36 +3395,14 @@ async def auth_me(request: Request, db=Depends(get_db)):
 
     token = auth_header.removeprefix("Bearer ").strip()
 
-    if SUPABASE_JWT_SECRET:
-        # Cryptographic verification — signature, expiry, and audience are all checked.
-        try:
-            import jwt as _jwt
-            claims = _jwt.decode(
-                token,
-                SUPABASE_JWT_SECRET,
-                algorithms=["HS256"],
-                audience="authenticated",
-            )
-            supabase_sub = claims.get("sub", "")
-            if not supabase_sub:
-                raise ValueError("no sub")
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid token")
-    else:
-        # SUPABASE_JWT_SECRET not configured — falling back to unverified decode.
-        # Expired and forged tokens will pass. Set SUPABASE_JWT_SECRET in Railway.
-        try:
-            import base64 as _b64, json as _json
-            parts = token.split(".")
-            if len(parts) != 3:
-                raise ValueError("malformed jwt")
-            padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
-            claims = _json.loads(_b64.urlsafe_b64decode(padded))
-            supabase_sub = claims.get("sub", "")
-            if not supabase_sub:
-                raise ValueError("no sub")
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid token")
+    # RS256 cryptographic verification via Supabase JWKS. Signature, expiry, and audience checked.
+    try:
+        claims = verify_supabase_jwt(token)
+        supabase_sub = claims.get("sub", "")
+        if not supabase_sub:
+            raise ValueError("no sub")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
     row = await db.fetchrow("""
         SELECT u.email, k.key_prefix, k.encrypted_key, k.tier,
