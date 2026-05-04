@@ -1178,7 +1178,8 @@ async def list_services(
     try:
         rows = await db.fetch(f"""
             SELECT id, name, description, endpoint_url, category,
-                   pricing_usdc, coverage_tier, payment_protocol, source, created_at
+                   pricing_usdc, coverage_tier, payment_protocol, source, created_at,
+                   last_tested_at, consecutive_failures, x402_supported
             FROM services
             WHERE {' AND '.join(conditions)}
             ORDER BY {order}
@@ -2064,111 +2065,144 @@ async def get_service(request: Request, service_id: str):
 @app.get("/admin/stats")
 @limiter.limit("20/minute")
 async def admin_stats(request: Request, key: str = ""):
-    if not ADMIN_KEY or key != ADMIN_KEY:
+    admin_key_header = request.headers.get("X-Admin-Key", "")
+    provided_key = admin_key_header or key
+    if not ADMIN_KEY or provided_key != ADMIN_KEY:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         async with app.state.pool.acquire() as conn:
-            total = await conn.fetchval("SELECT COUNT(*) FROM services")
-            tier_rows = await conn.fetch(
-                "SELECT coverage_tier, COUNT(*) AS cnt FROM services GROUP BY coverage_tier"
-            )
-            category_rows = await conn.fetch(
-                "SELECT category, COUNT(*) AS cnt FROM services GROUP BY category"
-            )
-            queries_today = await conn.fetchval(
-                "SELECT COUNT(*) FROM service_queries WHERE queried_at > NOW() - INTERVAL '1 day'"
-            )
-            queries_week = await conn.fetchval(
-                "SELECT COUNT(*) FROM service_queries WHERE queried_at > NOW() - INTERVAL '7 days'"
-            )
-            top_rows = await conn.fetch(
+            # --- developers ---
+            total_accounts = await conn.fetchval(
+                "SELECT COUNT(*) FROM api_keys WHERE active=true"
+            ) or 0
+            accounts_with_searches = await conn.fetchval(
+                "SELECT COUNT(DISTINCT user_id) FROM credit_transactions WHERE api_endpoint='/search'"
+            ) or 0
+            accounts_with_executions = await conn.fetchval(
+                "SELECT COUNT(DISTINCT user_id) FROM credit_transactions WHERE type='execution'"
+            ) or 0
+            accounts_with_purchases = await conn.fetchval(
+                "SELECT COUNT(DISTINCT user_id) FROM package_purchases WHERE payment_status='completed'"
+            ) or 0
+
+            # --- searches ---
+            searches_all = await conn.fetchval("SELECT COUNT(*) FROM search_analytics") or 0
+            searches_7d = await conn.fetchval(
+                "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '7 days'"
+            ) or 0
+            searches_24h = await conn.fetchval(
+                "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '24 hours'"
+            ) or 0
+            top_query_rows = await conn.fetch(
                 """
-                SELECT s.name, s.category, s.coverage_tier, s.endpoint_url,
-                       COUNT(q.id) AS query_count, ROUND(AVG(q.score), 1) AS avg_score
-                FROM services s
-                JOIN service_queries q ON s.id = q.service_id
-                WHERE q.queried_at > NOW() - INTERVAL '7 days'
-                GROUP BY s.id
-                ORDER BY query_count DESC
+                SELECT query, COUNT(*) as count
+                FROM search_analytics
+                WHERE query IS NOT NULL AND query != ''
+                GROUP BY query
+                ORDER BY count DESC
                 LIMIT 10
                 """
             )
-            sub_total = await conn.fetchval("SELECT COUNT(*) FROM service_submissions")
-            sub_rows = await conn.fetch(
+
+            # --- executions ---
+            exec_all = await conn.fetchval(
+                "SELECT COUNT(*) FROM credit_transactions WHERE type='execution'"
+            ) or 0
+            exec_7d = await conn.fetchval(
+                "SELECT COUNT(*) FROM credit_transactions WHERE type='execution' AND created_at > NOW() - INTERVAL '7 days'"
+            ) or 0
+            exec_24h = await conn.fetchval(
+                "SELECT COUNT(*) FROM credit_transactions WHERE type='execution' AND created_at > NOW() - INTERVAL '24 hours'"
+            ) or 0
+            top_svc_rows = await conn.fetch(
                 """
-                SELECT ss.contact_email, ss.submitted_at, ss.ip_address, s.name AS service_name
-                FROM service_submissions ss
-                JOIN services s ON ss.service_id = s.id
-                ORDER BY ss.submitted_at DESC
+                SELECT service_id as service, COUNT(*) as count
+                FROM credit_transactions
+                WHERE type='execution' AND service_id IS NOT NULL
+                GROUP BY service_id
+                ORDER BY count DESC
                 LIMIT 10
                 """
             )
-            platform = await conn.fetchrow("""
-                SELECT
-                    (SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '24h') as searches_24h,
-                    (SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '7d') as searches_7d,
-                    (SELECT COUNT(*) FROM search_outcomes WHERE outcome_type='payment_initiated') as total_payments,
-                    (SELECT COUNT(*) FROM tier3_applications WHERE kyb_status='pending') as pending_tier3,
-                    (SELECT COUNT(*) FROM api_keys WHERE active=TRUE) as active_api_keys,
-                    (SELECT COUNT(*) FROM agent_identities) as registered_agents,
-                    (SELECT COUNT(*) FROM provider_webhooks WHERE active=TRUE) as active_webhooks
-            """)
+
+            # --- payments ---
+            total_credits_purchased = await conn.fetchval(
+                "SELECT COALESCE(SUM(credits_total), 0) FROM package_purchases WHERE payment_status='completed'"
+            ) or 0
+            total_credits_used = await conn.fetchval(
+                "SELECT COALESCE(SUM(ABS(amount)), 0) FROM credit_transactions WHERE amount < 0 AND type IN ('usage', 'execution')"
+            ) or 0
+            total_volume_usd = await conn.fetchval(
+                "SELECT COALESCE(SUM(amount_usd), 0) FROM package_purchases WHERE payment_status='completed'"
+            ) or 0
+            track_a = await conn.fetchval(
+                "SELECT COUNT(*) FROM search_outcomes WHERE payment_track='card'"
+            ) or 0
+            track_b = await conn.fetchval(
+                "SELECT COUNT(*) FROM search_outcomes WHERE payment_track='crypto'"
+            ) or 0
+            track_c = await conn.fetchval(
+                "SELECT COUNT(*) FROM search_outcomes WHERE payment_track='x402'"
+            ) or 0
+
+            # --- catalog ---
+            total_services = await conn.fetchval("SELECT COUNT(*) FROM services") or 0
+            tier2_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM services WHERE coverage_tier >= 2"
+            ) or 0
+            x402_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM services WHERE x402_supported=true"
+            ) or 0
+
     except Exception as e:
         logger.error(f"Admin stats DB error: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    by_tier = {str(t): 0 for t in range(4)}
-    for r in tier_rows:
-        by_tier[str(r["coverage_tier"])] = r["cnt"]
+    # --- pypi ---
+    pypi_version = "unknown"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get("https://pypi.org/pypi/wayforth-mcp/json")
+            if r.status_code == 200:
+                pypi_version = r.json()["info"]["version"]
+    except Exception:
+        pass
 
     return {
-        "services": {
-            "total": total,
-            "by_tier": by_tier,
-            "by_category": {r["category"]: r["cnt"] for r in category_rows},
+        "developers": {
+            "total_accounts": total_accounts,
+            "accounts_with_searches": accounts_with_searches,
+            "accounts_with_executions": accounts_with_executions,
+            "accounts_with_purchases": accounts_with_purchases,
         },
-        "queries": {
-            "today": queries_today,
-            "week": queries_week,
-            "top_services": [
-                {
-                    "name": r["name"],
-                    "query_count": r["query_count"],
-                    "avg_score": r["avg_score"],
-                    "category": r["category"],
-                    "coverage_tier": r["coverage_tier"],
-                    "endpoint_url": r["endpoint_url"],
-                }
-                for r in top_rows
-            ],
+        "searches": {
+            "all_time": searches_all,
+            "last_7_days": searches_7d,
+            "last_24h": searches_24h,
+            "top_queries": [{"query": r["query"], "count": r["count"]} for r in top_query_rows],
         },
-        "submissions": {
-            "total": sub_total,
-            "recent": [
-                {
-                    "service_name": r["service_name"],
-                    "contact_email": r["contact_email"],
-                    "submitted_at": r["submitted_at"].isoformat() + "Z",
-                    "ip_address": r["ip_address"],
-                }
-                for r in sub_rows
-            ],
+        "executions": {
+            "all_time": exec_all,
+            "last_7_days": exec_7d,
+            "last_24h": exec_24h,
+            "top_services": [{"service": r["service"], "count": r["count"]} for r in top_svc_rows],
         },
-        "platform": {
-            "active_api_keys": platform["active_api_keys"],
-            "registered_agents": platform["registered_agents"],
-            "active_webhooks": platform["active_webhooks"],
-            "pending_tier3_applications": platform["pending_tier3"],
+        "payments": {
+            "total_credits_purchased": int(total_credits_purchased),
+            "total_credits_used": int(total_credits_used),
+            "total_payment_volume_usd": float(total_volume_usd),
+            "track_a_payments": track_a,
+            "track_b_payments": track_b,
+            "track_c_payments": track_c,
         },
-        "usage": {
-            "searches_24h": platform["searches_24h"],
-            "searches_7d": platform["searches_7d"],
-            "total_payments": platform["total_payments"],
+        "catalog": {
+            "total_services": total_services,
+            "tier2_verified": tier2_count,
+            "x402_native": x402_count,
         },
-        "infrastructure": {
-            "api": "healthy",
-            "db": "healthy" if getattr(app.state, "db_ok", False) else "unavailable",
-            "sentry": "connected" if SENTRY_DSN else "not configured",
+        "pypi": {
+            "package": "wayforth-mcp",
+            "latest_version": pypi_version,
         },
     }
 
