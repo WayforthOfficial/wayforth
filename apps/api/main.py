@@ -4479,7 +4479,9 @@ async def admin_users_list(
         SELECT u.id, u.email, u.created_at,
                k.tier, k.owner_email, k.key_prefix,
                k.usage_this_month, k.monthly_quota,
-               k.subscription_status
+               k.subscription_status,
+               uc.package_tier, uc.credits_balance, uc.lifetime_credits,
+               la.last_active
         FROM users u
         LEFT JOIN LATERAL (
             SELECT tier, owner_email, key_prefix, usage_this_month, monthly_quota, subscription_status
@@ -4488,6 +4490,12 @@ async def admin_users_list(
             ORDER BY (encrypted_key IS NOT NULL) DESC, created_at DESC
             LIMIT 1
         ) k ON true
+        LEFT JOIN user_credits uc ON uc.user_id = u.id
+        LEFT JOIN LATERAL (
+            SELECT MAX(created_at) as last_active
+            FROM search_analytics
+            WHERE user_id = u.id
+        ) la ON true
         WHERE u.email NOT LIKE '%@wayforth.test'
           AND u.email NOT LIKE 'probe-%'
         ORDER BY u.created_at DESC
