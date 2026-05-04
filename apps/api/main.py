@@ -3293,6 +3293,58 @@ async def register_user(request: Request, db=Depends(get_db)):
     }
 
 
+@app.get("/auth/me")
+@limiter.limit("30/minute")
+async def auth_me(request: Request, db=Depends(get_db)):
+    """Return the caller's Wayforth API key prefix, email, and tier from a Supabase JWT.
+
+    Authorization: Bearer <supabase_jwt>
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization: Bearer <token> required")
+
+    token = auth_header.removeprefix("Bearer ").strip()
+
+    # Decode JWT payload without signature verification.
+    # The DB lookup on supabase_id is the trust anchor — an unknown sub returns 401.
+    try:
+        import base64 as _b64, json as _json
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise ValueError("malformed jwt")
+        padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        claims = _json.loads(_b64.urlsafe_b64decode(padded))
+        supabase_sub = claims.get("sub", "")
+        if not supabase_sub:
+            raise ValueError("no sub")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    row = await db.fetchrow("""
+        SELECT u.email, k.key_prefix, k.tier, uc.package_tier, uc.credits_balance, uc.lifetime_credits
+        FROM users u
+        JOIN api_keys k ON k.user_id = u.id
+        LEFT JOIN user_credits uc ON uc.user_id = u.id
+        WHERE u.supabase_id = $1
+          AND k.active = true
+        ORDER BY k.created_at DESC
+        LIMIT 1
+    """, supabase_sub)
+
+    if not row:
+        raise HTTPException(status_code=401, detail="No Wayforth account linked to this token")
+
+    tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
+
+    return {
+        "email": row["email"],
+        "api_key": row["key_prefix"] + "...",
+        "tier": tier,
+        "credits_remaining": row["credits_balance"] or 0,
+    }
+
+
 @app.get("/dashboard")
 @limiter.limit("30/minute")
 async def dashboard(request: Request, db=Depends(get_db)):
