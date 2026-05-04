@@ -3380,6 +3380,91 @@ async def get_balance(request: Request, db=Depends(get_db)):
     }
 
 
+_TIER_FEATURES = {
+    "free":    {"execute_managed": False, "byok": False, "analytics": False, "priority_support": False},
+    "starter": {"execute_managed": True,  "byok": True,  "analytics": False, "priority_support": False},
+    "pro":     {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": True},
+    "growth":  {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": True},
+}
+
+def _credits_to_tier(lifetime_credits: int, package_tier: str | None) -> str:
+    if package_tier and package_tier in _TIER_FEATURES:
+        return package_tier
+    if lifetime_credits >= 1_000_000:
+        return "growth"
+    if lifetime_credits >= 300_000:
+        return "pro"
+    if lifetime_credits >= 50_000:
+        return "starter"
+    return "free"
+
+
+@app.get("/account/credits")
+@limiter.limit("30/minute")
+async def account_credits(request: Request, db=Depends(get_db)):
+    """Current credit balance — canonical endpoint for dashboard and agents."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_record = await db.fetchrow("""
+        SELECT k.user_id, k.tier, u.email
+        FROM api_keys k JOIN users u ON u.id = k.user_id
+        WHERE k.key_hash = $1 AND k.active = true
+    """, hashlib.sha256(api_key.encode()).hexdigest())
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    credits = await db.fetchrow(
+        "SELECT credits_balance, lifetime_credits, package_tier FROM user_credits WHERE user_id = $1",
+        key_record['user_id']
+    )
+    balance = credits['credits_balance'] if credits else 0
+    lifetime = credits['lifetime_credits'] if credits else 0
+    pkg_tier = credits['package_tier'] if credits else 'free'
+    tier = _credits_to_tier(lifetime, pkg_tier)
+
+    return {
+        "credits_remaining": balance,
+        "credits_total": lifetime,
+        "tier": tier,
+        "email": key_record['email'],
+    }
+
+
+@app.get("/account/tier")
+@limiter.limit("30/minute")
+async def account_tier(request: Request, db=Depends(get_db)):
+    """Tier and feature flags — used by the dashboard to gate UI sections."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_record = await db.fetchrow("""
+        SELECT k.user_id
+        FROM api_keys k
+        WHERE k.key_hash = $1 AND k.active = true
+    """, hashlib.sha256(api_key.encode()).hexdigest())
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    credits = await db.fetchrow(
+        "SELECT credits_balance, lifetime_credits, package_tier FROM user_credits WHERE user_id = $1",
+        key_record['user_id']
+    )
+    balance = credits['credits_balance'] if credits else 0
+    lifetime = credits['lifetime_credits'] if credits else 0
+    pkg_tier = credits['package_tier'] if credits else 'free'
+    tier = _credits_to_tier(lifetime, pkg_tier)
+
+    return {
+        "tier": tier,
+        "credits_remaining": balance,
+        "credits_total": lifetime,
+        "features": _TIER_FEATURES[tier],
+    }
+
+
 @app.get("/billing/packages")
 async def get_packages(request: Request):
     result = []
