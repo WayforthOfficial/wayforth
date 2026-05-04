@@ -46,6 +46,8 @@ def get_fernet():
     return Fernet(base64.urlsafe_b64encode(padded))
 
 
+ROUTING_FEE = 0.015  # 1.5% flat, all tiers
+
 STRIPE_PACKAGES = {
     "starter": {"price_cents": 1900,  "credits": 50000,   "label": "Starter Pack"},
     "pro":     {"price_cents": 9900,  "credits": 300000,  "label": "Pro Pack"},
@@ -1600,7 +1602,7 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
     )
 
     # Calculate routing fee
-    routing_fee_pct = 0.015  # 1.5%
+    routing_fee_pct = ROUTING_FEE
     routing_fee_usd = round(amount_usd * routing_fee_pct, 8)
     service_receives_usd = round(amount_usd - routing_fee_usd, 8)
     wayf_burn_allocation = round(routing_fee_usd * 0.30, 8)  # 30% to $WAYF burn
@@ -2973,16 +2975,16 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 TIER_LIMITS = {
     "free":       {"rpm": 10,  "monthly": 1_000,    "fee_bps": 150},
-    "starter":    {"rpm": 30,  "monthly": 10_000,   "fee_bps": 125},
-    "pro":        {"rpm": 100, "monthly": 100_000,  "fee_bps": 100},
-    "enterprise": {"rpm": 500, "monthly": -1,       "fee_bps": 75},
+    "starter":    {"rpm": 30,  "monthly": 10_000,   "fee_bps": 150},
+    "pro":        {"rpm": 100, "monthly": 100_000,  "fee_bps": 150},
+    "enterprise": {"rpm": 500, "monthly": -1,       "fee_bps": 150},
 }
 
 PACKAGES = {
-    "starter":    {"credits": 50000,   "price_usd": 19,  "wayf_bonus_pct": 0.15, "fee_bps": 125, "label": "Starter Pack"},
-    "pro":        {"credits": 300000,  "price_usd": 99,  "wayf_bonus_pct": 0.15, "fee_bps": 100, "label": "Pro Pack"},
-    "growth":     {"credits": 1000000, "price_usd": 299, "wayf_bonus_pct": 0.15, "fee_bps": 85,  "label": "Growth Pack"},
-    "enterprise": {"credits": -1,      "price_usd": None,"wayf_bonus_pct": 0.15, "fee_bps": 75,  "label": "Enterprise"},
+    "starter":    {"credits": 50000,   "price_usd": 19,  "wayf_bonus_pct": 0.15, "fee_bps": 150, "label": "Starter Pack"},
+    "pro":        {"credits": 300000,  "price_usd": 99,  "wayf_bonus_pct": 0.15, "fee_bps": 150, "label": "Pro Pack"},
+    "growth":     {"credits": 1000000, "price_usd": 299, "wayf_bonus_pct": 0.15, "fee_bps": 150, "label": "Growth Pack"},
+    "enterprise": {"credits": -1,      "price_usd": None,"wayf_bonus_pct": 0.15, "fee_bps": 150, "label": "Enterprise"},
 }
 
 CREDIT_COSTS = {
@@ -3313,11 +3315,12 @@ async def dashboard(request: Request, db=Depends(get_db)):
         ORDER BY created_at DESC LIMIT 10
     """)
 
+    _fee = round(ROUTING_FEE * 100, 4)
     LIMITS = {
-        'free':       {'rpm': 10,  'monthly': 1000,   'fee_pct': 1.5},
-        'starter':    {'rpm': 30,  'monthly': 10000,  'fee_pct': 1.25},
-        'pro':        {'rpm': 100, 'monthly': 100000, 'fee_pct': 1.0},
-        'enterprise': {'rpm': 500, 'monthly': -1,     'fee_pct': 0.75},
+        'free':       {'rpm': 10,  'monthly': 1000,   'fee_pct': _fee},
+        'starter':    {'rpm': 30,  'monthly': 10000,  'fee_pct': _fee},
+        'pro':        {'rpm': 100, 'monthly': 100000, 'fee_pct': _fee},
+        'enterprise': {'rpm': 500, 'monthly': -1,     'fee_pct': _fee},
     }
     tier = key['tier'] or 'free'
     limits = LIMITS.get(tier, LIMITS['free'])
