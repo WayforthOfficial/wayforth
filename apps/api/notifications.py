@@ -108,9 +108,20 @@ def send_tier3_application_notification(to_email: str, service_name: str, compan
         return False
 
 
+_TIER_CREDITS = {
+    "free":     100,
+    "starter":  50_000,
+    "pro":      300_000,
+    "growth":   1_000_000,
+    "enterprise": 1_000_000,
+}
+
+
 def send_welcome_email(to_email: str, api_key_prefix: str, tier: str) -> bool:
     if not resend.api_key:
         return False
+    credits = _TIER_CREDITS.get(tier, 100)
+    credits_display = f"{credits:,}"
     try:
         resend.Emails.send({
             "from": FROM_EMAIL,
@@ -125,7 +136,7 @@ def send_welcome_email(to_email: str, api_key_prefix: str, tier: str) -> bool:
                 <p>Key prefix: <code style="background:#1E293B;padding:4px 8px;border-radius:4px;color:#4F46E5">{api_key_prefix}...</code></p>
 
                 <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0;border-left:4px solid #4F46E5;">
-                    <p style="color:#4F46E5;font-weight:bold;margin:0 0 8px">2,000 free credits included</p>
+                    <p style="color:#4F46E5;font-weight:bold;margin:0 0 8px">You have {credits_display} credits</p>
                     <p style="color:#94A3B8;font-size:13px;margin:0">1 credit = $0.001 · Each search costs 1 credit · Top up anytime at wayforth.io/dashboard</p>
                 </div>
 
