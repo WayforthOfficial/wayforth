@@ -2074,17 +2074,27 @@ async def admin_stats(request: Request, key: str = ""):
     try:
         async with app.state.pool.acquire() as conn:
             # --- developers ---
+            _probe_filter = """
+                AND owner_email NOT LIKE '%@wayforth.test'
+                AND owner_email NOT LIKE 'probe-%'
+            """
+            _probe_user_ids = """
+                AND user_id NOT IN (
+                    SELECT id FROM users
+                    WHERE email LIKE '%@wayforth.test' OR email LIKE 'probe-%'
+                )
+            """
             total_accounts = await conn.fetchval(
-                "SELECT COUNT(*) FROM api_keys WHERE active=true"
+                f"SELECT COUNT(*) FROM api_keys WHERE active=true {_probe_filter}"
             ) or 0
             accounts_with_searches = await conn.fetchval(
-                "SELECT COUNT(DISTINCT user_id) FROM credit_transactions WHERE api_endpoint='/search'"
+                f"SELECT COUNT(DISTINCT user_id) FROM credit_transactions WHERE api_endpoint='/search' {_probe_user_ids}"
             ) or 0
             accounts_with_executions = await conn.fetchval(
-                "SELECT COUNT(DISTINCT user_id) FROM credit_transactions WHERE type='execution'"
+                f"SELECT COUNT(DISTINCT user_id) FROM credit_transactions WHERE type='execution' {_probe_user_ids}"
             ) or 0
             accounts_with_purchases = await conn.fetchval(
-                "SELECT COUNT(DISTINCT user_id) FROM package_purchases WHERE payment_status='completed'"
+                f"SELECT COUNT(DISTINCT user_id) FROM package_purchases WHERE payment_status='completed' {_probe_user_ids}"
             ) or 0
 
             # --- searches ---
@@ -3238,10 +3248,13 @@ async def register_user(request: Request, db=Depends(get_db)):
     if not email or not supabase_id:
         raise HTTPException(status_code=400, detail="email and supabase_id required")
 
+    existing = await db.fetchrow("SELECT id FROM users WHERE email = $1", email)
+    if existing:
+        raise HTTPException(status_code=409, detail={"error": "account already exists", "code": 409})
+
     user = await db.fetchrow("""
         INSERT INTO users (email, supabase_id)
         VALUES ($1, $2)
-        ON CONFLICT (email) DO UPDATE SET supabase_id = $2
         RETURNING id, email, created_at
     """, email, supabase_id)
 
@@ -4237,11 +4250,17 @@ async def admin_users_list(
                k.subscription_status
         FROM users u
         LEFT JOIN api_keys k ON k.user_id = u.id
+        WHERE u.email NOT LIKE '%@wayforth.test'
+          AND u.email NOT LIKE 'probe-%'
         ORDER BY u.created_at DESC
         LIMIT $1 OFFSET $2
     """, limit, offset)
 
-    total = await db.fetchval("SELECT COUNT(*) FROM users")
+    total = await db.fetchval("""
+        SELECT COUNT(*) FROM users
+        WHERE email NOT LIKE '%@wayforth.test'
+          AND email NOT LIKE 'probe-%'
+    """)
 
     return {
         "users": [dict(u) for u in users],
