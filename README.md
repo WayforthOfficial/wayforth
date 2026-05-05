@@ -25,7 +25,7 @@ POST /query {"query": "translate text", "tier_min": 2, "sort_by": "wri"}
 wayforth_pay("deepl", 0.001)               # card default
 wayforth_pay("deepl", 0.001, track="crypto") # non-custodial Base
 
-# Execute — 8 managed services, no API keys needed
+# Execute — managed services, no API keys needed
 POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 → {content: "...", credits_deducted: 3, credits_remaining: 997}
 ```
@@ -35,7 +35,7 @@ POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 - **274+ APIs** indexed across 18 categories
 - **225+ Tier 2 verified** — probed every 6h, auto-demoted after failures
 - **42 x402 native services** — sourced from x402.org/ecosystem
-- **8 managed services** — Groq, DeepL, OpenWeather, NewsAPI, Serper, Resend, AssemblyAI, Stability AI
+- **10 managed services** — Groq, DeepL, OpenWeather, NewsAPI, Serper, Resend, AssemblyAI, Stability AI, Tavily, Jina AI
 - **WayforthQL v1** — structured discovery with tier/price/protocol filters
 - **Dual-track payments** — Stripe Treasury (card) + Base blockchain (non-custodial)
 - **BYOK** — bring your own key for any of 274+ services, encrypted at rest (Fernet AES-128)
@@ -77,7 +77,7 @@ Get your API key: [wayforth.io/signup](https://wayforth.io/signup)
 
 All tracks earn Wayforth the same 1.5% routing fee.
 
-## Execution — 8 Managed Services
+## Execution — 10 Managed Services
 
 | Service | Category | Credits/Call |
 |---------|----------|-------------|
@@ -89,6 +89,8 @@ All tracks earn Wayforth the same 1.5% routing fee.
 | Resend | Email | 2 |
 | AssemblyAI | Speech-to-text | 5 |
 | Stability AI | Image generation | 10 |
+| Tavily | AI web search | 3 |
+| Jina AI | URL to markdown | 2 |
 
 ## Architecture
 
