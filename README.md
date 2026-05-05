@@ -8,6 +8,8 @@
 uvx wayforth-mcp
 ```
 
+![Wayforth Demo](./docs/demo.gif)
+
 ## What It Does
 
 ```python
