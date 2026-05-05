@@ -3540,7 +3540,10 @@ async def auth_me(request: Request, db=Depends(get_db)):
             _f = get_fernet()
             api_key = _f.decrypt(row["encrypted_key"].encode()).decode()
         except Exception:
-            api_key = row["key_prefix"] + "..."
+            raise HTTPException(
+                status_code=500,
+                detail="Key decryption failed — please contact support@wayforth.io",
+            )
     else:
         api_key = row["key_prefix"] + "..."
 
