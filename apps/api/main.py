@@ -379,7 +379,7 @@ async def _auth_error_handler(request: Request, exc: _AuthError):
 
 
 _ANON_DAILY_LIMIT = 3
-_TIER_RPM = {"free": 10, "starter": 30, "pro": 100, "enterprise": 500}
+_TIER_RPM = {"free": 10, "starter": 60, "pro": 120, "growth": 300, "enterprise": 500}
 
 
 async def check_auth(request: Request) -> dict:
