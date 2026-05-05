@@ -10,8 +10,9 @@ SERVICE_CONFIGS = {
     "serper":      {"key_var": "SERPER_API_KEY",      "credits": 1},
     "assemblyai":  {"key_var": "ASSEMBLYAI_API_KEY",  "credits": 5},
     "stability":   {"key_var": "STABILITY_API_KEY",   "credits": 10},
-    "tavily":      {"key_var": "TAVILY_API_KEY",      "credits": 3},
-    "jina":        {"key_var": "JINA_API_KEY",        "credits": 2},
+    "tavily":       {"key_var": "TAVILY_API_KEY",       "credits": 3},
+    "jina":         {"key_var": "JINA_API_KEY",         "credits": 2},
+    "alphavantage": {"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 2},
 }
 
 
@@ -282,6 +283,45 @@ async def call_tavily(params: dict, api_key: str) -> dict:
     }
 
 
+async def call_alphavantage(params: dict, api_key: str) -> dict:
+    symbol = params.get("symbol", "").upper()
+    if not symbol:
+        raise Exception("params.symbol is required (e.g. 'AAPL')")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            "https://www.alphavantage.co/query",
+            params={
+                "function": "TIME_SERIES_INTRADAY",
+                "symbol": symbol,
+                "interval": params.get("interval", "5min"),
+                "apikey": api_key,
+            },
+        )
+    if r.status_code != 200:
+        raise Exception(f"Alpha Vantage error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    if "Error Message" in data:
+        raise Exception(f"Alpha Vantage: {data['Error Message'][:200]}")
+    if "Note" in data:
+        raise Exception("Alpha Vantage: API call frequency limit reached")
+    ts_key = "Time Series (5min)"
+    if ts_key not in data:
+        raise Exception(f"Alpha Vantage: unexpected response — {list(data.keys())}")
+    latest_ts = sorted(data[ts_key].keys())[-1]
+    bar = data[ts_key][latest_ts]
+    meta = data.get("Meta Data", {})
+    return {
+        "symbol": symbol,
+        "timestamp": latest_ts,
+        "open": float(bar["1. open"]),
+        "high": float(bar["2. high"]),
+        "low": float(bar["3. low"]),
+        "close": float(bar["4. close"]),
+        "volume": int(bar["5. volume"]),
+        "timezone": meta.get("6. Time Zone", "US/Eastern"),
+    }
+
+
 async def call_jina(params: dict, api_key: str) -> dict:
     url = params.get("url", "")
     if not url:
@@ -315,6 +355,7 @@ ADAPTERS = {
     "serper":      call_serper,
     "assemblyai":  call_assemblyai,
     "stability":   call_stability,
-    "tavily":      call_tavily,
-    "jina":        call_jina,
+    "tavily":       call_tavily,
+    "jina":         call_jina,
+    "alphavantage": call_alphavantage,
 }
