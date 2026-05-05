@@ -4156,6 +4156,46 @@ async def create_checkout(request: Request, db=Depends(get_db)):
     }
 
 
+@app.post("/billing/cancel")
+@limiter.limit("5/minute")
+async def billing_cancel(request: Request, db=Depends(get_db)):
+    """Cancel the caller's Stripe subscription at period end."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_record = await db.fetchrow("""
+        SELECT k.user_id, k.stripe_subscription_id, u.email
+        FROM api_keys k JOIN users u ON u.id = k.user_id
+        WHERE k.key_hash = $1 AND k.active = true
+    """, hashlib.sha256(api_key.encode()).hexdigest())
+
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    sub_id = key_record["stripe_subscription_id"]
+
+    if not sub_id or STRIPE_MOCK:
+        return JSONResponse(content={
+            "message": "Contact support@wayforth.io to cancel your subscription"
+        })
+
+    try:
+        sub = stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {e.user_message or str(e)}")
+
+    period_end = datetime.fromtimestamp(sub["current_period_end"], tz=timezone.utc)
+    effective_date = period_end.strftime("%Y-%m-%d")
+    human_date = period_end.strftime("%B %-d, %Y")
+
+    return {
+        "cancelled": True,
+        "effective_date": effective_date,
+        "message": f"Your plan will downgrade to Free on {human_date}",
+    }
+
+
 @app.post("/billing/mock-topup")
 @limiter.limit("5/minute")
 async def mock_topup(request: Request, db=Depends(get_db)):
