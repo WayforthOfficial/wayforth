@@ -65,13 +65,14 @@ async def call_deepl(params: dict, api_key: str) -> dict:
 
 async def call_openweather(params: dict, api_key: str) -> dict:
     query_params: dict = {"appid": api_key, "units": "metric"}
-    if "q" in params:
-        query_params["q"] = params["q"]
+    city = params.get("q") or params.get("city")
+    if city:
+        query_params["q"] = city
     elif "lat" in params and "lon" in params:
         query_params["lat"] = params["lat"]
         query_params["lon"] = params["lon"]
     else:
-        raise Exception("params.q (city name) or params.lat+lon are required")
+        raise Exception("params.city (or params.q) or params.lat+lon are required")
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get(
             "https://api.openweathermap.org/data/2.5/weather",
@@ -92,9 +93,9 @@ async def call_openweather(params: dict, api_key: str) -> dict:
 
 
 async def call_newsapi(params: dict, api_key: str) -> dict:
-    q = params.get("q", "")
+    q = params.get("q") or params.get("query", "")
     if not q:
-        raise Exception("params.q is required")
+        raise Exception("params.q or params.query is required")
     page_size = min(int(params.get("page_size", 5)), 10)
     query_params = {
         "q": q,
@@ -120,12 +121,12 @@ async def call_newsapi(params: dict, api_key: str) -> dict:
 
 
 async def call_resend(params: dict, api_key: str) -> dict:
-    from_addr = params.get("from", "")
+    from_addr = params.get("from", "Wayforth <noreply@wayforth.io>")
     to_addr = params.get("to", "")
     subject = params.get("subject", "")
     html = params.get("html", "")
-    if not from_addr or not to_addr or not subject:
-        raise Exception("params.from, params.to, and params.subject are required")
+    if not to_addr or not subject:
+        raise Exception("params.to and params.subject are required")
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.post(
             "https://api.resend.com/emails",
@@ -144,9 +145,9 @@ async def call_resend(params: dict, api_key: str) -> dict:
 
 
 async def call_serper(params: dict, api_key: str) -> dict:
-    q = params.get("q", "")
+    q = params.get("q") or params.get("query", "")
     if not q:
-        raise Exception("params.q is required")
+        raise Exception("params.q or params.query is required")
     num = min(int(params.get("num", 5)), 10)
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.post(
