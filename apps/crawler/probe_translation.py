@@ -18,7 +18,6 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
 
 DB_URL = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
-PROD_URL = "postgresql://postgres:REDACTED@shortline.proxy.rlwy.net:41067/railway"
 TIMEOUT_S = 5.0
 MAX_TRIES = 3
 # 200-403 inclusive: covers 200 OK, 401 Unauthorized, 402 Payment Required,
@@ -52,7 +51,7 @@ async def probe_service(client: httpx.AsyncClient, svc: dict) -> tuple[bool, lis
 
 
 async def main():
-    conn = await asyncpg.connect(PROD_URL)
+    conn = await asyncpg.connect(DB_URL)
     rows = await conn.fetch("""
         SELECT id, name, endpoint_url, coverage_tier
         FROM services
