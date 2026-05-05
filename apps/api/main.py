@@ -503,8 +503,8 @@ async def health(request: Request, db=Depends(get_db)):
     try:
         await db.fetchval("SELECT 1")
         db_status = "ok"
-        tier2 = await db.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2") or 0
-        total = await db.fetchval("SELECT COUNT(*) FROM services") or 0
+        tier2 = await db.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3") or 0
+        total = await db.fetchval("SELECT COUNT(*) FROM services WHERE consecutive_failures < 3") or 0
     except Exception:
         db_status = "error"
         tier2 = 0
@@ -527,9 +527,9 @@ async def system_status(db=Depends(get_db)):
     """Public system status — uptime, service count, last health check."""
     stats = await db.fetchrow("""
         SELECT
-            COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2_services,
-            COUNT(*) as total_services,
-            COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3_services
+            COUNT(*) FILTER (WHERE coverage_tier >= 2 AND consecutive_failures < 3) as tier2_services,
+            COUNT(*) FILTER (WHERE consecutive_failures < 3) as total_services,
+            COUNT(*) FILTER (WHERE coverage_tier >= 3 AND consecutive_failures < 3) as tier3_services
         FROM services
     """)
     searches = await db.fetchval("""
@@ -1350,15 +1350,11 @@ async def get_stats(request: Request, db=Depends(get_db)):
     try:
         row = await db.fetchrow("""
             SELECT
-                COUNT(*) as total,
-                COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
-                COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3,
-                COUNT(*) FILTER (
-                    WHERE endpoint_url NOT ILIKE '%github.com%'
-                    AND endpoint_url NOT ILIKE '%glama.ai%'
-                    AND endpoint_url NOT ILIKE '%smithery%'
-                ) as real_apis,
-                COUNT(DISTINCT category) as categories
+                COUNT(*) FILTER (WHERE consecutive_failures < 3) as total,
+                COUNT(*) FILTER (WHERE coverage_tier >= 2 AND consecutive_failures < 3) as tier2,
+                COUNT(*) FILTER (WHERE coverage_tier >= 3 AND consecutive_failures < 3) as tier3,
+                COUNT(*) FILTER (WHERE consecutive_failures < 3) as real_apis,
+                COUNT(DISTINCT category) FILTER (WHERE consecutive_failures < 3) as categories
             FROM services
         """)
         searches_7d = await db.fetchval("""
@@ -1389,14 +1385,10 @@ async def service_count(request: Request, db=Depends(get_db)):
     try:
         row = await db.fetchrow("""
             SELECT
-                COUNT(*) as total,
-                COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
-                COUNT(*) FILTER (WHERE coverage_tier >= 3) as tier3,
-                COUNT(*) FILTER (
-                    WHERE endpoint_url NOT ILIKE '%github.com%'
-                    AND endpoint_url NOT ILIKE '%glama.ai%'
-                    AND endpoint_url NOT ILIKE '%smithery%'
-                ) as real_apis
+                COUNT(*) FILTER (WHERE consecutive_failures < 3) as total,
+                COUNT(*) FILTER (WHERE coverage_tier >= 2 AND consecutive_failures < 3) as tier2,
+                COUNT(*) FILTER (WHERE coverage_tier >= 3 AND consecutive_failures < 3) as tier3,
+                COUNT(*) FILTER (WHERE consecutive_failures < 3) as real_apis
             FROM services
         """)
     except Exception as e:
@@ -2347,12 +2339,12 @@ async def admin_stats(request: Request, key: str = ""):
             ) or 0
 
             # --- catalog ---
-            total_services = await conn.fetchval("SELECT COUNT(*) FROM services") or 0
+            total_services = await conn.fetchval("SELECT COUNT(*) FROM services WHERE consecutive_failures < 3") or 0
             tier2_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM services WHERE coverage_tier >= 2"
+                "SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3"
             ) or 0
             x402_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM services WHERE x402_supported=true"
+                "SELECT COUNT(*) FROM services WHERE x402_supported=true AND consecutive_failures < 3"
             ) or 0
 
     except Exception as e:
