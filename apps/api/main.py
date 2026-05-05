@@ -3149,20 +3149,61 @@ async def register_webhook(request: Request, body: WebhookRegistration, db=Depen
     contact_email = owner["owner_email"] if owner else body.contact_email
 
     secret = secrets.token_hex(32)
-    wh_id = await db.fetchval("""
+    row = await db.fetchrow("""
         INSERT INTO provider_webhooks
         (service_id, webhook_url, contact_email, events, secret_token)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (service_id, webhook_url) DO UPDATE
-        SET active = TRUE, updated_at = NOW()
-        RETURNING id
+        SET active = TRUE, secret_token = EXCLUDED.secret_token
+        RETURNING id, webhook_url, events, active, created_at, last_fired_at
     """, body.service_id, body.webhook_url, contact_email, body.events, secret)
     return {
-        "webhook_id": str(wh_id),
+        "id": str(row["id"]),
+        "webhook_id": str(row["id"]),
+        "url": row["webhook_url"],
+        "events": row["events"],
+        "active": row["active"],
+        "last_fired_at": row["last_fired_at"].isoformat() if row["last_fired_at"] else None,
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "secret_token": secret,
         "message": "Webhook registered. Store your secret_token — it won't be shown again.",
-        "events": body.events,
     }
+
+
+@app.get("/webhooks")
+@limiter.limit("30/minute")
+async def list_webhooks(request: Request, db=Depends(get_db)):
+    """List all active webhooks registered by the authenticated user."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
+    user_id = await _resolve_user(db, api_key)
+
+    owner = await db.fetchrow(
+        "SELECT owner_email FROM api_keys WHERE user_id=$1::uuid AND active=true LIMIT 1", user_id
+    )
+    if not owner:
+        return {"webhooks": [], "total": 0}
+
+    rows = await db.fetch("""
+        SELECT id, webhook_url, events, active, last_fired_at, created_at
+        FROM provider_webhooks
+        WHERE contact_email = $1 AND active = true
+        ORDER BY created_at DESC
+    """, owner["owner_email"])
+
+    webhooks = [
+        {
+            "id": str(r["id"]),
+            "url": r["webhook_url"],
+            "events": list(r["events"]) if r["events"] else [],
+            "active": r["active"],
+            "last_fired_at": r["last_fired_at"].isoformat() if r["last_fired_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+    return {"webhooks": webhooks, "total": len(webhooks)}
 
 
 @app.delete("/webhooks/{webhook_id}")
