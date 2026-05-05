@@ -1535,9 +1535,9 @@ class Tier3Application(BaseModel):
 
 
 class WebhookRegistration(BaseModel):
-    service_id: str
+    service_id: str | None = None
     webhook_url: str
-    contact_email: str
+    contact_email: str = ""
     events: list[str] = ["tier_change", "health_alert"]
 
 
@@ -3156,7 +3156,7 @@ async def register_webhook(request: Request, body: WebhookRegistration, db=Depen
         ON CONFLICT (service_id, webhook_url) DO UPDATE
         SET active = TRUE, secret_token = EXCLUDED.secret_token
         RETURNING id, webhook_url, events, active, created_at, last_fired_at
-    """, body.service_id, body.webhook_url, contact_email, body.events, secret)
+    """, body.service_id or "*", body.webhook_url, contact_email, body.events, secret)
     return {
         "id": str(row["id"]),
         "webhook_id": str(row["id"]),
