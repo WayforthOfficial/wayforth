@@ -146,15 +146,27 @@ async def _record_search(pool, q, results, session_id="", query_id="", user_id=N
                 is_return = prev > 0
 
             q = q.strip().lower()
+            top_slug = None
+            top_wri = None
+            if results:
+                ep = results[0].get("endpoint_url", "")
+                top_slug = "0x" + hashlib.sha256(ep.encode()).hexdigest() if ep else None
+                top_wri = int(compute_wri(results[0], results[0].get("score", 0)))
+
             await conn.execute("""
                 INSERT INTO search_analytics
-                (id, query, results, top_result_id, result_count, rank_scores, session_id, user_id, created_at)
-                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::uuid, NOW())
+                (id, query, results, top_result_id, result_count,
+                 top_result_slug, top_result_wri, results_count,
+                 rank_scores, session_id, user_id, created_at)
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::uuid, NOW())
             """,
                 query_id or str(uuid_lib.uuid4()),
                 q,
                 json_lib.dumps([{"id": str(r.get("service_id", "")), "score": r.get("score", 0)} for r in results[:10]]),
                 str(results[0].get("id", "")) if results else None,
+                len(results),
+                top_slug,
+                top_wri,
                 len(results),
                 json_lib.dumps({str(r.get("service_id", "")): r.get("score", 0) for r in results[:10]}),
                 session_id or None,
@@ -165,6 +177,23 @@ async def _record_search(pool, q, results, session_id="", query_id="", user_id=N
                 logger.info(f"Return session: {session_id[:8]}")
     except Exception as e:
         logger.warning(f"search analytics write failed: {e}")
+
+
+async def _update_search_signal(pool, user_id: str, clicked_slug: str):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE search_analytics
+                SET clicked_slug = $1, payment_followed = true
+                WHERE id = (
+                    SELECT id FROM search_analytics
+                    WHERE user_id = $2::uuid
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                )
+            """, clicked_slug, user_id)
+    except Exception as e:
+        logger.warning(f"search signal update failed: {e}")
 
 
 async def _record_payment(pool, service_id_hex: str, query_text=""):
@@ -2127,6 +2156,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     ))
+    asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), service_slug))
     if balance_after < 20:
         asyncio.create_task(_dispatch_webhooks(
             str(user_id), "credits.low", {
@@ -4713,7 +4743,7 @@ async def admin_users_list(
                k.usage_this_month, k.monthly_quota,
                k.subscription_status,
                uc.package_tier, uc.credits_balance, uc.lifetime_credits,
-               la.last_active
+               GREATEST(MAX(s.created_at), MAX(ct.created_at)) as last_active
         FROM users u
         LEFT JOIN LATERAL (
             SELECT tier, owner_email, key_prefix, usage_this_month, monthly_quota, subscription_status
@@ -4723,14 +4753,15 @@ async def admin_users_list(
             LIMIT 1
         ) k ON true
         LEFT JOIN user_credits uc ON uc.user_id = u.id
-        LEFT JOIN LATERAL (
-            SELECT MAX(created_at) as last_active
-            FROM search_analytics
-            WHERE user_id = u.id
-        ) la ON true
+        LEFT JOIN search_analytics s ON s.user_id = u.id
+        LEFT JOIN credit_transactions ct ON ct.user_id = u.id AND ct.type = 'execution'
         WHERE u.email NOT LIKE '%@wayforth.test'
           AND u.email NOT LIKE 'probe-%'
-        ORDER BY u.created_at DESC
+        GROUP BY u.id, u.email, u.created_at,
+                 k.tier, k.owner_email, k.key_prefix,
+                 k.usage_this_month, k.monthly_quota, k.subscription_status,
+                 uc.package_tier, uc.credits_balance, uc.lifetime_credits
+        ORDER BY last_active DESC NULLS LAST
         LIMIT $1 OFFSET $2
     """, limit, offset)
 
