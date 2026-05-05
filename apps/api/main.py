@@ -4514,6 +4514,11 @@ ADMIN_ROLES = {
 
 
 async def get_admin_session(request: Request, db):
+    # X-Admin-Key grants full ceo-level access without a JWT session
+    admin_key = request.headers.get("X-Admin-Key", "")
+    if admin_key and ADMIN_KEY and secrets.compare_digest(admin_key, ADMIN_KEY):
+        return {"role": "ceo", "email": "admin", "full_name": "Admin", "is_active": True}
+
     token = request.headers.get("X-Admin-Token", "")
     if not token:
         raise HTTPException(status_code=401, detail="Admin token required")
