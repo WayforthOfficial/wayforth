@@ -10,6 +10,8 @@ SERVICE_CONFIGS = {
     "serper":      {"key_var": "SERPER_API_KEY",      "credits": 1},
     "assemblyai":  {"key_var": "ASSEMBLYAI_API_KEY",  "credits": 5},
     "stability":   {"key_var": "STABILITY_API_KEY",   "credits": 10},
+    "tavily":      {"key_var": "TAVILY_API_KEY",      "credits": 3},
+    "jina":        {"key_var": "JINA_API_KEY",        "credits": 2},
 }
 
 
@@ -250,6 +252,60 @@ async def call_stability(params: dict, api_key: str) -> dict:
     }
 
 
+async def call_tavily(params: dict, api_key: str) -> dict:
+    query = params.get("query", "")
+    if not query:
+        raise Exception("params.query is required")
+    max_results = min(int(params.get("max_results", 5)), 10)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.post(
+            "https://api.tavily.com/search",
+            headers={"Content-Type": "application/json"},
+            json={
+                "api_key": api_key,
+                "query": query,
+                "search_depth": params.get("search_depth", "basic"),
+                "max_results": max_results,
+            },
+        )
+    if r.status_code != 200:
+        raise Exception(f"Tavily error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    results = [
+        {"title": item.get("title", ""), "url": item.get("url", ""), "content": item.get("content", "")}
+        for item in data.get("results", [])
+    ]
+    return {
+        "query": data.get("query", query),
+        "results": results,
+        "answer": data.get("answer"),
+    }
+
+
+async def call_jina(params: dict, api_key: str) -> dict:
+    url = params.get("url", "")
+    if not url:
+        raise Exception("params.url is required")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            f"https://r.jina.ai/{url}",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "X-Return-Format": "markdown",
+            },
+        )
+    if r.status_code != 200:
+        raise Exception(f"Jina error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    inner = data.get("data", {})
+    return {
+        "title": inner.get("title", ""),
+        "content": inner.get("content", ""),
+        "url": inner.get("url", url),
+    }
+
+
 ADAPTERS = {
     "groq":        call_groq,
     "deepl":       call_deepl,
@@ -259,4 +315,6 @@ ADAPTERS = {
     "serper":      call_serper,
     "assemblyai":  call_assemblyai,
     "stability":   call_stability,
+    "tavily":      call_tavily,
+    "jina":        call_jina,
 }
