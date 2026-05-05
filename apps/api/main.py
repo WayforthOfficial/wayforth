@@ -1347,9 +1347,9 @@ async def get_stats(request: Request, db=Depends(get_db)):
         "tier3_services": row["tier3"],
         "categories": row["categories"],
         "searches_7d": searches_7d,
-        "mcp_tools": 9,
+        "mcp_tools": 13,
         "api_version": "0.1.5",
-        "mcp_version": "0.1.8",
+        "mcp_version": "0.2.0",
     }
 
 
