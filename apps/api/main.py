@@ -1,6 +1,7 @@
 import asyncio
 import bcrypt
 import hashlib
+import hmac
 import json as json_lib
 import logging
 import os
@@ -1821,6 +1822,83 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
     return card_response
 
 
+# ── WEBHOOK DELIVERY ─────────────────────────────────────────────────────────
+#
+# Payload shapes by event:
+#
+#   execution.completed
+#     {"service_slug": str, "credits_used": int, "status": "ok", "timestamp": ISO8601}
+#
+#   credits.low  (fires when balance drops below 20)
+#     {"credits_remaining": int, "threshold": int, "timestamp": ISO8601}
+#
+#   tier.changed  (fires after admin or Stripe upgrades a user's tier)
+#     {"old_tier": str, "new_tier": str, "timestamp": ISO8601}
+#
+# Each request is signed:
+#   X-Wayforth-Signature: sha256=HMAC-SHA256(secret_token, "{timestamp}.{body}")
+# Verify on receipt: recompute the HMAC and compare to the header value.
+
+async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
+    """Find all active webhooks for this user subscribed to `event`, sign and POST each."""
+    import time as _time
+    pool = app.state.pool
+    if not pool:
+        return
+    try:
+        async with pool.acquire() as conn:
+            owner = await conn.fetchrow(
+                "SELECT owner_email FROM api_keys WHERE user_id=$1::uuid AND active=true LIMIT 1",
+                user_id,
+            )
+            if not owner:
+                return
+            rows = await conn.fetch(
+                "SELECT id, webhook_url, secret_token FROM provider_webhooks "
+                "WHERE contact_email=$1 AND active=true AND $2=ANY(events)",
+                owner["owner_email"], event,
+            )
+    except Exception as e:
+        logger.warning("_dispatch_webhooks db lookup failed: %s", e)
+        return
+
+    if not rows:
+        return
+
+    timestamp = str(int(_time.time()))
+    body = json_lib.dumps(payload)
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for row in rows:
+            sig = hmac.new(
+                row["secret_token"].encode(),
+                f"{timestamp}.{body}".encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            try:
+                resp = await client.post(
+                    row["webhook_url"],
+                    content=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Wayforth-Event": event,
+                        "X-Wayforth-Timestamp": timestamp,
+                        "X-Wayforth-Signature": f"sha256={sig}",
+                    },
+                )
+                logger.info("webhook %s → %s %d", event, row["webhook_url"], resp.status_code)
+            except Exception as e:
+                logger.warning("webhook delivery failed %s → %s: %s", event, row["webhook_url"], e)
+                continue
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE provider_webhooks SET last_fired_at=NOW() WHERE id=$1::uuid",
+                        row["id"],
+                    )
+            except Exception:
+                pass
+
+
 # ── BYOK KEY STORAGE ─────────────────────────────────────────────────────────
 
 async def _resolve_user(db, api_key: str):
@@ -2040,6 +2118,23 @@ async def execute_service(request: Request, db=Depends(get_db)):
             "credits_deducted": 0,
             "credits_remaining": refunded_balance,
         })
+
+    asyncio.create_task(_dispatch_webhooks(
+        str(user_id), "execution.completed", {
+            "service_slug": service_slug,
+            "credits_used": credit_cost,
+            "status": "ok",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    ))
+    if balance_after < 20:
+        asyncio.create_task(_dispatch_webhooks(
+            str(user_id), "credits.low", {
+                "credits_remaining": balance_after,
+                "threshold": 20,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        ))
 
     return {
         "status": "ok",
@@ -3015,20 +3110,31 @@ async def service_history(request: Request, service_id: str, days: int = Query(d
 
 @app.post("/webhooks/register")
 @limiter.limit("5/minute")
-async def register_webhook(request: Request, body: WebhookRegistration):
-    """Register a webhook to receive tier change or health alert events for a service."""
+async def register_webhook(request: Request, body: WebhookRegistration, db=Depends(get_db)):
+    """Register a webhook to receive events for your account."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
+    user_id = await _resolve_user(db, api_key)
+
     if not body.webhook_url.startswith("https://"):
         raise HTTPException(status_code=400, detail="webhook_url must use HTTPS")
+
+    # Lock contact_email to the authenticated user — callers cannot register webhooks for others
+    owner = await db.fetchrow(
+        "SELECT owner_email FROM api_keys WHERE user_id=$1::uuid AND active=true LIMIT 1", user_id
+    )
+    contact_email = owner["owner_email"] if owner else body.contact_email
+
     secret = secrets.token_hex(32)
-    async with app.state.pool.acquire() as conn:
-        wh_id = await conn.fetchval("""
-            INSERT INTO provider_webhooks
-            (service_id, webhook_url, contact_email, events, secret_token)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (service_id, webhook_url) DO UPDATE
-            SET active = TRUE, updated_at = NOW()
-            RETURNING id
-        """, body.service_id, body.webhook_url, body.contact_email, body.events, secret)
+    wh_id = await db.fetchval("""
+        INSERT INTO provider_webhooks
+        (service_id, webhook_url, contact_email, events, secret_token)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (service_id, webhook_url) DO UPDATE
+        SET active = TRUE, updated_at = NOW()
+        RETURNING id
+    """, body.service_id, body.webhook_url, contact_email, body.events, secret)
     return {
         "webhook_id": str(wh_id),
         "secret_token": secret,
@@ -4684,10 +4790,23 @@ async def admin_change_tier(request: Request, user_id: str, db=Depends(get_db)):
 
     QUOTAS = {'free': 1000, 'starter': 10000, 'pro': 100000, 'enterprise': -1}
 
+    old_key = await db.fetchrow(
+        "SELECT tier FROM api_keys WHERE user_id=$1::uuid AND active=true LIMIT 1", user_id
+    )
+    old_tier = old_key["tier"] if old_key else "free"
+
     await db.execute("""
         UPDATE api_keys SET tier = $1, monthly_quota = $2
         WHERE user_id = $3::uuid
     """, new_tier, QUOTAS[new_tier], user_id)
+
+    asyncio.create_task(_dispatch_webhooks(
+        user_id, "tier.changed", {
+            "old_tier": old_tier,
+            "new_tier": new_tier,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    ))
 
     return {"status": "updated", "tier": new_tier, "changed_by": session['email'], "reason": reason}
 
