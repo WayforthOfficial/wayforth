@@ -291,9 +291,8 @@ async def call_alphavantage(params: dict, api_key: str) -> dict:
         r = await client.get(
             "https://www.alphavantage.co/query",
             params={
-                "function": "TIME_SERIES_INTRADAY",
+                "function": "TIME_SERIES_DAILY",
                 "symbol": symbol,
-                "interval": params.get("interval", "5min"),
                 "apikey": api_key,
             },
         )
@@ -302,9 +301,9 @@ async def call_alphavantage(params: dict, api_key: str) -> dict:
     data = r.json()
     if "Error Message" in data:
         raise Exception(f"Alpha Vantage: {data['Error Message'][:200]}")
-    if "Note" in data:
-        raise Exception("Alpha Vantage: API call frequency limit reached")
-    ts_key = "Time Series (5min)"
+    if "Note" in data or "Information" in data:
+        raise Exception("Alpha Vantage: rate limit reached — free tier allows 25 requests/day")
+    ts_key = "Time Series (Daily)"
     if ts_key not in data:
         raise Exception(f"Alpha Vantage: unexpected response — {list(data.keys())}")
     latest_ts = sorted(data[ts_key].keys())[-1]
@@ -312,13 +311,13 @@ async def call_alphavantage(params: dict, api_key: str) -> dict:
     meta = data.get("Meta Data", {})
     return {
         "symbol": symbol,
-        "timestamp": latest_ts,
+        "date": latest_ts,
         "open": float(bar["1. open"]),
         "high": float(bar["2. high"]),
         "low": float(bar["3. low"]),
         "close": float(bar["4. close"]),
         "volume": int(bar["5. volume"]),
-        "timezone": meta.get("6. Time Zone", "US/Eastern"),
+        "timezone": meta.get("5. Time Zone", "US/Eastern"),
     }
 
 
