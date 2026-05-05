@@ -1536,9 +1536,17 @@ class Tier3Application(BaseModel):
 
 class WebhookRegistration(BaseModel):
     service_id: str | None = None
-    webhook_url: str
+    url: str = ""
+    webhook_url: str = ""
     contact_email: str = ""
     events: list[str] = ["tier_change", "health_alert"]
+
+    @property
+    def resolved_url(self) -> str:
+        resolved = self.url or self.webhook_url
+        if not resolved:
+            raise ValueError("url or webhook_url is required")
+        return resolved
 
 
 class AgentIdentityRequest(BaseModel):
@@ -3139,8 +3147,9 @@ async def register_webhook(request: Request, body: WebhookRegistration, db=Depen
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
     user_id = await _resolve_user(db, api_key)
 
-    if not body.webhook_url.startswith("https://"):
-        raise HTTPException(status_code=400, detail="webhook_url must use HTTPS")
+    webhook_url = body.resolved_url
+    if not webhook_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="url must use HTTPS")
 
     # Lock contact_email to the authenticated user — callers cannot register webhooks for others
     owner = await db.fetchrow(
@@ -3156,7 +3165,7 @@ async def register_webhook(request: Request, body: WebhookRegistration, db=Depen
         ON CONFLICT (service_id, webhook_url) DO UPDATE
         SET active = TRUE, secret_token = EXCLUDED.secret_token
         RETURNING id, webhook_url, events, active, created_at, last_fired_at
-    """, body.service_id or "*", body.webhook_url, contact_email, body.events, secret)
+    """, body.service_id or "*", webhook_url, contact_email, body.events, secret)
     return {
         "id": str(row["id"]),
         "webhook_id": str(row["id"]),
