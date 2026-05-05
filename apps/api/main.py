@@ -4828,20 +4828,46 @@ async def admin_change_tier(request: Request, user_id: str, db=Depends(get_db)):
     new_tier = body.get("tier")
     reason = body.get("reason", "Admin manual change")
 
-    if new_tier not in ['free', 'starter', 'pro', 'enterprise']:
-        raise HTTPException(status_code=400, detail="Invalid tier")
+    VALID_TIERS = ['free', 'starter', 'pro', 'growth', 'enterprise']
+    if new_tier not in VALID_TIERS:
+        raise HTTPException(status_code=400, detail=f"Invalid tier. Valid: {VALID_TIERS}")
 
-    QUOTAS = {'free': 1000, 'starter': 10000, 'pro': 100000, 'enterprise': -1}
+    QUOTAS   = {'free': 1000,  'starter': 10000,  'pro': 100000,   'growth': 500000,    'enterprise': -1}
+    CREDITS  = {'free': 100,   'starter': 50000,  'pro': 300000,   'growth': 1000000,   'enterprise': 5000000}
 
     old_key = await db.fetchrow(
         "SELECT tier FROM api_keys WHERE user_id=$1::uuid AND active=true LIMIT 1", user_id
     )
     old_tier = old_key["tier"] if old_key else "free"
 
-    await db.execute("""
-        UPDATE api_keys SET tier = $1, monthly_quota = $2
-        WHERE user_id = $3::uuid
-    """, new_tier, QUOTAS[new_tier], user_id)
+    new_credits = CREDITS[new_tier]
+
+    async with db.transaction():
+        await db.execute("""
+            UPDATE api_keys SET tier = $1, monthly_quota = $2
+            WHERE user_id = $3::uuid
+        """, new_tier, QUOTAS[new_tier], user_id)
+
+        existing = await db.fetchrow(
+            "SELECT user_id FROM user_credits WHERE user_id = $1::uuid", user_id
+        )
+        if existing:
+            await db.execute("""
+                UPDATE user_credits
+                SET credits_balance = $1, lifetime_credits = $1,
+                    package_tier = $2, updated_at = NOW()
+                WHERE user_id = $3::uuid
+            """, new_credits, new_tier, user_id)
+        else:
+            await db.execute("""
+                INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier)
+                VALUES ($1::uuid, $2, $2, $3)
+            """, user_id, new_credits, new_tier)
+
+        await db.execute("""
+            INSERT INTO credit_transactions (user_id, amount, balance_after, type, description)
+            VALUES ($1::uuid, $2, $2, 'tier_change', $3)
+        """, user_id, new_credits, f"Tier changed {old_tier} → {new_tier} by admin")
 
     asyncio.create_task(_dispatch_webhooks(
         user_id, "tier.changed", {
@@ -4851,7 +4877,13 @@ async def admin_change_tier(request: Request, user_id: str, db=Depends(get_db)):
         }
     ))
 
-    return {"status": "updated", "tier": new_tier, "changed_by": session['email'], "reason": reason}
+    return {
+        "status": "updated",
+        "tier": new_tier,
+        "credits_reset_to": new_credits,
+        "changed_by": session['email'],
+        "reason": reason,
+    }
 
 
 @app.post("/admin-api/users/{user_id}/reset-usage")
