@@ -488,6 +488,7 @@ async def health(request: Request, db=Depends(get_db)):
             "total": total,
             "tier2": tier2,
         },
+        "managed_services": len(SERVICE_CONFIGS),
     }
 
 
@@ -512,6 +513,7 @@ async def system_status(db=Depends(get_db)):
             "total": stats["total_services"],
             "tier2": stats["tier2_services"],
             "tier3": stats["tier3_services"],
+            "managed": len(SERVICE_CONFIGS),
         },
         "searches_24h": searches,
         "api": "operational",
@@ -2046,6 +2048,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
         "credits_deducted": credit_cost,
         "credits_remaining": balance_after,
         "execution_ms": execution_ms,
+        "managed_services_available": len(SERVICE_CONFIGS),
     }
 
 
