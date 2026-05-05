@@ -144,6 +144,7 @@ async def _record_search(pool, q, results, session_id="", query_id="", user_id=N
                 """, session_id)
                 is_return = prev > 0
 
+            q = q.strip().lower()
             await conn.execute("""
                 INSERT INTO search_analytics
                 (id, query, results, top_result_id, result_count, rank_scores, session_id, user_id, created_at)
@@ -658,6 +659,7 @@ async def search_services(
     db=Depends(get_db),
     auth: dict = Depends(check_auth),
 ):
+    q = q.strip().lower()
     if auth.get("authenticated") and auth.get("user_id"):
         success, balance = await check_and_deduct_credits(
             db, auth["user_id"], CREDIT_COSTS["search"], "/search"
