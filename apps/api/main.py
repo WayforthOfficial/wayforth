@@ -4256,6 +4256,7 @@ async def system_health(request: Request, db=Depends(get_db)):
         "openweather": "OPENWEATHER_API_KEY", "newsapi": "NEWSAPI_API_KEY",
         "resend": "RESEND_API_KEY", "serper": "SERPER_API_KEY",
         "assemblyai": "ASSEMBLYAI_API_KEY", "stability": "STABILITY_API_KEY",
+        "tavily": "TAVILY_API_KEY", "jina": "JINA_API_KEY",
     }
     configured = [s for s, v in managed_key_vars.items() if os.environ.get(v)]
     missing = [s for s, v in managed_key_vars.items() if not os.environ.get(v)]
