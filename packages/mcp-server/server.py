@@ -68,7 +68,7 @@ class ApiKeyMiddleware:
             await self.app(scope, receive, send)
 
 
-mcp = FastMCP("wayforth", host=_HOST, port=_PORT)
+mcp = FastMCP("wayforth", host=_HOST, port=_PORT, streamable_http_path="/")
 
 
 @mcp.custom_route("/health", methods=["GET"])
