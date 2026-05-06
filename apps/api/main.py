@@ -2914,12 +2914,12 @@ async def admin_revenue(request: Request, db=Depends(get_db)):
         "WHERE amount < 0 AND created_at > NOW() - INTERVAL '30 days'"
     ) or 0
 
-    # Active subscriptions from api_keys
+    # Real Stripe subscriptions only (stripe_subscription_id IS NOT NULL)
     active_subs = await db.fetchval(
-        "SELECT COUNT(*) FROM api_keys WHERE subscription_status = 'active'"
+        "SELECT COUNT(*) FROM api_keys WHERE subscription_status = 'active' AND stripe_subscription_id IS NOT NULL"
     ) or 0
     past_due_subs = await db.fetchval(
-        "SELECT COUNT(*) FROM api_keys WHERE subscription_status = 'past_due'"
+        "SELECT COUNT(*) FROM api_keys WHERE subscription_status = 'past_due' AND stripe_subscription_id IS NOT NULL"
     ) or 0
 
     # Estimated MRR from active subscriptions
