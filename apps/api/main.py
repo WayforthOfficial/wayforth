@@ -2953,8 +2953,9 @@ async def mcp_server_card():
         "repository": "https://github.com/WayforthOfficial/wayforth",
         "homepage": "https://wayforth.io",
         "license": "BSL-1.1",
-        "runtime": "uvx",
-        "command": "uvx wayforth-mcp",
+        "runtime": "http",
+        "url": "https://mcp.wayforth.io",
+        "transport": "streamable-http",
         "configSchema": {
             "type": "object",
             "properties": {
