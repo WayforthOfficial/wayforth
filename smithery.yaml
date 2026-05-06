@@ -5,14 +5,14 @@ startCommand:
     properties:
       WAYFORTH_API_KEY:
         type: string
-        description: "Your Wayforth API key — get one free at wayforth.io"
-    required:
-      - WAYFORTH_API_KEY
+        description: "Your Wayforth API key. Get one free at wayforth.io — 100 credits, no card required."
+        default: ""
+    required: []
   commandFunction: |-
     (config) => ({
       command: "uvx",
       args: ["wayforth-mcp"],
       env: {
-        WAYFORTH_API_KEY: config.WAYFORTH_API_KEY
+        WAYFORTH_API_KEY: config.WAYFORTH_API_KEY || ""
       }
     })
