@@ -1,3 +1,4 @@
+import contextvars
 import json
 import os
 import httpx
@@ -12,6 +13,45 @@ WAYFORTH_API_KEY = os.getenv("WAYFORTH_API_KEY", "")
 
 _PORT = int(os.getenv("PORT", "8080"))
 _HOST = os.getenv("HOST", "0.0.0.0")
+
+# Per-request API key extracted by ApiKeyMiddleware (HTTP transports only)
+_api_key_var: contextvars.ContextVar[str] = contextvars.ContextVar("wayforth_api_key")
+
+
+def _get_api_key() -> str:
+    """Return the API key for the current request, falling back to env var."""
+    try:
+        return _api_key_var.get()
+    except LookupError:
+        return WAYFORTH_API_KEY
+
+
+class ApiKeyMiddleware:
+    """ASGI middleware that extracts WAYFORTH_API_KEY from query params or headers."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            from urllib.parse import parse_qs
+            qs = parse_qs(scope.get("query_string", b"").decode())
+            headers = {k.lower(): v for k, v in scope.get("headers", [])}
+            key = (
+                qs.get("WAYFORTH_API_KEY", [None])[0]
+                or headers.get(b"authorization", b"").decode().removeprefix("Bearer ").strip()
+                or headers.get(b"x-api-key", b"").decode()
+                or headers.get(b"x-wayforth-api-key", b"").decode()
+                or WAYFORTH_API_KEY
+            )
+            token = _api_key_var.set(key)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                _api_key_var.reset(token)
+        else:
+            await self.app(scope, receive, send)
+
 
 mcp = FastMCP("wayforth", host=_HOST, port=_PORT)
 
@@ -244,7 +284,7 @@ async def wayforth_pay(
         track: Payment track — 'card' or 'crypto' (default: 'card')
         query_id: Optional query ID from wayforth_search for WayforthRank signal
     """
-    api_key = os.environ.get("WAYFORTH_API_KEY", "")
+    api_key = _get_api_key()
     if not api_key:
         return "Error: WAYFORTH_API_KEY not set. Get your free key at wayforth.io/dashboard"
 
@@ -546,7 +586,7 @@ async def wayforth_execute(service_slug: str, params: dict, key_source: str = "m
         params: Parameters for the service. Varies by service.
         key_source: Use Wayforth managed key ('managed', default) or your own BYOK key ('byok')
     """
-    api_key = os.environ.get("WAYFORTH_API_KEY", "")
+    api_key = _get_api_key()
     if not api_key:
         return "Error: WAYFORTH_API_KEY not set. Get your free key at wayforth.io/dashboard"
     try:
@@ -616,7 +656,7 @@ async def wayforth_query(
         sort_by: Sort order — 'wri' (default), 'price', 'tier'
         limit: Number of results (1-20, default 5)
     """
-    api_key = os.environ.get("WAYFORTH_API_KEY", "")
+    api_key = _get_api_key()
     if not api_key:
         return "Error: WAYFORTH_API_KEY not set. Get your free key at wayforth.io/dashboard"
     body: dict = {"query": query, "tier_min": tier_min, "limit": limit, "sort_by": sort_by}
@@ -668,7 +708,7 @@ async def wayforth_keys(
         api_key_value: The API key to encrypt and store (required for 'add')
         service_name: Human-readable label (optional for 'add', defaults to slug)
     """
-    wayforth_key = os.environ.get("WAYFORTH_API_KEY", "")
+    wayforth_key = _get_api_key()
     if not wayforth_key:
         return "Error: WAYFORTH_API_KEY not set. Get your free key at wayforth.io/dashboard"
     headers = {"X-Wayforth-API-Key": wayforth_key, "Content-Type": "application/json"}
@@ -853,7 +893,23 @@ def main():
             file=sys.stderr,
         )
 
-    mcp.run(transport=args.transport)
+    if args.transport in ("sse", "streamable-http"):
+        # Wrap the Starlette app with ApiKeyMiddleware so query-param keys work
+        import anyio
+        import uvicorn
+        if args.transport == "streamable-http":
+            starlette_app = mcp.streamable_http_app()
+        else:
+            starlette_app = mcp.sse_app()
+        config = uvicorn.Config(
+            ApiKeyMiddleware(starlette_app),
+            host=_HOST,
+            port=_PORT,
+            log_level="info",
+        )
+        anyio.run(uvicorn.Server(config).serve)
+    else:
+        mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":
