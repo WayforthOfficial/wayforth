@@ -6,6 +6,8 @@ import httpx
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 logger = logging.getLogger("wayforth-mcp")
 
@@ -68,7 +70,13 @@ class ApiKeyMiddleware:
             await self.app(scope, receive, send)
 
 
-mcp = FastMCP("wayforth", host=_HOST, port=_PORT, streamable_http_path="/")
+mcp = FastMCP(
+    "wayforth",
+    host=_HOST,
+    port=_PORT,
+    streamable_http_path="/",
+    instructions="Search 300+ verified APIs, pay via card or crypto, execute with managed keys. Get your API key at wayforth.io/signup.",
+)
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -84,6 +92,7 @@ async def server_card(request):
         "name": "wayforth",
         "version": "0.2.1",
         "description": "The search engine AI agents use to find and pay for APIs. 300+ verified APIs ranked by WayforthRank v2.",
+        "icon": "https://wayforth.io/favicon.png",
         "repository": "https://github.com/WayforthOfficial/wayforth",
         "homepage": "https://wayforth.io",
         "license": "BSL-1.1",
@@ -211,17 +220,16 @@ def _format_service(s: dict) -> str:
     )
 
 
-@mcp.tool()
-async def wayforth_search(query: str, limit: int = 5, tier_min: int = 2, category: str = None) -> str:
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+async def wayforth_search(
+    query: str = Field(description="Natural language description of the API service you need (e.g. 'translate text to Spanish', 'generate images')"),
+    limit: int = Field(default=5, description="Number of results to return (1–20)"),
+    tier_min: int = Field(default=2, description="Minimum coverage tier: 0=all, 1=tested, 2=verified (default), 3=premium"),
+    category: str = Field(default=None, description="Optional category filter: inference, data, translation, image, code, audio, embeddings"),
+) -> str:
     """Search the Wayforth catalog for agent-callable services.
     Returns services ranked by WayforthRank — combining semantic relevance,
     reliability history, and real agent usage signals.
-
-    Args:
-        query: Natural language description of what your agent needs
-        limit: Number of results (default 5, max 20)
-        tier_min: Minimum coverage tier (default 2 = verified only)
-        category: Optional filter (inference/data/translation/image/code/audio/embeddings)
     """
     params = {"q": query, "limit": min(limit, 20), "tier": tier_min}
     if category:
@@ -305,12 +313,12 @@ async def wayforth_search(query: str, limit: int = 5, tier_min: int = 2, categor
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 async def wayforth_pay(
-    service_id: str,
-    amount_usd: float,
-    track: str = "card",
-    query_id: str = None,
+    service_id: str = Field(description="Service ID from wayforth_search results (e.g. 'wayforth://deepl/...')"),
+    amount_usd: float = Field(description="Amount to pay in USD (e.g. 0.001)"),
+    track: str = Field(default="card", description="Payment track: 'card' (Stripe Treasury credits) or 'crypto' (Base USDC, non-custodial)"),
+    query_id: str = Field(default=None, description="Optional query ID from wayforth_search for conversion tracking"),
 ) -> str:
     """
     Pay for a service through Wayforth.
@@ -413,15 +421,13 @@ async def wayforth_pay(
 
 
 
-@mcp.tool()
-async def wayforth_list(category: str = None, tier_min: int = 2, limit: int = 10) -> str:
-    """Browse the Wayforth service catalog.
-
-    Args:
-        category: Filter by category (inference/data/translation/image/code/audio/embeddings)
-        tier_min: Minimum tier (default 2 = verified only)
-        limit: Results count (default 10)
-    """
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+async def wayforth_list(
+    category: str = Field(default=None, description="Filter by category: inference, data, translation, image, code, audio, embeddings"),
+    tier_min: int = Field(default=2, description="Minimum coverage tier: 0=all, 1=tested, 2=verified (default), 3=premium"),
+    limit: int = Field(default=10, description="Number of services to return (1–100)"),
+) -> str:
+    """Browse the Wayforth service catalog."""
     services = await _fetch_services(category=category, tier_min=tier_min, limit=limit)
     if services is None:
         return f"Wayforth API is not reachable at {API_BASE}."
@@ -435,7 +441,7 @@ async def wayforth_list(category: str = None, tier_min: int = 2, limit: int = 10
     return "\n\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 async def wayforth_stats() -> str:
     """Get current Wayforth catalog statistics."""
     try:
@@ -469,7 +475,7 @@ async def wayforth_stats() -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 async def wayforth_status() -> str:
     """Return API health and catalog statistics."""
     try:
@@ -502,16 +508,14 @@ async def wayforth_status() -> str:
     )
 
 
-@mcp.tool()
-async def wayforth_remember(service_id: str, service_name: str, note: str = "", agent_id: str = "") -> str:
-    """Save a service to agent memory for quick access later.
-
-    Args:
-        service_id: The service ID or wayforth:// identifier
-        service_name: Human-readable service name
-        note: Optional note about why you saved this service
-        agent_id: Agent identifier (wallet address or session ID) for cross-session persistence
-    """
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+async def wayforth_remember(
+    service_id: str = Field(description="Service ID or wayforth:// identifier from search results"),
+    service_name: str = Field(description="Human-readable name of the service to save"),
+    note: str = Field(default="", description="Optional note about why you saved this service"),
+    agent_id: str = Field(default="", description="Agent identifier (wallet address or session ID) for cross-session persistence"),
+) -> str:
+    """Save a service to agent memory for quick access later."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(
@@ -535,14 +539,12 @@ async def wayforth_remember(service_id: str, service_name: str, note: str = "", 
         return f"Saved '{service_name}' to local memory (API unavailable). You have {len(mem['services'])} saved service(s)."
 
 
-@mcp.tool()
-async def wayforth_recall(query: str = "", agent_id: str = "") -> str:
-    """Recall services previously saved to memory.
-
-    Args:
-        query: Optional filter — search saved services by name or note
-        agent_id: Agent identifier used when saving — required to retrieve cross-session memories
-    """
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+async def wayforth_recall(
+    query: str = Field(default="", description="Optional filter to search saved services by name or note"),
+    agent_id: str = Field(default="", description="Agent identifier used when saving — required for cross-session memory retrieval"),
+) -> str:
+    """Recall services previously saved to memory."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             params: dict = {}
@@ -571,14 +573,12 @@ async def wayforth_recall(query: str = "", agent_id: str = "") -> str:
         return f"Your saved services ({len(services)}) [local fallback]:\n" + "\n".join(lines)
 
 
-@mcp.tool()
-async def wayforth_similar(service_id: str) -> str:
-    """
-    Find services similar to or commonly used alongside a given service.
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+async def wayforth_similar(
+    service_id: str = Field(description="Service ID or wayforth:// identifier to find co-used services for"),
+) -> str:
+    """Find services similar to or commonly used alongside a given service.
     Returns co-usage patterns from real agent behavior.
-
-    Args:
-        service_id: The service ID or wayforth:// identifier to find similar services for
     """
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -600,14 +600,12 @@ async def wayforth_similar(service_id: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-async def wayforth_identity(agent_id: str) -> str:
-    """
-    Get or create your agent identity on Wayforth.
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+async def wayforth_identity(
+    agent_id: str = Field(description="Your unique agent identifier — wallet address or any stable session ID"),
+) -> str:
+    """Get or create your agent identity on Wayforth.
     Returns your trust score, reputation tier, and usage history.
-
-    Args:
-        agent_id: Your unique agent identifier (wallet address or any stable ID)
     """
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get(f"{API_BASE}/identity/{agent_id}")
@@ -627,16 +625,15 @@ async def wayforth_identity(agent_id: str) -> str:
         return f"New identity registered. Trust score: {d2['trust_score']}/100. Start searching to build reputation."
 
 
-@mcp.tool()
-async def wayforth_execute(service_slug: str, params: dict, key_source: str = "managed") -> str:
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+async def wayforth_execute(
+    service_slug: str = Field(description="Service to call: groq, deepl, openweather, newsapi, serper, resend, assemblyai, stability, tavily, jina, alphavantage — or any custom slug for BYOK"),
+    params: dict = Field(description="Service-specific parameters as a JSON object (e.g. {'text': 'Hello', 'target_lang': 'ES'} for DeepL)"),
+    key_source: str = Field(default="managed", description="Key source: 'managed' (use Wayforth's key, default) or 'byok' (use your stored key)"),
+) -> str:
     """Execute a real API call through Wayforth managed services or your own BYOK key.
     Returns real results — translation, inference, weather, search, email, audio, images.
     Credits deducted on success only.
-
-    Args:
-        service_slug: Service to call: groq, deepl, openweather, newsapi, serper, resend, assemblyai, stability, tavily, jina, alphavantage
-        params: Parameters for the service. Varies by service.
-        key_source: Use Wayforth managed key ('managed', default) or your own BYOK key ('byok')
     """
     api_key = _get_api_key()
     if not api_key:
@@ -685,28 +682,19 @@ async def wayforth_execute(service_slug: str, params: dict, key_source: str = "m
     return result_str + suggestions
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 async def wayforth_query(
-    query: str,
-    tier_min: int = 2,
-    category: str = None,
-    price_max: float = None,
-    protocol: str = None,
-    sort_by: str = "wri",
-    limit: int = 5,
+    query: str = Field(description="Natural language query describing the API you need (e.g. 'fast cheap translation', 'image generation under $0.01')"),
+    tier_min: int = Field(default=2, description="Minimum coverage tier: 0=all, 1=tested, 2=verified (default), 3=premium"),
+    category: str = Field(default=None, description="Filter by category: inference, translation, data, search, audio, image, etc."),
+    price_max: float = Field(default=None, description="Maximum price per API call in USD (e.g. 0.001 for $0.001/call)"),
+    protocol: str = Field(default=None, description="Payment protocol filter (e.g. 'x402' for HTTP 402 native services)"),
+    sort_by: str = Field(default="wri", description="Sort order: 'wri' (WayforthRank score, default), 'price' (cheapest first), 'tier' (highest tier first)"),
+    limit: int = Field(default=5, description="Number of results to return (1–20)"),
 ) -> str:
     """Structured service discovery using WayforthQL v1.
     More precise than wayforth_search — supports price caps, protocol filters, and explicit sort order.
     Use when you need deterministic filtering rather than pure semantic ranking.
-
-    Args:
-        query: Natural language query (e.g. 'fast cheap translation')
-        tier_min: Minimum coverage tier — 0=all, 1=tested, 2=verified (default), 3=premium
-        category: Filter by category (inference, translation, data, search, audio, image, etc.)
-        price_max: Maximum price per call in USD (e.g. 0.001)
-        protocol: Payment protocol filter (e.g. 'x402')
-        sort_by: Sort order — 'wri' (default), 'price', 'tier'
-        limit: Number of results (1-20, default 5)
     """
     api_key = _get_api_key()
     if not api_key:
@@ -743,22 +731,16 @@ async def wayforth_query(
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 async def wayforth_keys(
-    action: str,
-    service_slug: str = None,
-    api_key_value: str = None,
-    service_name: str = None,
+    action: str = Field(description="Action to perform: 'list' (show stored keys), 'add' (store a new key), or 'delete' (remove a key)"),
+    service_slug: str = Field(default=None, description="Service identifier slug (required for 'add'/'delete'), e.g. 'openai', 'anthropic', 'stripe'"),
+    api_key_value: str = Field(default=None, description="The API key to encrypt and store (required for action='add')"),
+    service_name: str = Field(default=None, description="Human-readable label for the service (optional for 'add', defaults to service_slug)"),
 ) -> str:
     """Manage BYOK (Bring Your Own Key) stored service keys.
     Store encrypted API keys for any service and call them via wayforth_execute with key_source='byok'.
     Keys are encrypted at rest with AES-128 and never returned in plaintext.
-
-    Args:
-        action: 'list' — show stored keys | 'add' — store a new key | 'delete' — remove a key
-        service_slug: Service identifier (required for 'add'/'delete', e.g. 'openai', 'anthropic')
-        api_key_value: The API key to encrypt and store (required for 'add')
-        service_name: Human-readable label (optional for 'add', defaults to slug)
     """
     wayforth_key = _get_api_key()
     if not wayforth_key:
@@ -817,7 +799,7 @@ async def wayforth_keys(
         return f"Wayforth API not reachable: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 async def wayforth_quickstart() -> str:
     """
     Get the Wayforth developer quickstart guide.
