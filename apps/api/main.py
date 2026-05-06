@@ -2948,22 +2948,27 @@ async def mcp_server_card():
     """Smithery discovery endpoint — skip auto-scan and advertise tools directly."""
     return {
         "name": "wayforth",
-        "description": "Search engine and payment rail for AI agents. 300 verified APIs, 11 managed services (Groq, DeepL, AssemblyAI, Stability AI, Tavily, Jina AI, Alpha Vantage, OpenWeather, NewsAPI, Serper, Resend). WayforthRank v2 payment-signal scoring. Install: uvx wayforth-mcp",
-        "icon": "https://wayforth.io/logo.png",
+        "version": "0.2.0",
+        "description": "The search engine AI agents use to find and pay for APIs. Search 300+ verified APIs ranked by WayforthRank v2.",
+        "repository": "https://github.com/WayforthOfficial/wayforth",
+        "homepage": "https://wayforth.io",
+        "license": "BSL-1.1",
+        "runtime": "uvx",
+        "command": "uvx wayforth-mcp",
         "configSchema": {
             "type": "object",
             "properties": {
                 "WAYFORTH_API_KEY": {
                     "type": "string",
-                    "description": "Your Wayforth API key (get free at wayforth.io/signup)",
+                    "description": "Your Wayforth API key — get one free at wayforth.io",
+                    "required": True,
                 }
             },
-            "required": ["WAYFORTH_API_KEY"],
         },
         "tools": [
-            {"name": "wayforth_search", "description": "Semantic search across 300 APIs ranked by WayforthRank v2 payment-signal scoring"},
-            {"name": "wayforth_query", "description": "WayforthQL structured discovery — tier/price/protocol filters, deterministic ranking"},
-            {"name": "wayforth_execute", "description": "Execute 11 managed services directly: groq, deepl, openweather, newsapi, serper, resend, assemblyai, stability, tavily, jina, alphavantage"},
+            {"name": "wayforth_search", "description": "Search 300+ verified APIs ranked by WayforthRank v2 payment signals"},
+            {"name": "wayforth_execute", "description": "Execute any managed service with zero API keys"},
+            {"name": "wayforth_query", "description": "WayforthQL structured query with filters"},
             {"name": "wayforth_pay", "description": "Pay for API services via card (Stripe Treasury) or crypto (Base USDC, non-custodial)"},
             {"name": "wayforth_keys", "description": "Manage BYOK encrypted service keys — store, list, delete"},
             {"name": "wayforth_list", "description": "Browse catalog with category and tier filters"},
