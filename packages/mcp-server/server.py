@@ -346,7 +346,7 @@ async def wayforth_pay(
     """
     api_key = _get_api_key()
     if not api_key:
-        return "Error: WAYFORTH_API_KEY not set. Get your free key at wayforth.io/dashboard"
+        return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
@@ -637,7 +637,7 @@ async def wayforth_execute(
     """
     api_key = _get_api_key()
     if not api_key:
-        return "Error: WAYFORTH_API_KEY not set. Get your free key at wayforth.io/dashboard"
+        return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.post(
@@ -698,7 +698,7 @@ async def wayforth_query(
     """
     api_key = _get_api_key()
     if not api_key:
-        return "Error: WAYFORTH_API_KEY not set. Get your free key at wayforth.io/dashboard"
+        return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
     body: dict = {"query": query, "tier_min": tier_min, "limit": limit, "sort_by": sort_by}
     if category:
         body["category"] = category
@@ -744,7 +744,7 @@ async def wayforth_keys(
     """
     wayforth_key = _get_api_key()
     if not wayforth_key:
-        return "Error: WAYFORTH_API_KEY not set. Get your free key at wayforth.io/dashboard"
+        return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
     headers = {"X-Wayforth-API-Key": wayforth_key, "Content-Type": "application/json"}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
