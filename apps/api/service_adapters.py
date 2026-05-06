@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import httpx
 
 SERVICE_CONFIGS = {
@@ -13,6 +14,7 @@ SERVICE_CONFIGS = {
     "tavily":       {"key_var": "TAVILY_API_KEY",       "credits": 3},
     "jina":         {"key_var": "JINA_API_KEY",         "credits": 2},
     "alphavantage": {"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 2},
+    "elevenlabs":   {"key_var": "ELEVENLABS_API_KEY",   "credits": 5},
 }
 
 
@@ -346,6 +348,39 @@ async def call_jina(params: dict, api_key: str) -> dict:
     }
 
 
+async def call_elevenlabs(params: dict, api_key: str) -> dict:
+    text = params.get("text", "")
+    if not text:
+        raise Exception("params.text is required")
+    voice_id = params.get("voice_id", "21m00Tcm4TlvDq8ikWAM")  # default: Rachel
+    model_id = params.get("model_id", "eleven_multilingual_v2")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            headers={
+                "xi-api-key": api_key,
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg",
+            },
+            json={
+                "text": text,
+                "model_id": model_id,
+                "voice_settings": {
+                    "stability": float(params.get("stability", 0.5)),
+                    "similarity_boost": float(params.get("similarity_boost", 0.75)),
+                },
+            },
+        )
+    if r.status_code != 200:
+        raise Exception(f"ElevenLabs error {r.status_code}: {r.text[:200]}")
+    return {
+        "audio_base64": base64.b64encode(r.content).decode(),
+        "content_type": "audio/mpeg",
+        "voice_id": voice_id,
+        "characters": len(text),
+    }
+
+
 ADAPTERS = {
     "groq":        call_groq,
     "deepl":       call_deepl,
@@ -358,4 +393,5 @@ ADAPTERS = {
     "tavily":       call_tavily,
     "jina":         call_jina,
     "alphavantage": call_alphavantage,
+    "elevenlabs":   call_elevenlabs,
 }

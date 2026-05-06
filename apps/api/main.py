@@ -36,7 +36,7 @@ STRIPE_MOCK = (
     or not os.environ.get("STRIPE_SECRET_KEY", "")
 )
 
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 
 
 def get_fernet():
@@ -93,9 +93,9 @@ def verify_supabase_jwt(token: str) -> dict:
 ROUTING_FEE = 0.015  # 1.5% flat, all tiers
 
 STRIPE_PACKAGES = {
-    "starter": {"price_cents": 1900,  "credits": 50000,   "label": "Starter Pack"},
-    "pro":     {"price_cents": 9900,  "credits": 300000,  "label": "Pro Pack"},
-    "growth":  {"price_cents": 29900, "credits": 1000000, "label": "Growth Pack"},
+    "starter": {"price_cents": 1900,  "credits": 50000,   "label": "Starter Pack",  "price_id": os.environ.get("STRIPE_PRICE_STARTER", "")},
+    "pro":     {"price_cents": 9900,  "credits": 300000,  "label": "Pro Pack",       "price_id": os.environ.get("STRIPE_PRICE_PRO", "")},
+    "growth":  {"price_cents": 29900, "credits": 1000000, "label": "Growth Pack",    "price_id": os.environ.get("STRIPE_PRICE_GROWTH", "")},
 }
 
 from db import check_db
@@ -575,7 +575,7 @@ async def system_status(db=Depends(get_db)):
         },
         "searches_24h": searches,
         "mcp_tools": 13,
-        "pypi_version": "0.2.2",
+        "pypi_version": "0.2.3",
         "api": "operational",
         "database": "operational",
         "payment_rail": {
@@ -1079,6 +1079,10 @@ class WayforthQLQuery(BaseModel):
     sort_by: str | None = "wri"       # 'wri' | 'score' | 'price' | 'tier'
     limit: int | None = 5
     with_similar: bool | None = False  # include similar services for top result
+    x402_only: bool = False            # only x402-native services
+    provider: str | None = None        # filter by provider name substring
+    verified_only: bool = False        # only tier-2+ verified services
+    offset: int = 0                    # pagination offset
 
 
 @app.post("/query")
@@ -1120,9 +1124,22 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         params.append(body.protocol)
         idx += 1
 
-    where = " AND ".join(conditions)
-    limit = min(body.limit or 5, 20)
+    if body.x402_only:
+        conditions.append("x402_supported = true")
 
+    if body.verified_only:
+        conditions.append("coverage_tier >= 2")
+
+    if body.provider:
+        conditions.append(f"LOWER(name) LIKE ${idx}")
+        params.append(f"%{body.provider.lower()}%")
+        idx += 1
+
+    where = " AND ".join(conditions)
+    limit = min(body.limit or 5, 50)
+    offset = max(body.offset or 0, 0)
+
+    fetch_n = (offset + limit) * 4
     try:
         async with request.app.state.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -1133,7 +1150,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
                 FROM services
                 WHERE {where}
                 ORDER BY coverage_tier DESC
-                LIMIT {limit * 4}
+                LIMIT {fetch_n}
                 """,
                 *params,
             )
@@ -1142,7 +1159,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     if not rows:
-        return {"query": body.query, "results": [], "total": 0, "protocol": "WayforthQL/1.0"}
+        return {"query": body.query, "results": [], "total": 0, "protocol": "WayforthQL/2.0"}
 
     candidates = [dict(r) for r in rows]
     ranked = await rank_services(body.query, candidates)
@@ -1156,12 +1173,12 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
     # Exclude specific service IDs
     if body.exclude_ids:
         exclude_set = set(body.exclude_ids)
-        results_raw = [
-            s for s in ranked[:limit * 2]
+        ranked = [
+            s for s in ranked
             if ("0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest()) not in exclude_set
-        ][:limit]
-    else:
-        results_raw = ranked[:limit]
+        ]
+
+    results_raw = ranked[offset:offset + limit]
 
     results = []
     for s in results_raw:
@@ -1238,7 +1255,8 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         "query": body.query,
         "results": results,
         "total": len(results),
-        "protocol": "WayforthQL/1.0",
+        "offset": offset,
+        "protocol": "WayforthQL/2.0",
         "filters_applied": {
             "tier_min": body.tier_min,
             "price_max": body.price_max,
@@ -1246,6 +1264,9 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
             "protocol": body.protocol,
             "sort_by": body.sort_by,
             "exclude_ids": body.exclude_ids or [],
+            "x402_only": body.x402_only,
+            "verified_only": body.verified_only,
+            "provider": body.provider,
         },
     }
     if not auth["authenticated"]:
@@ -1407,7 +1428,7 @@ async def get_stats(request: Request, db=Depends(get_db)):
         "searches_7d": searches_7d,
         "mcp_tools": 13,
         "api_version": VERSION,
-        "mcp_version": "0.2.2",
+        "mcp_version": "0.2.3",
     }
 
 
@@ -2854,6 +2875,214 @@ async def rank_recalculate(request: Request, db=Depends(get_db)):
     return {"updated": len(results), "scores": results, "unmatched_slugs": unmatched}
 
 
+@app.get("/admin/revenue", tags=["Admin"])
+@limiter.limit("20/minute")
+async def admin_revenue(request: Request, db=Depends(get_db)):
+    """Revenue summary: credits sold, MRR, top users by spend."""
+    provided_key = request.headers.get("X-Admin-Key", "") or request.query_params.get("key", "")
+    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    total_credits_sold = await db.fetchval(
+        "SELECT COALESCE(SUM(credits_total), 0) FROM package_purchases WHERE payment_status = 'completed'"
+    ) or 0
+    total_revenue_usd = await db.fetchval(
+        "SELECT COALESCE(SUM(amount_usd), 0) FROM package_purchases WHERE payment_status = 'completed'"
+    ) or 0.0
+
+    credits_used_30d = await db.fetchval(
+        "SELECT COALESCE(SUM(ABS(amount)), 0) FROM credit_transactions "
+        "WHERE amount < 0 AND created_at > NOW() - INTERVAL '30 days'"
+    ) or 0
+
+    # Active subscriptions from api_keys
+    active_subs = await db.fetchval(
+        "SELECT COUNT(*) FROM api_keys WHERE subscription_status = 'active'"
+    ) or 0
+    past_due_subs = await db.fetchval(
+        "SELECT COUNT(*) FROM api_keys WHERE subscription_status = 'past_due'"
+    ) or 0
+
+    # Estimated MRR from active subscriptions
+    sub_rows = await db.fetch(
+        "SELECT stripe_subscription_id FROM api_keys WHERE subscription_status = 'active' AND stripe_subscription_id IS NOT NULL"
+    )
+    # Infer MRR from package_purchases if subscription data not in Stripe
+    mrr_30d = await db.fetchval(
+        "SELECT COALESCE(SUM(amount_usd), 0) FROM package_purchases "
+        "WHERE payment_status = 'completed' AND created_at > NOW() - INTERVAL '30 days'"
+    ) or 0.0
+
+    top_users = await db.fetch("""
+        SELECT u.email, COALESCE(SUM(pp.amount_usd), 0) AS total_spent,
+               COUNT(pp.id) AS purchases
+        FROM package_purchases pp
+        JOIN users u ON u.id = pp.user_id
+        WHERE pp.payment_status = 'completed'
+        GROUP BY u.email
+        ORDER BY total_spent DESC
+        LIMIT 10
+    """)
+
+    purchases_by_package = await db.fetch("""
+        SELECT package_name, COUNT(*) AS count,
+               SUM(credits_total) AS credits, SUM(amount_usd) AS revenue
+        FROM package_purchases
+        WHERE payment_status = 'completed'
+        GROUP BY package_name
+        ORDER BY revenue DESC
+    """)
+
+    return {
+        "total_credits_sold": int(total_credits_sold),
+        "total_revenue_usd": round(float(total_revenue_usd), 2),
+        "credits_used_30d": int(credits_used_30d),
+        "mrr_30d_usd": round(float(mrr_30d), 2),
+        "active_subscriptions": int(active_subs),
+        "past_due_subscriptions": int(past_due_subs),
+        "top_users": [
+            {"email": r["email"], "total_spent_usd": round(float(r["total_spent"]), 2), "purchases": r["purchases"]}
+            for r in top_users
+        ],
+        "by_package": [
+            {
+                "package": r["package_name"],
+                "count": r["count"],
+                "credits_sold": int(r["credits"] or 0),
+                "revenue_usd": round(float(r["revenue"] or 0), 2),
+            }
+            for r in purchases_by_package
+        ],
+    }
+
+
+@app.get("/admin/signals", tags=["Admin"])
+@limiter.limit("20/minute")
+async def admin_signals(request: Request, db=Depends(get_db)):
+    """Search signal analytics: per-service conversion rates and WRI v2 scores."""
+    provided_key = request.headers.get("X-Admin-Key", "") or request.query_params.get("key", "")
+    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    total_searches = await db.fetchval("SELECT COUNT(*) FROM search_analytics") or 0
+    total_clicks = await db.fetchval(
+        "SELECT COUNT(*) FROM search_analytics WHERE clicked_slug IS NOT NULL"
+    ) or 0
+    total_payments = await db.fetchval(
+        "SELECT COUNT(*) FROM search_analytics WHERE payment_followed = true"
+    ) or 0
+
+    per_service = await db.fetch("""
+        SELECT
+            clicked_slug,
+            COUNT(*) AS clicks,
+            SUM(CASE WHEN payment_followed THEN 1 ELSE 0 END) AS payments,
+            ROUND(
+                SUM(CASE WHEN payment_followed THEN 1 ELSE 0 END)::numeric
+                / NULLIF(COUNT(*), 0) * 100, 1
+            ) AS conversion_pct,
+            MAX(created_at) AS last_seen
+        FROM search_analytics
+        WHERE clicked_slug IS NOT NULL
+        GROUP BY clicked_slug
+        ORDER BY payments DESC
+        LIMIT 50
+    """)
+
+    # Enrich with stored WRI v2 scores
+    enriched = []
+    for row in per_service:
+        slug = row["clicked_slug"]
+        svc = await db.fetchrow(
+            "SELECT wri_score, wri_version FROM services "
+            "WHERE LOWER(name) = $1 OR LOWER(REPLACE(name, ' ', '_')) = $1 LIMIT 1",
+            slug.lower()
+        )
+        enriched.append({
+            "service": slug,
+            "clicks": row["clicks"],
+            "payments": row["payments"],
+            "conversion_pct": float(row["conversion_pct"] or 0),
+            "last_seen": row["last_seen"].isoformat() if row["last_seen"] else None,
+            "wri_v2": round(float(svc["wri_score"]), 1) if svc and svc["wri_score"] is not None else None,
+            "wri_version": svc["wri_version"] if svc else None,
+        })
+
+    global_conversion = round(total_payments * 100.0 / max(total_clicks, 1), 2)
+
+    return {
+        "total_searches": int(total_searches),
+        "total_clicks": int(total_clicks),
+        "total_payment_conversions": int(total_payments),
+        "global_conversion_pct": global_conversion,
+        "per_service": enriched,
+    }
+
+
+@app.get("/admin/api-health", tags=["Admin"])
+@limiter.limit("20/minute")
+async def admin_api_health(request: Request, db=Depends(get_db)):
+    """Managed service health: last tested, success rate, avg response time."""
+    provided_key = request.headers.get("X-Admin-Key", "") or request.query_params.get("key", "")
+    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    # Execution stats per managed service from credit_transactions
+    exec_rows = await db.fetch("""
+        SELECT
+            service_id,
+            COUNT(*) AS total_calls,
+            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') AS calls_7d,
+            MIN(created_at) AS first_call,
+            MAX(created_at) AS last_call
+        FROM credit_transactions
+        WHERE type = 'execution' AND service_id IS NOT NULL
+        GROUP BY service_id
+        ORDER BY calls_7d DESC
+    """)
+
+    # Service catalog health
+    catalog_rows = await db.fetch("""
+        SELECT name, last_tested_at, consecutive_failures, coverage_tier, x402_supported
+        FROM services
+        WHERE name ILIKE ANY(ARRAY[
+            '%groq%','%deepl%','%openweather%','%newsapi%',
+            '%resend%','%serper%','%assemblyai%','%stability%',
+            '%tavily%','%jina%','%alphavantage%','%elevenlabs%'
+        ])
+        ORDER BY name
+    """)
+
+    managed_slugs = list(SERVICE_CONFIGS.keys())
+    health_map = {slug: {"slug": slug, "configured": bool(os.environ.get(SERVICE_CONFIGS[slug]["key_var"]))} for slug in managed_slugs}
+
+    for row in exec_rows:
+        slug = (row["service_id"] or "").lower()
+        if slug in health_map:
+            health_map[slug].update({
+                "total_calls": row["total_calls"],
+                "calls_7d": row["calls_7d"],
+                "first_call": row["first_call"].isoformat() if row["first_call"] else None,
+                "last_call": row["last_call"].isoformat() if row["last_call"] else None,
+            })
+
+    for row in catalog_rows:
+        name_lower = row["name"].lower().replace(" ", "").replace("-", "")
+        for slug in managed_slugs:
+            if slug.replace("_", "") in name_lower or name_lower.startswith(slug):
+                health_map[slug].update({
+                    "last_tested_at": row["last_tested_at"].isoformat() if row["last_tested_at"] else None,
+                    "consecutive_failures": row["consecutive_failures"],
+                    "coverage_tier": row["coverage_tier"],
+                })
+                break
+
+    return {
+        "managed_services": len(managed_slugs),
+        "services": list(health_map.values()),
+    }
+
+
 @app.post("/admin/catalog/probe", tags=["Admin"])
 async def catalog_probe(request: Request, db=Depends(get_db)):
     """Probe real service endpoints in a category and update tier/health."""
@@ -2948,7 +3177,7 @@ async def mcp_server_card():
     """Smithery discovery endpoint — skip auto-scan and advertise tools directly."""
     return {
         "name": "wayforth",
-        "version": "0.2.2",
+        "version": "0.2.3",
         "description": "The search engine AI agents use to find and pay for APIs. Search 300+ verified APIs ranked by WayforthRank v2.",
         "repository": "https://github.com/WayforthOfficial/wayforth",
         "homepage": "https://wayforth.io",
@@ -2990,7 +3219,7 @@ async def mcp_manifest():
     return {
         "schema_version": "v1",
         "name": "wayforth",
-        "version": "0.2.2",
+        "version": "0.2.3",
         "description": "Search engine and payment rail for AI agents. 300 verified APIs, 11 managed services, WayforthRank v2.",
         "homepage": "https://wayforth.io",
         "icon": "https://wayforth.io/logo.png",
@@ -4765,30 +4994,54 @@ async def create_checkout(request: Request, db=Depends(get_db)):
             "note": "Stripe not configured. Credits added automatically in mock mode.",
         }
 
+    use_subscription = bool(pkg.get("price_id")) and not STRIPE_MOCK
+
     try:
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=[{
-                "price_data": {
-                    "currency": "usd",
-                    "unit_amount": pkg["price_cents"],
-                    "product_data": {
-                        "name": f"Wayforth {pkg['label']}",
-                        "description": f"{pkg['credits']:,} credits · 1 credit = $0.001",
-                    },
+        if use_subscription:
+            session = stripe.checkout.Session.create(
+                payment_method_types=["card"],
+                line_items=[{"price": pkg["price_id"], "quantity": 1}],
+                mode="subscription",
+                success_url="https://wayforth.io/dashboard?purchase=success&package=" + package,
+                cancel_url="https://wayforth.io/dashboard?purchase=cancelled",
+                customer_email=key_record['email'],
+                subscription_data={
+                    "metadata": {
+                        "user_id": str(key_record['user_id']),
+                        "package": package,
+                        "credits": str(pkg["credits"]),
+                    }
                 },
-                "quantity": 1,
-            }],
-            mode="payment",
-            success_url="https://wayforth.io/dashboard?purchase=success&package=" + package,
-            cancel_url="https://wayforth.io/dashboard?purchase=cancelled",
-            customer_email=key_record['email'],
-            metadata={
-                "user_id": str(key_record['user_id']),
-                "package": package,
-                "credits": str(pkg["credits"]),
-            }
-        )
+                metadata={
+                    "user_id": str(key_record['user_id']),
+                    "package": package,
+                    "credits": str(pkg["credits"]),
+                },
+            )
+        else:
+            session = stripe.checkout.Session.create(
+                payment_method_types=["card"],
+                line_items=[{
+                    "price_data": {
+                        "currency": "usd",
+                        "unit_amount": pkg["price_cents"],
+                        "product_data": {
+                            "name": f"Wayforth {pkg['label']}",
+                            "description": f"{pkg['credits']:,} credits · 1 credit = $0.001",
+                        },
+                    },
+                    "quantity": 1,
+                }],
+                mode="payment",
+                success_url="https://wayforth.io/dashboard?purchase=success&package=" + package,
+                cancel_url="https://wayforth.io/dashboard?purchase=cancelled",
+                customer_email=key_record['email'],
+                metadata={
+                    "user_id": str(key_record['user_id']),
+                    "package": package,
+                    "credits": str(pkg["credits"]),
+                },
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Stripe error: {str(e)}")
 
@@ -4806,6 +5059,7 @@ async def create_checkout(request: Request, db=Depends(get_db)):
         "package": package,
         "credits": pkg["credits"],
         "price_usd": pkg["price_cents"] / 100,
+        "billing_mode": "subscription" if use_subscription else "one_time",
     }
 
 
@@ -4959,7 +5213,105 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
             """, user_id, credits, new_balance,
                 f"Stripe purchase: {package} pack — {credits:,} credits added")
 
+        # Store subscription_id on the api_key if this was a subscription checkout
+        sub_id = session.get("subscription")
+        if sub_id:
+            await db.execute("""
+                UPDATE api_keys
+                SET stripe_subscription_id = $1, subscription_status = 'active'
+                WHERE user_id = $2::uuid
+            """, sub_id, user_id)
+
         return {"status": "credited", "credits_added": credits, "new_balance": new_balance}
+
+    elif event["type"] == "invoice.payment_succeeded":
+        invoice = event["data"]["object"]
+        sub_id = invoice.get("subscription")
+        if not sub_id:
+            return {"status": "no_subscription"}
+
+        key_row = await db.fetchrow(
+            "SELECT user_id FROM api_keys WHERE stripe_subscription_id = $1",
+            sub_id
+        )
+        if not key_row:
+            return {"status": "unknown_subscription"}
+        user_id = str(key_row["user_id"])
+
+        # Determine package from subscription metadata
+        try:
+            sub = stripe.Subscription.retrieve(sub_id)
+            meta = sub.get("metadata", {})
+            package = meta.get("package", "")
+            credits = int(meta.get("credits", 0))
+        except Exception:
+            package, credits = "", 0
+
+        if not credits:
+            # Infer from amount
+            amount_paid = invoice.get("amount_paid", 0)
+            for pkg_name, pkg_data in STRIPE_PACKAGES.items():
+                if pkg_data["price_cents"] == amount_paid:
+                    package = pkg_name
+                    credits = pkg_data["credits"]
+                    break
+
+        if credits:
+            async with db.transaction():
+                existing = await db.fetchrow(
+                    "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
+                    user_id
+                )
+                if existing:
+                    new_balance = existing["credits_balance"] + credits
+                    await db.execute("""
+                        UPDATE user_credits
+                        SET credits_balance = $1, lifetime_credits = lifetime_credits + $2,
+                            package_tier = $3, payment_method = 'card', updated_at = NOW()
+                        WHERE user_id = $4::uuid
+                    """, new_balance, credits, package, user_id)
+                else:
+                    new_balance = credits
+                    await db.execute("""
+                        INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier, payment_method)
+                        VALUES ($1::uuid, $2, $2, $3, 'card')
+                    """, user_id, credits, package)
+                await db.execute("""
+                    INSERT INTO credit_transactions (user_id, amount, balance_after, type, description)
+                    VALUES ($1::uuid, $2, $3, 'subscription_renewal', $4)
+                """, user_id, credits, new_balance,
+                    f"Monthly renewal: {package} — {credits:,} credits")
+
+            await db.execute(
+                "UPDATE api_keys SET subscription_status = 'active' WHERE stripe_subscription_id = $1",
+                sub_id
+            )
+        return {"status": "renewed", "credits_added": credits}
+
+    elif event["type"] == "customer.subscription.deleted":
+        sub = event["data"]["object"]
+        sub_id = sub.get("id")
+        if not sub_id:
+            return {"status": "no_id"}
+        await db.execute("""
+            UPDATE api_keys
+            SET stripe_subscription_id = NULL, subscription_status = 'cancelled'
+            WHERE stripe_subscription_id = $1
+        """, sub_id)
+        return {"status": "subscription_cancelled"}
+
+    elif event["type"] == "invoice.payment_failed":
+        invoice = event["data"]["object"]
+        sub_id = invoice.get("subscription")
+        if not sub_id:
+            return {"status": "no_subscription"}
+        # Mark grace period — subscription still active but payment failed
+        await db.execute("""
+            UPDATE api_keys
+            SET subscription_status = 'past_due'
+            WHERE stripe_subscription_id = $1
+        """, sub_id)
+        return {"status": "payment_failed_grace_period"}
 
     return {"status": "ignored"}
 
