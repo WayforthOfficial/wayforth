@@ -2706,6 +2706,101 @@ async def rank_recalculate(request: Request, db=Depends(get_db)):
     return {"updated": len(results), "scores": results}
 
 
+@app.post("/admin/catalog/probe", tags=["Admin"])
+async def catalog_probe(request: Request, db=Depends(get_db)):
+    """Probe real service endpoints in a category and update tier/health."""
+    provided_key = request.headers.get("X-Admin-Key", "")
+    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    category = body.get("category", "audio")
+
+    # 1. Deactivate glama/github entries in this category
+    deactivated_rows = await db.fetch("""
+        UPDATE services
+        SET consecutive_failures = 10, last_tested_at = NOW()
+        WHERE category = $1
+          AND (endpoint_url LIKE '%glama.ai%' OR endpoint_url LIKE '%github.com%')
+          AND consecutive_failures < 10
+        RETURNING name, endpoint_url
+    """, category)
+    deactivated = [{"name": r["name"], "endpoint_url": r["endpoint_url"]} for r in deactivated_rows]
+
+    # 2. Fetch real candidates (tier < 2, healthy, no glama/github)
+    candidates = await db.fetch("""
+        SELECT id, name, endpoint_url, coverage_tier, consecutive_failures
+        FROM services
+        WHERE category = $1
+          AND coverage_tier < 2
+          AND consecutive_failures < 3
+          AND endpoint_url NOT LIKE '%glama.ai%'
+          AND endpoint_url NOT LIKE '%github.com%'
+        ORDER BY name
+    """, category)
+
+    # 3. Probe each endpoint
+    results = []
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True,
+                                  headers={"User-Agent": "WayforthCrawler/1.0"}) as client:
+        for svc in candidates:
+            sid = str(svc["id"])
+            url = svc["endpoint_url"]
+            name = svc["name"]
+            old_tier = svc["coverage_tier"]
+            status_code = None
+            outcome = None
+
+            try:
+                r = await client.get(url)
+                status_code = r.status_code
+                if status_code in (200, 401, 403):
+                    outcome = "tier2"
+                    await db.execute("""
+                        UPDATE services
+                        SET coverage_tier = 2, consecutive_failures = 0, last_tested_at = NOW()
+                        WHERE id = $1::uuid
+                    """, sid)
+                else:
+                    outcome = "fail"
+                    await db.execute("""
+                        UPDATE services
+                        SET consecutive_failures = consecutive_failures + 1, last_tested_at = NOW()
+                        WHERE id = $1::uuid
+                    """, sid)
+            except Exception:
+                status_code = 0
+                outcome = "timeout"
+                await db.execute("""
+                    UPDATE services
+                    SET consecutive_failures = consecutive_failures + 1, last_tested_at = NOW()
+                    WHERE id = $1::uuid
+                """, sid)
+
+            results.append({
+                "name": name,
+                "endpoint_url": url,
+                "status_code": status_code,
+                "outcome": outcome,
+                "old_tier": old_tier,
+                "new_tier": 2 if outcome == "tier2" else old_tier,
+            })
+            logger.info(f"probe [{category}] {name}: {status_code} → {outcome}")
+
+    promoted = sum(1 for r in results if r["outcome"] == "tier2")
+    failed = sum(1 for r in results if r["outcome"] in ("fail", "timeout"))
+
+    return {
+        "category": category,
+        "probed": len(results),
+        "promoted_to_tier2": promoted,
+        "failed": failed,
+        "deactivated_junk": len(deactivated),
+        "deactivated": deactivated,
+        "results": results,
+    }
+
+
 @app.get("/demo")
 async def demo():
     return FileResponse("static/demo.html")
