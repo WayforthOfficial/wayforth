@@ -15,6 +15,13 @@ _HOST = os.getenv("HOST", "0.0.0.0")
 
 mcp = FastMCP("wayforth", host=_HOST, port=_PORT)
 
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "ok", "service": "wayforth-mcp"})
+
+
 TIER_LABELS = {0: "free", 1: "basic", 2: "standard", 3: "premium"}
 
 MEMORY_FILE = os.path.expanduser("~/.wayforth_memory.json")
