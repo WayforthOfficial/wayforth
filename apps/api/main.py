@@ -188,6 +188,8 @@ async def _update_search_signal(pool, user_id: str, clicked_slug: str):
                 WHERE id = (
                     SELECT id FROM search_analytics
                     WHERE user_id = $2::uuid
+                      AND payment_followed = false
+                      AND created_at > NOW() - INTERVAL '30 minutes'
                     ORDER BY created_at DESC
                     LIMIT 1
                 )
