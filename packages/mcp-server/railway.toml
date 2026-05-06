@@ -1,0 +1,8 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "uvx wayforth-mcp --transport streamable-http"
+healthcheckPath = "/mcp"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"

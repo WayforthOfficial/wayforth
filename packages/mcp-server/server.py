@@ -10,7 +10,10 @@ load_dotenv()
 API_BASE = os.getenv("WAYFORTH_API_URL", "https://gateway.wayforth.io")
 WAYFORTH_API_KEY = os.getenv("WAYFORTH_API_KEY", "")
 
-mcp = FastMCP("wayforth")
+_PORT = int(os.getenv("PORT", "8080"))
+_HOST = os.getenv("HOST", "0.0.0.0")
+
+mcp = FastMCP("wayforth", host=_HOST, port=_PORT)
 
 TIER_LABELS = {0: "free", 1: "basic", 2: "standard", 3: "premium"}
 
@@ -796,6 +799,17 @@ def _fetch_credits_sync() -> int | None:
 
 def main():
     import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Wayforth MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse", "streamable-http"],
+        default=os.getenv("MCP_TRANSPORT", "stdio"),
+        help="Transport to use: stdio (default), sse, or streamable-http",
+    )
+    args, _ = parser.parse_known_args()
+
     banner = (
         "╔════════════════════════════════════════╗\n"
         "║         WAYFORTH MCP SERVER            ║\n"
@@ -804,23 +818,27 @@ def main():
     )
     print(banner, file=sys.stderr)
 
+    if args.transport != "stdio":
+        print(f"\nTransport: {args.transport}  host={_HOST}  port={_PORT}", file=sys.stderr)
+
     api_key = os.getenv("WAYFORTH_API_KEY", "")
     if api_key:
-        credits = _fetch_credits_sync()
-        if credits is not None:
-            print(f"\nYour credits: {credits} · wayforth.io/dashboard", file=sys.stderr)
-        else:
-            print("\nCredits unavailable · wayforth.io/dashboard", file=sys.stderr)
-        print(
-            '\nTry this first:\n'
-            '  wayforth_search("translate text to Spanish")\n\n'
-            'Then:\n'
-            '  wayforth_execute(service_slug="deepl",\n'
-            '                   params={"text": "Hello", "target_lang": "ES"},\n'
-            '                   key_source="managed")\n\n'
-            'Need more credits? → wayforth.io/pricing\n',
-            file=sys.stderr,
-        )
+        if args.transport == "stdio":
+            credits = _fetch_credits_sync()
+            if credits is not None:
+                print(f"\nYour credits: {credits} · wayforth.io/dashboard", file=sys.stderr)
+            else:
+                print("\nCredits unavailable · wayforth.io/dashboard", file=sys.stderr)
+            print(
+                '\nTry this first:\n'
+                '  wayforth_search("translate text to Spanish")\n\n'
+                'Then:\n'
+                '  wayforth_execute(service_slug="deepl",\n'
+                '                   params={"text": "Hello", "target_lang": "ES"},\n'
+                '                   key_source="managed")\n\n'
+                'Need more credits? → wayforth.io/pricing\n',
+                file=sys.stderr,
+            )
     else:
         print(
             '\n  Set your API key: export WAYFORTH_API_KEY=wf_live_...\n'
@@ -828,7 +846,7 @@ def main():
             file=sys.stderr,
         )
 
-    mcp.run()
+    mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":
