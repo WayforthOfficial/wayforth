@@ -1,10 +1,13 @@
 import contextvars
 import json
+import logging
 import os
 import httpx
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+logger = logging.getLogger("wayforth-mcp")
 
 load_dotenv()
 
@@ -35,8 +38,15 @@ class ApiKeyMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             from urllib.parse import parse_qs
-            qs = parse_qs(scope.get("query_string", b"").decode())
-            headers = {k.lower(): v for k, v in scope.get("headers", [])}
+            method = scope.get("method", "")
+            path = scope.get("path", "")
+            query = scope.get("query_string", b"").decode()
+            raw_headers = scope.get("headers", [])
+            header_keys = [k.decode(errors="replace") for k, _ in raw_headers]
+            logger.info("REQUEST: %s %s%s headers=%s", method, path, f"?{query}" if query else "", header_keys)
+
+            qs = parse_qs(query)
+            headers = {k.lower(): v for k, v in raw_headers}
             key = (
                 qs.get("WAYFORTH_API_KEY", [None])[0]
                 or headers.get(b"authorization", b"").decode().removeprefix("Bearer ").strip()
@@ -44,6 +54,11 @@ class ApiKeyMiddleware:
                 or headers.get(b"x-wayforth-api-key", b"").decode()
                 or WAYFORTH_API_KEY
             )
+            key_source = "query" if qs.get("WAYFORTH_API_KEY") else \
+                         "auth-header" if headers.get(b"authorization") else \
+                         "x-api-key" if headers.get(b"x-api-key") else \
+                         "env"
+            logger.info("API_KEY source=%s present=%s", key_source, bool(key))
             token = _api_key_var.set(key)
             try:
                 await self.app(scope, receive, send)
