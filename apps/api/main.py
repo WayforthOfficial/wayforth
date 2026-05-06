@@ -312,6 +312,11 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS wri_version TEXT DEFAULT 'v1'
             """)
             await _mconn.execute("""
+                ALTER TABLE user_service_keys
+                    ADD COLUMN IF NOT EXISTS endpoint_url TEXT,
+                    ADD COLUMN IF NOT EXISTS default_method TEXT DEFAULT 'POST'
+            """)
+            await _mconn.execute("""
                 INSERT INTO services (name, description, endpoint_url, category, coverage_tier, pricing_usdc, source, payment_protocol, x402_supported, metadata)
                 VALUES
                   ('Solvr World News', 'Real-time global news feed from Solvr. Free tier — no per-call cost. Returns latest world news headlines and summaries.', 'https://api.solvrbot.com/api/v1/news', 'data', 1, 0.0, 'catalog', 'wayforth', false, '{"auth":"bearer_eip191","provider":"Solvr","provider_url":"https://solvrbot.com","pricing_tier":"free"}'),
@@ -1980,7 +1985,8 @@ async def list_service_keys(request: Request, db=Depends(get_db)):
 
     rows = await db.fetch("""
         SELECT service_slug, service_name, key_preview,
-               total_calls, last_used_at, active, created_at
+               total_calls, last_used_at, active, created_at,
+               endpoint_url, default_method
         FROM user_service_keys
         WHERE user_id=$1::uuid AND active=true
         ORDER BY created_at DESC
@@ -2001,9 +2007,15 @@ async def add_service_key(request: Request, db=Depends(get_db)):
     service_slug = body.get("service_slug", "").strip().lower()
     service_name = body.get("service_name", "").strip()
     raw_key = body.get("api_key", "").strip()
+    endpoint_url = body.get("endpoint_url", "").strip() or None
+    default_method = (body.get("default_method", "") or "POST").strip().upper()
 
     if not service_slug or not raw_key:
         raise HTTPException(status_code=400, detail={"error": "service_slug and api_key required"})
+    if default_method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+        raise HTTPException(status_code=400, detail={"error": "default_method must be GET, POST, PUT, PATCH, or DELETE"})
+    if endpoint_url and not endpoint_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail={"error": "endpoint_url must start with https://"})
 
     preview = raw_key[:4] + "****" + raw_key[-4:] if len(raw_key) >= 8 else "****"
 
@@ -2019,18 +2031,27 @@ async def add_service_key(request: Request, db=Depends(get_db)):
 
     await db.execute("""
         INSERT INTO user_service_keys
-            (user_id, service_slug, service_name, encrypted_key, key_preview)
-        VALUES ($1::uuid, $2, $3, $4, $5)
+            (user_id, service_slug, service_name, encrypted_key, key_preview, endpoint_url, default_method)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (user_id, service_slug)
         DO UPDATE SET
             service_name=EXCLUDED.service_name,
             encrypted_key=EXCLUDED.encrypted_key,
             key_preview=EXCLUDED.key_preview,
+            endpoint_url=EXCLUDED.endpoint_url,
+            default_method=EXCLUDED.default_method,
             active=true,
             updated_at=NOW()
-    """, user_id, service_slug, service_name or service_slug, encrypted, preview)
+    """, user_id, service_slug, service_name or service_slug, encrypted, preview, endpoint_url, default_method)
 
-    return {"service_slug": service_slug, "service_name": service_name or service_slug, "key_preview": preview, "created": True}
+    return {
+        "service_slug": service_slug,
+        "service_name": service_name or service_slug,
+        "key_preview": preview,
+        "endpoint_url": endpoint_url,
+        "default_method": default_method,
+        "created": True,
+    }
 
 
 @app.delete("/call/keys/{service_slug}")
@@ -2070,13 +2091,112 @@ async def execute_service(request: Request, db=Depends(get_db)):
     params = body.get("params", {})
     key_source = body.get("key_source", "managed")
 
-    if service_slug not in SERVICE_CONFIGS:
-        raise HTTPException(status_code=400, detail={
-            "error": f"Unknown service '{service_slug}'. Supported: {sorted(SERVICE_CONFIGS)}"
-        })
     if key_source not in ("managed", "byok"):
         raise HTTPException(status_code=400, detail={"error": "key_source must be 'managed' or 'byok'"})
 
+    is_managed_service = service_slug in SERVICE_CONFIGS
+    is_universal_byok = (not is_managed_service) and key_source == "byok"
+
+    if not is_managed_service and not is_universal_byok:
+        raise HTTPException(status_code=400, detail={
+            "error": f"Unknown service '{service_slug}'. Use key_source='byok' for custom services, or choose from: {sorted(SERVICE_CONFIGS)}"
+        })
+
+    # ── Universal BYOK path (any external API, not in managed catalog) ────────
+    if is_universal_byok:
+        byok_row = await db.fetchrow(
+            "SELECT encrypted_key, endpoint_url, default_method FROM user_service_keys "
+            "WHERE user_id=$1::uuid AND service_slug=$2 AND active=true",
+            user_id, service_slug,
+        )
+        if not byok_row:
+            raise HTTPException(status_code=404, detail={
+                "error": f"No BYOK key found for '{service_slug}'. Add one at /call/keys/add"
+            })
+        try:
+            f = get_fernet()
+            byok_key = f.decrypt(byok_row["encrypted_key"].encode()).decode()
+        except Exception as _dec_err:
+            logger.error("BYOK: failed to decrypt key for %s: %s", service_slug, _dec_err)
+            raise HTTPException(status_code=500, detail={"error": "decryption_failed"})
+
+        req_endpoint = body.get("endpoint_url", "").strip() or byok_row["endpoint_url"]
+        req_method = (body.get("method", "") or byok_row["default_method"] or "POST").upper()
+        extra_headers = body.get("headers", {})
+
+        if not req_endpoint:
+            raise HTTPException(status_code=400, detail={
+                "error": "endpoint_url required (pass in body or store a default via /call/keys/add)"
+            })
+        if not req_endpoint.startswith("https://"):
+            raise HTTPException(status_code=400, detail={"error": "endpoint_url must start with https://"})
+
+        success, balance_after = await check_and_deduct_credits(
+            db, str(user_id), 1, "/execute",
+            service_id=service_slug, tx_type="execution",
+        )
+        if not success:
+            raise HTTPException(status_code=402, detail={
+                "error": "insufficient_credits",
+                "credits_balance": balance_after,
+                "credits_needed": 1,
+            })
+
+        import httpx as _httpx
+        start = _time.time()
+        call_headers = {"Authorization": f"Bearer {byok_key}", **extra_headers}
+        error_msg = None
+        raw_result = None
+        try:
+            async with _httpx.AsyncClient(timeout=15.0) as _client:
+                if req_method in ("GET", "DELETE"):
+                    resp = await _client.request(req_method, req_endpoint, headers=call_headers, params=params)
+                else:
+                    resp = await _client.request(req_method, req_endpoint, headers=call_headers, json=params)
+            raw_result = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+            if resp.status_code >= 400:
+                error_msg = f"Upstream {resp.status_code}: {str(raw_result)[:200]}"
+        except _httpx.TimeoutException:
+            error_msg = "Service timeout"
+        except Exception as _e:
+            error_msg = str(_e)[:300]
+
+        execution_ms = round((_time.time() - start) * 1000)
+
+        if error_msg:
+            async with db.transaction():
+                refund_row = await db.fetchrow(
+                    "UPDATE user_credits SET credits_balance = credits_balance + 1, updated_at = NOW() "
+                    "WHERE user_id = $1::uuid RETURNING credits_balance",
+                    user_id,
+                )
+                refunded_balance = refund_row["credits_balance"] if refund_row else balance_after
+                await db.execute("""
+                    INSERT INTO credit_transactions
+                    (user_id, amount, balance_after, type, description, api_endpoint, service_id)
+                    VALUES ($1::uuid, $2, $3, 'execution_refund', $4, '/execute', $5)
+                """, user_id, 1, refunded_balance,
+                    f"Refund: {service_slug} BYOK failed - {error_msg[:100]}", service_slug)
+            raise HTTPException(status_code=503, detail={
+                "status": "error",
+                "service": service_slug,
+                "error": error_msg,
+                "credits_deducted": 0,
+                "credits_remaining": refunded_balance,
+            })
+
+        asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), service_slug))
+        return {
+            "status": "ok",
+            "service": service_slug,
+            "key_source": "byok",
+            "result": raw_result,
+            "credits_deducted": 1,
+            "credits_remaining": balance_after,
+            "execution_ms": execution_ms,
+        }
+
+    # ── Managed-catalog path ──────────────────────────────────────────────────
     config = SERVICE_CONFIGS[service_slug]
     credit_cost = config["credits"]
 
