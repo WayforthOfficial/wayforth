@@ -735,12 +735,13 @@ wheels = [
 
 [[package]]
 name = "wayforth-mcp"
-version = "0.1.9"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "python-dotenv" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -748,4 +749,5 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]

@@ -38,7 +38,7 @@ POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 - **300 APIs** indexed across 18 categories
 - **256 Tier 2 verified** — probed every 6h, auto-demoted after failures
 - **42 x402 native services** — sourced from x402.org/ecosystem
-- **11 managed services** — Groq, DeepL, OpenWeather, NewsAPI, Serper, Resend, AssemblyAI, Stability AI, Tavily, Jina AI, Alpha Vantage
+- **12 managed services** — Groq, DeepL, OpenWeather, NewsAPI, Serper, Resend, AssemblyAI, Stability AI, Tavily, Jina AI, Alpha Vantage, ElevenLabs
 - **WayforthRank v2** — payment-signal weighted scoring (payment rate × 35%, base WRI × 40%, volume × 15%, recency × 10%)
 - **WayforthQL v1** — structured discovery with tier/price/protocol filters
 - **Dual-track payments** — Stripe Treasury (card) + Base blockchain (non-custodial)
@@ -81,7 +81,7 @@ Get your API key: [wayforth.io/signup](https://wayforth.io/signup)
 
 All tracks earn Wayforth the same 1.5% routing fee.
 
-## Execution — 11 Managed Services
+## Execution — 12 Managed Services
 
 | Service | Category | Credits/Call |
 |---------|----------|-------------|
@@ -96,6 +96,7 @@ All tracks earn Wayforth the same 1.5% routing fee.
 | Tavily | AI web search | 3 |
 | Jina AI | URL to markdown | 2 |
 | Alpha Vantage | Stock data | 2 |
+| ElevenLabs | Text-to-speech | 5 |
 
 ## Architecture
 

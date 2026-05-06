@@ -90,7 +90,7 @@ async def server_card(request):
     from starlette.responses import JSONResponse
     return JSONResponse({
         "name": "wayforth",
-        "version": "0.2.2",
+        "version": "0.2.3",
         "description": "The search engine AI agents use to find and pay for APIs. 300+ verified APIs ranked by WayforthRank v2.",
         "icon": "https://wayforth.io/favicon.png",
         "repository": "https://github.com/WayforthOfficial/wayforth",
@@ -127,7 +127,10 @@ TIER_LABELS = {0: "free", 1: "basic", 2: "standard", 3: "premium"}
 
 MEMORY_FILE = os.path.expanduser("~/.wayforth_memory.json")
 
-_MANAGED_SLUGS = {"groq", "deepl", "openweather", "newsapi", "serper", "resend", "assemblyai", "stability", "tavily", "jina", "alphavantage"}
+_MANAGED_SLUGS = {
+    "groq", "deepl", "openweather", "newsapi", "serper", "resend",
+    "assemblyai", "stability", "tavily", "jina", "alphavantage", "elevenlabs",
+}
 
 _CATEGORY_PARAMS = {
     "translation": '{"text": "Hello world", "target_lang": "ES"}',
@@ -137,6 +140,7 @@ _CATEGORY_PARAMS = {
     "image": '{"prompt": "a futuristic city at night"}',
     "audio": '{"audio_url": "https://assembly.ai/sports_injuries.mp3"}',
     "communication": '{"from": "noreply@wayforth.io", "to": "you@example.com", "subject": "Test", "html": "<p>Hello</p>"}',
+    "text-to-speech": '{"text": "Hello, I am your AI assistant.", "voice_id": "21m00Tcm4TlvDq8ikWAM"}',
 }
 
 _EXECUTE_NEXT_QUERIES = {
@@ -151,6 +155,7 @@ _EXECUTE_NEXT_QUERIES = {
     "tavily": ["search for AI agent frameworks", "find recent research papers", "search competitor pricing"],
     "jina": ["read a documentation page", "extract content from a blog post", "parse a landing page"],
     "alphavantage": ["get MSFT stock price", "get GOOGL stock price", "get TSLA stock data"],
+    "elevenlabs": ["generate audio for a podcast intro", "convert blog post to audio", "create a voice notification"],
 }
 _EXECUTE_NEXT_DEFAULT = ["search for translation APIs", "search for inference APIs", "search for data APIs"]
 
@@ -220,6 +225,69 @@ def _format_service(s: dict) -> str:
     )
 
 
+# ── Tool 1: execute (hero) ───────────────────────────────────────────────────
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+async def wayforth_execute(
+    service_slug: str = Field(description="Service to call: groq, deepl, openweather, newsapi, serper, resend, assemblyai, stability, tavily, jina, alphavantage, elevenlabs — or any custom slug for BYOK"),
+    params: dict = Field(description="Service-specific parameters as a JSON object (e.g. {'text': 'Hello', 'target_lang': 'ES'} for DeepL)"),
+    key_source: str = Field(default="managed", description="Key source: 'managed' (use Wayforth's key, default) or 'byok' (use your stored key)"),
+) -> str:
+    """Execute any API service instantly.
+    12 managed services run with zero API keys —
+    Wayforth holds the credentials.
+    The fastest way to add any API capability
+    to your agent.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            resp = await client.post(
+                f"{API_BASE}/execute",
+                headers={"X-Wayforth-API-Key": api_key, "Content-Type": "application/json"},
+                json={"service_slug": service_slug, "params": params, "key_source": key_source},
+            )
+    except Exception as e:
+        return f"Wayforth API not reachable: {e}"
+    if resp.status_code == 402:
+        d = resp.json().get("detail", {})
+        return (
+            f"Insufficient credits. Balance: {d.get('credits_balance', 0)}, "
+            f"needed: {d.get('credits_needed', 0)}. Top up at wayforth.io/dashboard"
+        )
+    if resp.status_code == 404:
+        return resp.json().get("detail", {}).get("error", "Service key not found. Add one at /call/keys/add")
+    if resp.status_code != 200:
+        detail = resp.json().get("detail", {})
+        if isinstance(detail, dict) and detail.get("status") == "error":
+            return f"Service error ({service_slug}): {detail.get('error', 'unknown')}"
+        return f"Execute error {resp.status_code}: {resp.text[:300]}"
+    data = resp.json()
+    result_str = json.dumps({
+        "service": data.get("service"),
+        "result": data.get("result"),
+        "credits_deducted": data.get("credits_deducted"),
+        "credits_remaining": data.get("credits_remaining"),
+        "execution_ms": data.get("execution_ms"),
+    }, indent=2)
+
+    credits_ded = data.get("credits_deducted", "?")
+    credits_rem = data.get("credits_remaining", "—")
+    queries = _EXECUTE_NEXT_QUERIES.get(service_slug, _EXECUTE_NEXT_DEFAULT)
+    suggestions = (
+        f"\n---\n"
+        f"✅ Done · {credits_ded} credit(s) used · {credits_rem} remaining\n\n"
+        f"Try next:\n"
+        + "".join(f'- wayforth_search("{q}")\n' for q in queries)
+        + "---"
+    )
+    return result_str + suggestions
+
+
+# ── Tool 2: search ───────────────────────────────────────────────────────────
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 async def wayforth_search(
     query: str = Field(description="Natural language description of the API service you need (e.g. 'translate text to Spanish', 'generate images')"),
@@ -227,9 +295,10 @@ async def wayforth_search(
     tier_min: int = Field(default=2, description="Minimum coverage tier: 0=all, 1=tested, 2=verified (default), 3=premium"),
     category: str = Field(default=None, description="Optional category filter: inference, data, translation, image, code, audio, embeddings"),
 ) -> str:
-    """Search the Wayforth catalog for agent-callable services.
-    Returns services ranked by WayforthRank — combining semantic relevance,
-    reliability history, and real agent usage signals.
+    """Search 300+ verified APIs ranked by
+    WayforthRank — real agent payment signals,
+    not ads. Use this when you don't know
+    which service to execute.
     """
     params = {"q": query, "limit": min(limit, 20), "tier": tier_min}
     if category:
@@ -296,10 +365,11 @@ async def wayforth_search(
             f"\n---\n"
             f"⚡ Top pick: {top_name} (WRI: {top_wri})\n\n"
             f"To execute this service, add your own API key:\n"
-            f'wayforth_keys_add(\n'
+            f'wayforth_keys(\n'
+            f'  action="add",\n'
             f'  service_slug="{slug}",\n'
             f'  service_name="{top_name}",\n'
-            f'  api_key="your_api_key_here"\n'
+            f'  api_key_value="your_api_key_here"\n'
             f')\n'
             f'Then call: wayforth_execute(service_slug="{slug}",\n'
             f'                            params={{...}},\n'
@@ -312,6 +382,74 @@ async def wayforth_search(
     lines.append(next_step)
     return "\n".join(lines)
 
+
+# ── Tool 3: query (WayforthQL) ───────────────────────────────────────────────
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+async def wayforth_query(
+    query: str = Field(description="Natural language query describing the API you need (e.g. 'fast cheap translation', 'image generation under $0.01')"),
+    tier_min: int = Field(default=2, description="Minimum coverage tier: 0=all, 1=tested, 2=verified (default), 3=premium"),
+    category: str = Field(default=None, description="Filter by category: inference, translation, data, search, audio, image, etc."),
+    price_max: float = Field(default=None, description="Maximum price per API call in USD (e.g. 0.001 for $0.001/call)"),
+    protocol: str = Field(default=None, description="Payment protocol filter (e.g. 'x402' for HTTP 402 native services)"),
+    sort_by: str = Field(default="wri", description="Sort order: 'wri' (WayforthRank score, default), 'price' (cheapest first), 'tier' (highest tier first)"),
+    limit: int = Field(default=5, description="Number of results to return (1–50)"),
+    x402_only: bool = Field(default=False, description="When true, return only x402-native services"),
+    provider: str = Field(default=None, description="Filter by provider name substring (e.g. 'openai', 'google')"),
+    verified_only: bool = Field(default=False, description="When true, return only tier-2+ verified services"),
+    offset: int = Field(default=0, description="Pagination offset — skip this many results"),
+) -> str:
+    """Structured service discovery using WayforthQL v2.
+    More precise than wayforth_search — supports price caps, protocol filters,
+    x402-only, provider filtering, and explicit sort order.
+    Use when you need deterministic filtering rather than pure semantic ranking.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
+    body: dict = {
+        "query": query,
+        "tier_min": tier_min,
+        "limit": limit,
+        "sort_by": sort_by,
+        "x402_only": x402_only,
+        "verified_only": verified_only,
+        "offset": offset,
+    }
+    if category:
+        body["category"] = category
+    if price_max is not None:
+        body["price_max"] = price_max
+    if protocol:
+        body["protocol"] = protocol
+    if provider:
+        body["provider"] = provider
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{API_BASE}/query",
+                headers={"X-Wayforth-API-Key": api_key, "Content-Type": "application/json"},
+                json=body,
+            )
+    except Exception as e:
+        return f"Wayforth API not reachable: {e}"
+    if resp.status_code == 402:
+        d = resp.json().get("detail", {})
+        return f"Insufficient credits. Balance: {d.get('balance', 0)}. Top up at wayforth.io/dashboard"
+    if resp.status_code != 200:
+        return f"WayforthQL error {resp.status_code}: {resp.text[:300]}"
+    data = resp.json()
+    results = data.get("results", [])
+    if not results:
+        return "No services matched your WayforthQL query. Try relaxing tier_min or price_max."
+    lines = [f"WayforthQL results for: {query!r}\n"]
+    for i, s in enumerate(results, 1):
+        lines.append(_format_ranked_service(i, s))
+    lines.append(f"\n{len(results)} result(s) · offset: {data.get('offset', 0)} · protocol: {data.get('protocol', 'WayforthQL/2.0')}")
+    return "\n".join(lines)
+
+
+# ── Tool 4: pay ──────────────────────────────────────────────────────────────
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 async def wayforth_pay(
@@ -420,6 +558,77 @@ async def wayforth_pay(
     return f"Payment processed: {data}"
 
 
+# ── Tool 5: keys ─────────────────────────────────────────────────────────────
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+async def wayforth_keys(
+    action: str = Field(description="Action to perform: 'list' (show stored keys), 'add' (store a new key), or 'delete' (remove a key)"),
+    service_slug: str = Field(default=None, description="Service identifier slug (required for 'add'/'delete'), e.g. 'openai', 'anthropic', 'stripe'"),
+    api_key_value: str = Field(default=None, description="The API key to encrypt and store (required for action='add')"),
+    service_name: str = Field(default=None, description="Human-readable label for the service (optional for 'add', defaults to service_slug)"),
+) -> str:
+    """Manage BYOK (Bring Your Own Key) stored service keys.
+    Store encrypted API keys for any service and call them via wayforth_execute with key_source='byok'.
+    Keys are encrypted at rest with AES-128 and never returned in plaintext.
+    """
+    wayforth_key = _get_api_key()
+    if not wayforth_key:
+        return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
+    headers = {"X-Wayforth-API-Key": wayforth_key, "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if action == "list":
+                resp = await client.get(f"{API_BASE}/call/keys", headers=headers)
+                if resp.status_code != 200:
+                    return f"Error listing keys: {resp.status_code} {resp.text[:200]}"
+                data = resp.json()
+                keys = data.get("service_keys", [])
+                if not keys:
+                    return "No BYOK keys stored. Use action='add' to store one."
+                lines = [f"{len(keys)} stored key(s):\n"]
+                for k in keys:
+                    last = k.get("last_used_at") or "never"
+                    lines.append(
+                        f"  {k['service_slug']} ({k.get('service_name', '')}) "
+                        f"— preview: {k.get('key_preview', '???')} "
+                        f"— calls: {k.get('total_calls', 0)} — last used: {last}"
+                    )
+                lines.append("\nCall with: wayforth_execute(service_slug=..., key_source='byok')")
+                return "\n".join(lines)
+
+            elif action == "add":
+                if not service_slug or not api_key_value:
+                    return "Error: service_slug and api_key_value are required for action='add'"
+                resp = await client.post(
+                    f"{API_BASE}/call/keys/add",
+                    headers=headers,
+                    json={"service_slug": service_slug, "service_name": service_name or service_slug, "api_key": api_key_value},
+                )
+                if resp.status_code != 200:
+                    return f"Error storing key: {resp.status_code} {resp.text[:200]}"
+                data = resp.json()
+                return (
+                    f"Key stored for '{service_slug}' · preview: {data.get('key_preview', '???')}\n"
+                    f"Call it: wayforth_execute(service_slug='{service_slug}', params={{...}}, key_source='byok')"
+                )
+
+            elif action == "delete":
+                if not service_slug:
+                    return "Error: service_slug is required for action='delete'"
+                resp = await client.delete(f"{API_BASE}/call/keys/{service_slug}", headers=headers)
+                if resp.status_code == 404:
+                    return f"No active key found for '{service_slug}'"
+                if resp.status_code != 200:
+                    return f"Error deleting key: {resp.status_code} {resp.text[:200]}"
+                return f"Key for '{service_slug}' deactivated."
+
+            else:
+                return "Error: action must be 'list', 'add', or 'delete'"
+    except Exception as e:
+        return f"Wayforth API not reachable: {e}"
+
+
+# ── Tools 6+: supporting tools ───────────────────────────────────────────────
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 async def wayforth_list(
@@ -625,180 +834,6 @@ async def wayforth_identity(
         return f"New identity registered. Trust score: {d2['trust_score']}/100. Start searching to build reputation."
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
-async def wayforth_execute(
-    service_slug: str = Field(description="Service to call: groq, deepl, openweather, newsapi, serper, resend, assemblyai, stability, tavily, jina, alphavantage — or any custom slug for BYOK"),
-    params: dict = Field(description="Service-specific parameters as a JSON object (e.g. {'text': 'Hello', 'target_lang': 'ES'} for DeepL)"),
-    key_source: str = Field(default="managed", description="Key source: 'managed' (use Wayforth's key, default) or 'byok' (use your stored key)"),
-) -> str:
-    """Execute a real API call through Wayforth managed services or your own BYOK key.
-    Returns real results — translation, inference, weather, search, email, audio, images.
-    Credits deducted on success only.
-    """
-    api_key = _get_api_key()
-    if not api_key:
-        return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
-    try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            resp = await client.post(
-                f"{API_BASE}/execute",
-                headers={"X-Wayforth-API-Key": api_key, "Content-Type": "application/json"},
-                json={"service_slug": service_slug, "params": params, "key_source": key_source},
-            )
-    except Exception as e:
-        return f"Wayforth API not reachable: {e}"
-    if resp.status_code == 402:
-        d = resp.json().get("detail", {})
-        return (
-            f"Insufficient credits. Balance: {d.get('credits_balance', 0)}, "
-            f"needed: {d.get('credits_needed', 0)}. Top up at wayforth.io/dashboard"
-        )
-    if resp.status_code == 404:
-        return resp.json().get("detail", {}).get("error", "Service key not found. Add one at /call/keys/add")
-    if resp.status_code != 200:
-        detail = resp.json().get("detail", {})
-        if isinstance(detail, dict) and detail.get("status") == "error":
-            return f"Service error ({service_slug}): {detail.get('error', 'unknown')}"
-        return f"Execute error {resp.status_code}: {resp.text[:300]}"
-    data = resp.json()
-    result_str = json.dumps({
-        "service": data.get("service"),
-        "result": data.get("result"),
-        "credits_deducted": data.get("credits_deducted"),
-        "credits_remaining": data.get("credits_remaining"),
-        "execution_ms": data.get("execution_ms"),
-    }, indent=2)
-
-    credits_ded = data.get("credits_deducted", "?")
-    credits_rem = data.get("credits_remaining", "—")
-    queries = _EXECUTE_NEXT_QUERIES.get(service_slug, _EXECUTE_NEXT_DEFAULT)
-    suggestions = (
-        f"\n---\n"
-        f"✅ Done · {credits_ded} credit(s) used · {credits_rem} remaining\n\n"
-        f"Try next:\n"
-        + "".join(f'- wayforth_search("{q}")\n' for q in queries)
-        + "---"
-    )
-    return result_str + suggestions
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-async def wayforth_query(
-    query: str = Field(description="Natural language query describing the API you need (e.g. 'fast cheap translation', 'image generation under $0.01')"),
-    tier_min: int = Field(default=2, description="Minimum coverage tier: 0=all, 1=tested, 2=verified (default), 3=premium"),
-    category: str = Field(default=None, description="Filter by category: inference, translation, data, search, audio, image, etc."),
-    price_max: float = Field(default=None, description="Maximum price per API call in USD (e.g. 0.001 for $0.001/call)"),
-    protocol: str = Field(default=None, description="Payment protocol filter (e.g. 'x402' for HTTP 402 native services)"),
-    sort_by: str = Field(default="wri", description="Sort order: 'wri' (WayforthRank score, default), 'price' (cheapest first), 'tier' (highest tier first)"),
-    limit: int = Field(default=5, description="Number of results to return (1–20)"),
-) -> str:
-    """Structured service discovery using WayforthQL v1.
-    More precise than wayforth_search — supports price caps, protocol filters, and explicit sort order.
-    Use when you need deterministic filtering rather than pure semantic ranking.
-    """
-    api_key = _get_api_key()
-    if not api_key:
-        return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
-    body: dict = {"query": query, "tier_min": tier_min, "limit": limit, "sort_by": sort_by}
-    if category:
-        body["category"] = category
-    if price_max is not None:
-        body["price_max"] = price_max
-    if protocol:
-        body["protocol"] = protocol
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                f"{API_BASE}/query",
-                headers={"X-Wayforth-API-Key": api_key, "Content-Type": "application/json"},
-                json=body,
-            )
-    except Exception as e:
-        return f"Wayforth API not reachable: {e}"
-    if resp.status_code == 402:
-        d = resp.json().get("detail", {})
-        return f"Insufficient credits. Balance: {d.get('balance', 0)}. Top up at wayforth.io/dashboard"
-    if resp.status_code != 200:
-        return f"WayforthQL error {resp.status_code}: {resp.text[:300]}"
-    data = resp.json()
-    results = data.get("results", [])
-    if not results:
-        return "No services matched your WayforthQL query. Try relaxing tier_min or price_max."
-    lines = [f"WayforthQL results for: {query!r}\n"]
-    for i, s in enumerate(results, 1):
-        lines.append(_format_ranked_service(i, s))
-    lines.append(f"\n{len(results)} result(s) · protocol: WayforthQL/1.0")
-    return "\n".join(lines)
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-async def wayforth_keys(
-    action: str = Field(description="Action to perform: 'list' (show stored keys), 'add' (store a new key), or 'delete' (remove a key)"),
-    service_slug: str = Field(default=None, description="Service identifier slug (required for 'add'/'delete'), e.g. 'openai', 'anthropic', 'stripe'"),
-    api_key_value: str = Field(default=None, description="The API key to encrypt and store (required for action='add')"),
-    service_name: str = Field(default=None, description="Human-readable label for the service (optional for 'add', defaults to service_slug)"),
-) -> str:
-    """Manage BYOK (Bring Your Own Key) stored service keys.
-    Store encrypted API keys for any service and call them via wayforth_execute with key_source='byok'.
-    Keys are encrypted at rest with AES-128 and never returned in plaintext.
-    """
-    wayforth_key = _get_api_key()
-    if not wayforth_key:
-        return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
-    headers = {"X-Wayforth-API-Key": wayforth_key, "Content-Type": "application/json"}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            if action == "list":
-                resp = await client.get(f"{API_BASE}/call/keys", headers=headers)
-                if resp.status_code != 200:
-                    return f"Error listing keys: {resp.status_code} {resp.text[:200]}"
-                data = resp.json()
-                keys = data.get("service_keys", [])
-                if not keys:
-                    return "No BYOK keys stored. Use action='add' to store one."
-                lines = [f"{len(keys)} stored key(s):\n"]
-                for k in keys:
-                    last = k.get("last_used_at") or "never"
-                    lines.append(
-                        f"  {k['service_slug']} ({k.get('service_name', '')}) "
-                        f"— preview: {k.get('key_preview', '???')} "
-                        f"— calls: {k.get('total_calls', 0)} — last used: {last}"
-                    )
-                lines.append("\nCall with: wayforth_execute(service_slug=..., key_source='byok')")
-                return "\n".join(lines)
-
-            elif action == "add":
-                if not service_slug or not api_key_value:
-                    return "Error: service_slug and api_key_value are required for action='add'"
-                resp = await client.post(
-                    f"{API_BASE}/call/keys/add",
-                    headers=headers,
-                    json={"service_slug": service_slug, "service_name": service_name or service_slug, "api_key": api_key_value},
-                )
-                if resp.status_code != 200:
-                    return f"Error storing key: {resp.status_code} {resp.text[:200]}"
-                data = resp.json()
-                return (
-                    f"Key stored for '{service_slug}' · preview: {data.get('key_preview', '???')}\n"
-                    f"Call it: wayforth_execute(service_slug='{service_slug}', params={{...}}, key_source='byok')"
-                )
-
-            elif action == "delete":
-                if not service_slug:
-                    return "Error: service_slug is required for action='delete'"
-                resp = await client.delete(f"{API_BASE}/call/keys/{service_slug}", headers=headers)
-                if resp.status_code == 404:
-                    return f"No active key found for '{service_slug}'"
-                if resp.status_code != 200:
-                    return f"Error deleting key: {resp.status_code} {resp.text[:200]}"
-                return f"Key for '{service_slug}' deactivated."
-
-            else:
-                return "Error: action must be 'list', 'add', or 'delete'"
-    except Exception as e:
-        return f"Wayforth API not reachable: {e}"
-
-
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 async def wayforth_quickstart() -> str:
     """
@@ -815,12 +850,20 @@ STEP 1 — Install (one time):
   export WAYFORTH_API_KEY=wf_live_...
   (Get free key at wayforth.io/dashboard)
 
-STEP 2 — Discover:
+STEP 2 — Execute instantly (12 managed services, no API keys needed):
+  wayforth_execute(
+    service_slug="deepl",
+    params={"text": "Hello world", "target_lang": "ES"},
+    key_source="managed"
+  )
+  → {"translated_text": "Hola mundo", ...}
+
+STEP 3 — Discover (when you don't know which service to use):
   wayforth_search("translate text to Spanish")
   → DeepL        WRI:82  Tier 2  $0.00003/call
   → LibreTranslate  WRI:71  Tier 2  Free
 
-STEP 3 — Pay (choose your track):
+STEP 4 — Pay (choose your track):
 
   Card track (no crypto needed):
     wayforth_pay("deepl", 0.001, track="card")
@@ -841,13 +884,13 @@ CREDITS (for search quota):
 
 ROUTING FEE: 1.5% flat on all payments
 
-274+ verified APIs · 225+ Tier 2 · 18 categories
+300+ verified APIs · 256 Tier 2 · 18 categories
 
-All tools:
+All tools (in recommended order):
+  wayforth_execute     — call 12 managed services instantly (no API key needed)
   wayforth_search      — semantic service discovery
-  wayforth_query       — WayforthQL structured discovery (tier/price/protocol filters)
+  wayforth_query       — WayforthQL v2 structured discovery (tier/price/x402/provider filters)
   wayforth_pay         — pay via card or crypto (dual-track)
-  wayforth_execute     — call 11 managed services directly (no API key needed)
   wayforth_keys        — manage BYOK encrypted service keys
   wayforth_list        — browse catalog with filters
   wayforth_similar     — co-used services (Service Graph)
@@ -894,7 +937,7 @@ def main():
     banner = (
         "╔════════════════════════════════════════╗\n"
         "║         WAYFORTH MCP SERVER            ║\n"
-        "║   Search · Pay · Execute · Repeat      ║\n"
+        "║   Execute · Search · Pay · Repeat      ║\n"
         "╚════════════════════════════════════════╝"
     )
     print(banner, file=sys.stderr)
@@ -911,12 +954,12 @@ def main():
             else:
                 print("\nCredits unavailable · wayforth.io/dashboard", file=sys.stderr)
             print(
-                '\nTry this first:\n'
-                '  wayforth_search("translate text to Spanish")\n\n'
-                'Then:\n'
+                '\nStart here:\n'
                 '  wayforth_execute(service_slug="deepl",\n'
                 '                   params={"text": "Hello", "target_lang": "ES"},\n'
                 '                   key_source="managed")\n\n'
+                'Or discover new services:\n'
+                '  wayforth_search("translate text to Spanish")\n\n'
                 'Need more credits? → wayforth.io/pricing\n',
                 file=sys.stderr,
             )
