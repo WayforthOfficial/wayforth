@@ -1,8 +1,8 @@
 [build]
-builder = "nixpacks"
+builder = "dockerfile"
+dockerfilePath = "packages/mcp-server/Dockerfile"
 
 [deploy]
-startCommand = "uvx wayforth-mcp --transport streamable-http"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
