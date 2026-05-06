@@ -402,7 +402,7 @@ async def add_request_id(request: Request, call_next):
         request.state.api_key = raw_key
     response = await call_next(request)
     response.headers["X-Wayforth-Request-ID"] = request_id
-    response.headers["X-Wayforth-Version"] = "0.1.5"
+    response.headers["X-Wayforth-Version"] = VERSION
     response.headers["X-RateLimit-Tier"] = str(getattr(request.state, "rate_limit_tier", "free"))
     response.headers["X-RateLimit-Limit"] = str(getattr(request.state, "rate_limit_rpm", "10"))
     response.headers["X-Frame-Options"] = "DENY"
@@ -569,6 +569,8 @@ async def system_status(db=Depends(get_db)):
             "managed": len(SERVICE_CONFIGS),
         },
         "searches_24h": searches,
+        "mcp_tools": 13,
+        "pypi_version": "0.2.0",
         "api": "operational",
         "database": "operational",
         "payment_rail": {
@@ -1399,7 +1401,7 @@ async def get_stats(request: Request, db=Depends(get_db)):
         "categories": row["categories"],
         "searches_7d": searches_7d,
         "mcp_tools": 13,
-        "api_version": "0.1.5",
+        "api_version": VERSION,
         "mcp_version": "0.2.0",
     }
 
@@ -2669,13 +2671,39 @@ async def rank_recalculate(request: Request, db=Depends(get_db)):
     def _slug(name: str) -> str:
         return name.lower().replace(" ", "_").replace("-", "_").replace("/", "_")
 
+    def _norm(name: str) -> str:
+        import re as _re
+        return _re.sub(r'[^a-z0-9]', '', name.lower())
+
     svc_map = {_slug(s["name"]): s for s in services}
+    norm_map = {_norm(s["name"]): s for s in services}
 
     results = []
+    unmatched = []
     for sig in signal_rows:
         key = sig["clicked_slug"].lower().replace("-", "_")
+        # Exact slug match, then prefix match, then normalized match (strips spaces/symbols)
         svc = svc_map.get(key)
         if not svc:
+            for svc_key, s in svc_map.items():
+                if svc_key.startswith(key + "_"):
+                    svc = s
+                    break
+        if not svc:
+            norm_key = _norm(sig["clicked_slug"])
+            svc = norm_map.get(norm_key)
+        if not svc:
+            for norm_svc_key, s in norm_map.items():
+                if norm_svc_key.startswith(norm_key):
+                    svc = s
+                    break
+        if not svc:
+            unmatched.append({
+                "clicked_slug": sig["clicked_slug"],
+                "total_clicks": int(sig["total_clicks"] or 0),
+                "payments": int(sig["payments"] or 0),
+                "tried_key": key,
+            })
             continue
 
         hist = await db.fetchrow(
@@ -2703,7 +2731,7 @@ async def rank_recalculate(request: Request, db=Depends(get_db)):
             "total_signals": total_clicks,
         })
 
-    return {"updated": len(results), "scores": results}
+    return {"updated": len(results), "scores": results, "unmatched_slugs": unmatched}
 
 
 @app.post("/admin/catalog/probe", tags=["Admin"])
@@ -2744,7 +2772,7 @@ async def catalog_probe(request: Request, db=Depends(get_db)):
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True,
                                   headers={"User-Agent": "WayforthCrawler/1.0"}) as client:
         for svc in candidates:
-            sid = str(svc["id"])
+            svc_id = svc["id"]
             url = svc["endpoint_url"]
             name = svc["name"]
             old_tier = svc["coverage_tier"]
@@ -2756,26 +2784,20 @@ async def catalog_probe(request: Request, db=Depends(get_db)):
                 status_code = r.status_code
                 if status_code in (200, 401, 403):
                     outcome = "tier2"
-                    await db.execute("""
-                        UPDATE services
-                        SET coverage_tier = 2, consecutive_failures = 0, last_tested_at = NOW()
-                        WHERE id = $1::uuid
-                    """, sid)
+                    await db.execute(
+                        "UPDATE services SET coverage_tier = 2, consecutive_failures = 0, last_tested_at = NOW() WHERE id = $1",
+                        svc_id)
                 else:
                     outcome = "fail"
-                    await db.execute("""
-                        UPDATE services
-                        SET consecutive_failures = consecutive_failures + 1, last_tested_at = NOW()
-                        WHERE id = $1::uuid
-                    """, sid)
+                    await db.execute(
+                        "UPDATE services SET consecutive_failures = consecutive_failures + 1, last_tested_at = NOW() WHERE id = $1",
+                        svc_id)
             except Exception:
                 status_code = 0
                 outcome = "timeout"
-                await db.execute("""
-                    UPDATE services
-                    SET consecutive_failures = consecutive_failures + 1, last_tested_at = NOW()
-                    WHERE id = $1::uuid
-                """, sid)
+                await db.execute(
+                    "UPDATE services SET consecutive_failures = 10, last_tested_at = NOW() WHERE id = $1",
+                    svc_id)
 
             results.append({
                 "name": name,
@@ -2798,6 +2820,41 @@ async def catalog_probe(request: Request, db=Depends(get_db)):
         "deactivated_junk": len(deactivated),
         "deactivated": deactivated,
         "results": results,
+    }
+
+
+@app.get("/.well-known/mcp/server-card.json", include_in_schema=False)
+async def mcp_server_card():
+    """Smithery discovery endpoint — skip auto-scan and advertise tools directly."""
+    return {
+        "name": "wayforth",
+        "description": "Search engine and payment rail for AI agents. 300 verified APIs, 11 managed services (Groq, DeepL, AssemblyAI, Stability AI, Tavily, Jina AI, Alpha Vantage, OpenWeather, NewsAPI, Serper, Resend). WayforthRank v2 payment-signal scoring. Install: uvx wayforth-mcp",
+        "icon": "https://wayforth.io/logo.png",
+        "configSchema": {
+            "type": "object",
+            "properties": {
+                "WAYFORTH_API_KEY": {
+                    "type": "string",
+                    "description": "Your Wayforth API key (get free at wayforth.io/signup)",
+                }
+            },
+            "required": ["WAYFORTH_API_KEY"],
+        },
+        "tools": [
+            {"name": "wayforth_search", "description": "Semantic search across 300 APIs ranked by WayforthRank v2 payment-signal scoring"},
+            {"name": "wayforth_query", "description": "WayforthQL structured discovery — tier/price/protocol filters, deterministic ranking"},
+            {"name": "wayforth_execute", "description": "Execute 11 managed services directly: groq, deepl, openweather, newsapi, serper, resend, assemblyai, stability, tavily, jina, alphavantage"},
+            {"name": "wayforth_pay", "description": "Pay for API services via card (Stripe Treasury) or crypto (Base USDC, non-custodial)"},
+            {"name": "wayforth_keys", "description": "Manage BYOK encrypted service keys — store, list, delete"},
+            {"name": "wayforth_list", "description": "Browse catalog with category and tier filters"},
+            {"name": "wayforth_similar", "description": "Find co-used services from real agent behavior (Service Graph)"},
+            {"name": "wayforth_identity", "description": "Agent trust score and reputation tracking"},
+            {"name": "wayforth_remember", "description": "Save a service to persistent agent memory"},
+            {"name": "wayforth_recall", "description": "Retrieve services saved to agent memory"},
+            {"name": "wayforth_stats", "description": "Catalog statistics — totals, tier breakdown, category distribution"},
+            {"name": "wayforth_status", "description": "API health check and live service counts"},
+            {"name": "wayforth_quickstart", "description": "Step-by-step developer guide for using Wayforth in an agent"},
+        ],
     }
 
 
@@ -4065,7 +4122,7 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     wri_rows = await db.fetch("""
         SELECT
             clicked_slug AS service,
-            ROUND(AVG(top_result_wri)) AS wri_score,
+            ROUND(AVG(top_result_wri)) AS base_wri,
             COUNT(*) AS calls,
             MAX(created_at) AS last_called
         FROM search_analytics
@@ -4076,17 +4133,46 @@ async def account_analytics(request: Request, db=Depends(get_db)):
         ORDER BY calls DESC
     """, user_id)
 
-    # Overlay v2 scores where available
-    v2_scores: dict = {}
-    for row in wri_rows:
-        slug = row["service"]
-        svc = await db.fetchrow(
-            "SELECT wri_score, wri_version FROM services "
-            "WHERE LOWER(name) = $1 OR LOWER(name) = $2 LIMIT 1",
-            slug, slug.replace("_", " ")
-        )
-        if svc and svc["wri_score"] is not None and svc["wri_version"] == "v2":
-            v2_scores[slug] = round(float(svc["wri_score"]), 1)
+    # Build v2 score lookup using same 3-tier matching as /admin/rank/recalculate
+    import re as _re
+    def _slug_fn(name: str) -> str:
+        return name.lower().replace(" ", "_").replace("-", "_").replace("/", "_")
+    def _norm_fn(name: str) -> str:
+        return _re.sub(r'[^a-z0-9]', '', name.lower())
+
+    v2_all = await db.fetch("SELECT name, wri_score FROM services WHERE wri_version = 'v2' AND wri_score IS NOT NULL")
+    svc_slug_map = {_slug_fn(s["name"]): s for s in v2_all}
+    svc_norm_map = {_norm_fn(s["name"]): s for s in v2_all}
+
+    def _find_v2(slug: str):
+        key = slug.lower().replace("-", "_")
+        svc = svc_slug_map.get(key)
+        if not svc:
+            for k, s in svc_slug_map.items():
+                if k.startswith(key + "_"):
+                    svc = s
+                    break
+        if not svc:
+            nk = _norm_fn(slug)
+            svc = svc_norm_map.get(nk)
+        if not svc:
+            nk = _norm_fn(slug)
+            for k, s in svc_norm_map.items():
+                if k.startswith(nk):
+                    svc = s
+                    break
+        return svc
+
+    wri_score_entries = []
+    for r in wri_rows:
+        v2 = _find_v2(r["service"])
+        wri_score_entries.append({
+            "service": r["service"],
+            "wri_score": round(float(v2["wri_score"]), 1) if v2 else (int(r["base_wri"]) if r["base_wri"] is not None else None),
+            "ranking_version": "v2" if v2 else "v1",
+            "calls": r["calls"],
+            "last_called": r["last_called"].isoformat() if r["last_called"] else None,
+        })
 
     return {
         "searches": {
@@ -4107,16 +4193,7 @@ async def account_analytics(request: Request, db=Depends(get_db)):
             "total": credits["lifetime_credits"] if credits else 0,
             "reset_date": reset.isoformat(),
         },
-        "wri_scores": [
-            {
-                "service": r["service"],
-                "wri_score": v2_scores.get(r["service"], int(r["wri_score"]) if r["wri_score"] is not None else None),
-                "ranking_version": "v2" if r["service"] in v2_scores else "v1",
-                "calls": r["calls"],
-                "last_called": r["last_called"].isoformat() if r["last_called"] else None,
-            }
-            for r in wri_rows
-        ],
+        "wri_scores": wri_score_entries,
     }
 
 

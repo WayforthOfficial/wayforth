@@ -2,7 +2,7 @@
 
 **Search engine and payment rail for AI agents.**
 
-274+ verified APIs. Pay via card or crypto. One MCP install.
+300 verified APIs. Pay via card or crypto. One MCP install.
 
 ```bash
 uvx wayforth-mcp
@@ -32,13 +32,14 @@ POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 
 ## Live Now
 
-- **274+ APIs** indexed across 18 categories
-- **225+ Tier 2 verified** — probed every 6h, auto-demoted after failures
+- **300 APIs** indexed across 18 categories
+- **256 Tier 2 verified** — probed every 6h, auto-demoted after failures
 - **42 x402 native services** — sourced from x402.org/ecosystem
-- **10 managed services** — Groq, DeepL, OpenWeather, NewsAPI, Serper, Resend, AssemblyAI, Stability AI, Tavily, Jina AI
+- **11 managed services** — Groq, DeepL, OpenWeather, NewsAPI, Serper, Resend, AssemblyAI, Stability AI, Tavily, Jina AI, Alpha Vantage
+- **WayforthRank v2** — payment-signal weighted scoring (payment rate × 35%, base WRI × 40%, volume × 15%, recency × 10%)
 - **WayforthQL v1** — structured discovery with tier/price/protocol filters
 - **Dual-track payments** — Stripe Treasury (card) + Base blockchain (non-custodial)
-- **BYOK** — bring your own key for any of 274+ services, encrypted at rest (Fernet AES-128)
+- **BYOK** — bring your own key for any of 300 services, encrypted at rest (Fernet AES-128)
 - **3 provisional patents** filed (WF-2026-001, WF-2026-002, WF-2026-003)
 
 ## Install
@@ -77,7 +78,7 @@ Get your API key: [wayforth.io/signup](https://wayforth.io/signup)
 
 All tracks earn Wayforth the same 1.5% routing fee.
 
-## Execution — 10 Managed Services
+## Execution — 11 Managed Services
 
 | Service | Category | Credits/Call |
 |---------|----------|-------------|
@@ -91,13 +92,15 @@ All tracks earn Wayforth the same 1.5% routing fee.
 | Stability AI | Image generation | 10 |
 | Tavily | AI web search | 3 |
 | Jina AI | URL to markdown | 2 |
+| Alpha Vantage | Stock data | 2 |
 
 ## Architecture
 
 ```
 wayforth_search() / POST /query (WayforthQL v1)
 ↓
-WayforthRank (payment-signal ranking, patent pending)
+WayforthRank v2 (payment-signal weighted scoring, patent pending)
+  base_wri×0.40 + payment_rate×0.35 + volume×0.15 + recency×0.10
 ↓
 wayforth_pay() — Track A (card) | Track B (crypto) | Track C (x402)
 ↓
