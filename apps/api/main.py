@@ -36,7 +36,7 @@ STRIPE_MOCK = (
     or not os.environ.get("STRIPE_SECRET_KEY", "")
 )
 
-VERSION = "0.2.0"
+VERSION = "0.2.2"
 
 
 def get_fernet():
@@ -575,7 +575,7 @@ async def system_status(db=Depends(get_db)):
         },
         "searches_24h": searches,
         "mcp_tools": 13,
-        "pypi_version": "0.2.0",
+        "pypi_version": "0.2.2",
         "api": "operational",
         "database": "operational",
         "payment_rail": {
@@ -1407,7 +1407,7 @@ async def get_stats(request: Request, db=Depends(get_db)):
         "searches_7d": searches_7d,
         "mcp_tools": 13,
         "api_version": VERSION,
-        "mcp_version": "0.2.0",
+        "mcp_version": "0.2.2",
     }
 
 
@@ -2948,7 +2948,7 @@ async def mcp_server_card():
     """Smithery discovery endpoint — skip auto-scan and advertise tools directly."""
     return {
         "name": "wayforth",
-        "version": "0.2.0",
+        "version": "0.2.2",
         "description": "The search engine AI agents use to find and pay for APIs. Search 300+ verified APIs ranked by WayforthRank v2.",
         "repository": "https://github.com/WayforthOfficial/wayforth",
         "homepage": "https://wayforth.io",
@@ -2990,7 +2990,7 @@ async def mcp_manifest():
     return {
         "schema_version": "v1",
         "name": "wayforth",
-        "version": "0.2.0",
+        "version": "0.2.2",
         "description": "Search engine and payment rail for AI agents. 300 verified APIs, 11 managed services, WayforthRank v2.",
         "homepage": "https://wayforth.io",
         "icon": "https://wayforth.io/logo.png",
