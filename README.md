@@ -1,5 +1,8 @@
 # Wayforth
 
+[![PyPI](https://img.shields.io/pypi/v/wayforth-mcp)](https://pypi.org/project/wayforth-mcp/)
+[![smithery badge](https://smithery.ai/badge/support-9ef4/Wayforth)](https://smithery.ai/servers/support-9ef4/Wayforth)
+
 **Search engine and payment rail for AI agents.**
 
 300 verified APIs. Pay via card or crypto. One MCP install.
