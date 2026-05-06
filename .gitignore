@@ -33,6 +33,14 @@ docker/volumes/
 .DS_Store
 Thumbs.db
 
-# Internal feeding scripts (kept in ~/wayforth-internal/)
-scripts/feed_wayforthrank.py
-scripts/feed_categories.py
+# Internal scripts (operational tooling, not for public repo)
+scripts/feed_*.py
+scripts/probe_*.py
+scripts/seed_*.py
+scripts/catalog_misses.py
+scripts/normalize_queries.py
+apps/crawler/seed_*.py
+apps/crawler/probe_*.py
+apps/labs/seed_*.py
+apps/api/static/admin.html
+hn_post.md
