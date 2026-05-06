@@ -77,6 +77,43 @@ async def health_check(request):
     return JSONResponse({"status": "ok", "service": "wayforth-mcp"})
 
 
+@mcp.custom_route("/.well-known/mcp/server-card.json", methods=["GET"])
+async def server_card(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse({
+        "name": "wayforth",
+        "version": "0.2.0",
+        "description": "The search engine AI agents use to find and pay for APIs. 300+ verified APIs ranked by WayforthRank v2.",
+        "repository": "https://github.com/WayforthOfficial/wayforth",
+        "homepage": "https://wayforth.io",
+        "license": "BSL-1.1",
+        "runtime": "http",
+        "url": "https://mcp.wayforth.io",
+        "transport": "streamable-http",
+        "configSchema": {
+            "type": "object",
+            "properties": {
+                "WAYFORTH_API_KEY": {
+                    "type": "string",
+                    "description": "Your Wayforth API key — get one free at wayforth.io",
+                    "required": True,
+                }
+            },
+        },
+    })
+
+
+@mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
+async def oauth_server(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse({
+        "issuer": "https://mcp.wayforth.io",
+        "authorization_endpoint": "https://wayforth.io/login",
+        "token_endpoint": "https://wayforth.io/api/token",
+        "response_types_supported": ["code"],
+    })
+
+
 TIER_LABELS = {0: "free", 1: "basic", 2: "standard", 3: "premium"}
 
 MEMORY_FILE = os.path.expanduser("~/.wayforth_memory.json")
