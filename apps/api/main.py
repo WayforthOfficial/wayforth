@@ -2910,7 +2910,7 @@ async def admin_revenue(request: Request, db=Depends(get_db)):
     # Infer MRR from package_purchases if subscription data not in Stripe
     mrr_30d = await db.fetchval(
         "SELECT COALESCE(SUM(amount_usd), 0) FROM package_purchases "
-        "WHERE payment_status = 'completed' AND created_at > NOW() - INTERVAL '30 days'"
+        "WHERE payment_status = 'completed' AND purchased_at > NOW() - INTERVAL '30 days'"
     ) or 0.0
 
     top_users = await db.fetch("""
