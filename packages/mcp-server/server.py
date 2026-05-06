@@ -90,7 +90,7 @@ async def server_card(request):
     from starlette.responses import JSONResponse
     return JSONResponse({
         "name": "wayforth",
-        "version": "0.2.1",
+        "version": "0.2.2",
         "description": "The search engine AI agents use to find and pay for APIs. 300+ verified APIs ranked by WayforthRank v2.",
         "icon": "https://wayforth.io/favicon.png",
         "repository": "https://github.com/WayforthOfficial/wayforth",
