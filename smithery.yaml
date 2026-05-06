@@ -1,3 +1,5 @@
+iconUrl: "https://wayforth.io/favicon.png"
+
 startCommand:
   type: stdio
   configSchema:
