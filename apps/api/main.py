@@ -303,6 +303,12 @@ async def lifespan(app: FastAPI):
     try:
         app.state.pool = await asyncpg.create_pool(_ASYNCPG_URL, min_size=2, max_size=10)
         app.state.db_ok = True
+        async with app.state.pool.acquire() as _mconn:
+            await _mconn.execute("""
+                ALTER TABLE services
+                    ADD COLUMN IF NOT EXISTS wri_score FLOAT,
+                    ADD COLUMN IF NOT EXISTS wri_version TEXT DEFAULT 'v1'
+            """)
     except Exception as e:
         logger.error(f"DB error: {e}")
         logger.warning(f"DB pool creation failed: {e} — /services will be unavailable")
@@ -539,6 +545,7 @@ async def system_status(db=Depends(get_db)):
     return {
         "status": "operational",
         "version": VERSION,
+        "wayforthrank_version": "2.0",
         "services": {
             "total": stats["total_services"],
             "tier2": stats["tier2_services"],
@@ -715,7 +722,8 @@ async def search_services(
                 """
                 SELECT id, name, description, endpoint_url, category,
                        coverage_tier, pricing_usdc, source, payment_protocol, created_at,
-                       last_tested_at, consecutive_failures, x402_supported
+                       last_tested_at, consecutive_failures, x402_supported,
+                       wri_score, wri_version
                 FROM services
                 WHERE ($1::text IS NULL OR category = $1)
                   AND ($2::int IS NULL OR coverage_tier = $2)
@@ -740,7 +748,8 @@ async def search_services(
                     """
                     SELECT id, name, description, endpoint_url, category,
                            coverage_tier, pricing_usdc, source, payment_protocol,
-                           last_tested_at, consecutive_failures, x402_supported
+                           last_tested_at, consecutive_failures, x402_supported,
+                           wri_score, wri_version
                     FROM services
                     WHERE coverage_tier >= 0
                       AND (name ILIKE $1 OR description ILIKE $1 OR category ILIKE $1)
@@ -798,7 +807,8 @@ async def search_services(
             "name": s.get("name"),
             "description": s.get("description"),
             "score": s.get("score", 0),
-            "wri": compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
+            "wri": s["wri_score"] if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
+            "ranking_version": "v2" if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else "v1",
             "reason": s.get("reason", ""),
             "coverage_tier": s.get("coverage_tier"),
             "category": s.get("category"),
@@ -2618,6 +2628,68 @@ async def catalog_gaps(request: Request, key: str = "", db=Depends(get_db)):
         raise HTTPException(status_code=500, detail="query failed")
 
 
+@app.post("/admin/rank/recalculate", tags=["Admin"])
+async def rank_recalculate(request: Request, db=Depends(get_db)):
+    """Recompute WayforthRank v2 scores for all services with payment signal data."""
+    provided_key = request.headers.get("X-Admin-Key", "")
+    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    from wayforth_rank_v2 import compute_wri_v2
+
+    signal_rows = await db.fetch("""
+        SELECT
+            clicked_slug,
+            COUNT(*) AS total_clicks,
+            SUM(CASE WHEN payment_followed THEN 1 ELSE 0 END) AS payments,
+            MAX(created_at) AS last_seen
+        FROM search_analytics
+        WHERE clicked_slug IS NOT NULL
+        GROUP BY clicked_slug
+    """)
+
+    services = await db.fetch("SELECT id, name, wri_score FROM services")
+
+    def _slug(name: str) -> str:
+        return name.lower().replace(" ", "_").replace("-", "_").replace("/", "_")
+
+    svc_map = {_slug(s["name"]): s for s in services}
+
+    results = []
+    for sig in signal_rows:
+        key = sig["clicked_slug"].lower().replace("-", "_")
+        svc = svc_map.get(key)
+        if not svc:
+            continue
+
+        hist = await db.fetchrow(
+            "SELECT wri_score FROM service_score_history "
+            "WHERE service_id = $1 ORDER BY recorded_at DESC LIMIT 1",
+            str(svc["id"])
+        )
+        base_wri = float(hist["wri_score"]) if hist else 60.0
+
+        payments = int(sig["payments"] or 0)
+        total_clicks = int(sig["total_clicks"] or 0)
+        new_wri = compute_wri_v2(base_wri, payments, total_clicks, sig["last_seen"])
+        pay_rate = round(payments * 100.0 / max(total_clicks, 1), 1)
+        old_wri = float(svc["wri_score"]) if svc["wri_score"] is not None else None
+
+        await db.execute(
+            "UPDATE services SET wri_score = $1, wri_version = 'v2' WHERE id = $2",
+            new_wri, svc["id"]
+        )
+        results.append({
+            "service": sig["clicked_slug"],
+            "old_wri": old_wri,
+            "new_wri": new_wri,
+            "payment_rate": pay_rate,
+            "total_signals": total_clicks,
+        })
+
+    return {"updated": len(results), "scores": results}
+
+
 @app.get("/demo")
 async def demo():
     return FileResponse("static/demo.html")
@@ -3878,6 +3950,33 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     else:
         reset = datetime.date(today.year, today.month + 1, 1)
 
+    # WRI scores per service (from search→execute signal chain)
+    wri_rows = await db.fetch("""
+        SELECT
+            clicked_slug AS service,
+            ROUND(AVG(top_result_wri)) AS wri_score,
+            COUNT(*) AS calls,
+            MAX(created_at) AS last_called
+        FROM search_analytics
+        WHERE user_id = $1
+          AND clicked_slug IS NOT NULL
+          AND payment_followed = true
+        GROUP BY clicked_slug
+        ORDER BY calls DESC
+    """, user_id)
+
+    # Overlay v2 scores where available
+    v2_scores: dict = {}
+    for row in wri_rows:
+        slug = row["service"]
+        svc = await db.fetchrow(
+            "SELECT wri_score, wri_version FROM services "
+            "WHERE LOWER(name) = $1 OR LOWER(name) = $2 LIMIT 1",
+            slug, slug.replace("_", " ")
+        )
+        if svc and svc["wri_score"] is not None and svc["wri_version"] == "v2":
+            v2_scores[slug] = round(float(svc["wri_score"]), 1)
+
     return {
         "searches": {
             "total": searches_total,
@@ -3897,6 +3996,16 @@ async def account_analytics(request: Request, db=Depends(get_db)):
             "total": credits["lifetime_credits"] if credits else 0,
             "reset_date": reset.isoformat(),
         },
+        "wri_scores": [
+            {
+                "service": r["service"],
+                "wri_score": v2_scores.get(r["service"], int(r["wri_score"]) if r["wri_score"] is not None else None),
+                "ranking_version": "v2" if r["service"] in v2_scores else "v1",
+                "calls": r["calls"],
+                "last_called": r["last_called"].isoformat() if r["last_called"] else None,
+            }
+            for r in wri_rows
+        ],
     }
 
 
