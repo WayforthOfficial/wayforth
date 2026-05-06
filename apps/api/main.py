@@ -2978,6 +2978,164 @@ async def mcp_server_card():
     }
 
 
+@app.get("/mcp", include_in_schema=False)
+async def mcp_manifest():
+    """MCP server manifest — machine-readable tool registry for AI clients."""
+    return {
+        "schema_version": "v1",
+        "name": "wayforth",
+        "version": "0.2.0",
+        "description": "Search engine and payment rail for AI agents. 300 verified APIs, 11 managed services, WayforthRank v2.",
+        "homepage": "https://wayforth.io",
+        "icon": "https://wayforth.io/logo.png",
+        "transport": {
+            "type": "stdio",
+            "command": "uvx",
+            "args": ["wayforth-mcp"],
+        },
+        "config": {
+            "type": "object",
+            "properties": {
+                "WAYFORTH_API_KEY": {
+                    "type": "string",
+                    "description": "Your Wayforth API key — get one free at wayforth.io/signup",
+                }
+            },
+            "required": ["WAYFORTH_API_KEY"],
+        },
+        "tools": [
+            {
+                "name": "wayforth_search",
+                "description": "Semantic search across 300 APIs ranked by WayforthRank v2 payment-signal scoring.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Natural-language description of the API you need"},
+                        "limit": {"type": "integer", "description": "Max results (default 5, max 20)"},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "wayforth_query",
+                "description": "WayforthQL structured discovery — tier/price/protocol filters, deterministic ranking.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "tier_min": {"type": "integer", "description": "Minimum coverage tier (1–3)"},
+                        "price_max": {"type": "number", "description": "Max price in USDC"},
+                        "sort_by": {"type": "string", "enum": ["wri", "price", "tier"]},
+                        "protocol": {"type": "string", "enum": ["wayforth", "x402"]},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "wayforth_execute",
+                "description": "Execute 11 managed services: groq, deepl, openweather, newsapi, serper, resend, assemblyai, stability, tavily, jina, alphavantage.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service_slug": {"type": "string", "description": "Service identifier (e.g. 'groq', 'deepl')"},
+                        "params": {"type": "object", "description": "Service-specific parameters"},
+                        "key_source": {"type": "string", "enum": ["managed", "byok"], "default": "managed"},
+                    },
+                    "required": ["service_slug", "params"],
+                },
+            },
+            {
+                "name": "wayforth_pay",
+                "description": "Pay for API services via card (Stripe Treasury) or crypto (Base USDC, non-custodial).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service_slug": {"type": "string"},
+                        "amount": {"type": "number", "description": "Amount in USDC"},
+                        "track": {"type": "string", "enum": ["card", "crypto"], "default": "card"},
+                    },
+                    "required": ["service_slug", "amount"],
+                },
+            },
+            {
+                "name": "wayforth_keys",
+                "description": "Manage BYOK encrypted service keys — store, list, delete.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["add", "list", "delete"]},
+                        "service_slug": {"type": "string"},
+                        "api_key": {"type": "string", "description": "Required for action='add'"},
+                        "endpoint_url": {"type": "string", "description": "Default endpoint URL for universal BYOK"},
+                        "default_method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "wayforth_list",
+                "description": "Browse catalog with category and tier filters.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string"},
+                        "tier": {"type": "integer"},
+                        "limit": {"type": "integer"},
+                    },
+                },
+            },
+            {
+                "name": "wayforth_similar",
+                "description": "Find co-used services from real agent behavior (Service Graph).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service_slug": {"type": "string"},
+                    },
+                    "required": ["service_slug"],
+                },
+            },
+            {
+                "name": "wayforth_identity",
+                "description": "Agent trust score and reputation tracking.",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "wayforth_remember",
+                "description": "Save a service to persistent agent memory.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service_slug": {"type": "string"},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["service_slug"],
+                },
+            },
+            {
+                "name": "wayforth_recall",
+                "description": "Retrieve services saved to agent memory.",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "wayforth_stats",
+                "description": "Catalog statistics — totals, tier breakdown, category distribution.",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "wayforth_status",
+                "description": "API health check and live service counts.",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "wayforth_quickstart",
+                "description": "Step-by-step developer guide for using Wayforth in an agent.",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+        ],
+    }
+
+
 @app.get("/demo")
 async def demo():
     return FileResponse("static/demo.html")
