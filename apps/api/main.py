@@ -2875,6 +2875,25 @@ async def rank_recalculate(request: Request, db=Depends(get_db)):
     return {"updated": len(results), "scores": results, "unmatched_slugs": unmatched}
 
 
+@app.get("/admin/subscriptions/debug", tags=["Admin"])
+@limiter.limit("10/minute")
+async def admin_subscriptions_debug(request: Request, db=Depends(get_db)):
+    """Show all api_keys rows where subscription_status='active', with stripe_subscription_id."""
+    provided_key = request.headers.get("X-Admin-Key", "") or request.query_params.get("key", "")
+    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    rows = await db.fetch("""
+        SELECT owner_email, subscription_status, stripe_subscription_id, tier, created_at::date AS joined
+        FROM api_keys
+        WHERE subscription_status = 'active'
+        ORDER BY created_at DESC
+    """)
+    return {
+        "total": len(rows),
+        "rows": [dict(r) for r in rows],
+    }
+
+
 @app.get("/admin/revenue", tags=["Admin"])
 @limiter.limit("20/minute")
 async def admin_revenue(request: Request, db=Depends(get_db)):
