@@ -1,0 +1,3 @@
+ALTER TABLE services
+    ADD COLUMN IF NOT EXISTS wri_score FLOAT,
+    ADD COLUMN IF NOT EXISTS wri_version TEXT DEFAULT 'v1';
