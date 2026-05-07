@@ -111,7 +111,7 @@ PLANS = {
         "calls_included":     1_000,
         "price_usd":          12,
         "price_usdc":         12,
-        "usdc_bonus_credits": 360,
+        "usdc_bonus_credits": 300,
         "stripe_price_env":   "STRIPE_PRICE_BUILDER",
         "features":           ["search", "execute", "wayforthrank", "byok", "webhooks"],
     },
@@ -2826,15 +2826,17 @@ async def x402_execute(request: Request):
 
 async def _activate_usdc_subscription(pool, reference_id: str, tx_hash: str,
                                        plan: str, credits_total: int,
-                                       payer_address: str, api_key_id: str):
+                                       payer_address: str, api_key_id: str,
+                                       bonus_credits: int = 0):
     """Activate a USDC subscription after payment confirmation."""
     async with pool.acquire() as db:
         async with db.transaction():
             await db.execute("""
                 UPDATE usdc_payments
-                SET status = 'confirmed', tx_hash = $1, confirmed_at = NOW()
+                SET status = 'confirmed', tx_hash = $1, confirmed_at = NOW(),
+                    bonus_credits = $3
                 WHERE reference_id = $2
-            """, tx_hash, reference_id)
+            """, tx_hash, reference_id, bonus_credits)
             await db.execute("""
                 UPDATE api_keys
                 SET payment_rail = 'usdc',
@@ -2930,15 +2932,18 @@ async def _usdc_payment_watcher():
                     expected = float(row["amount_usdc"])
                     # Match within 1%
                     if abs(amount_usdc - expected) / expected <= 0.01:
+                        plan_def = PLANS.get(row["plan"], PLANS["free"])
+                        base_credits = plan_def["monthly_credits"]
+                        bonus = math.floor(base_credits * 0.05)
                         await _activate_usdc_subscription(
                             app.state.pool,
                             row["reference_id"],
                             tx_hash,
                             row["plan"],
-                            PLANS.get(row["plan"], PLANS["free"])["monthly_credits"]
-                            + PLANS.get(row["plan"], PLANS["free"])["usdc_bonus_credits"],
+                            base_credits + bonus,
                             wallet,  # payer address from log topics[1]
                             str(row["api_key_id"]),
+                            bonus,
                         )
                         break
 
@@ -3192,8 +3197,10 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
             ),
         })
 
-    # 8. Atomic credit + budget update
-    credits_to_add = math.floor(amount_usdc_float * 1000)
+    # 8. Atomic credit + budget update — 5% USDC bonus
+    base_credits = math.floor(amount_usdc_float * 1000)
+    topup_bonus = math.floor(base_credits * 0.05)
+    credits_to_add = base_credits + topup_bonus
     reference_id = f"topup_{secrets.token_hex(8)}"
 
     async with db.transaction():
@@ -3225,16 +3232,18 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
         # Record payment for replay protection and audit
         await db.execute("""
             INSERT INTO usdc_payments
-                (reference_id, api_key_id, plan, amount_usdc, tx_hash, status, expires_at)
-            VALUES ($1, $2::uuid, 'topup', $3, $4, 'confirmed', NOW() + INTERVAL '10 years')
-        """, reference_id, str(key_record["id"]), amount_usdc_float, tx_hash)
+                (reference_id, api_key_id, plan, amount_usdc, tx_hash, status, bonus_credits, expires_at)
+            VALUES ($1, $2::uuid, 'topup', $3, $4, 'confirmed', $5, NOW() + INTERVAL '10 years')
+        """, reference_id, str(key_record["id"]), amount_usdc_float, tx_hash, topup_bonus)
 
     new_spent = round(spent_usd + amount_usdc_float, 2)
     new_remaining = round(limit_usd - new_spent, 2)
 
     return {
         "success": True,
+        "amount_usdc": f"{amount_usdc_float:.6f}",
         "credits_added": credits_to_add,
+        "bonus_credits": topup_bonus,
         "calls_added": credits_to_add // CREDITS_PER_CALL,
         "new_balance_calls": new_credits // CREDITS_PER_CALL,
         "monthly_topup_spent_usd": new_spent,
@@ -3242,6 +3251,7 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
         "monthly_topup_remaining_usd": new_remaining,
         "resets_at": reset_at.isoformat() if reset_at else None,
         "tx_confirmed": True,
+        "payment_rail": "usdc",
     }
 
 
@@ -3254,7 +3264,7 @@ async def get_billing_settings(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="API key required")
 
     key_record = await db.fetchrow("""
-        SELECT id, user_id, tier,
+        SELECT id, user_id, tier, payment_rail,
                billing_permission, topup_trigger_calls,
                topup_amount_usd, monthly_topup_limit_usd,
                monthly_topup_spent_usd, monthly_topup_reset_at
@@ -3271,11 +3281,13 @@ async def get_billing_settings(request: Request, db=Depends(get_db)):
     )
     balance = credits or 0
     tier = key_record["tier"] or "free"
+    payment_rail = key_record["payment_rail"] or "card"
     limit = float(key_record["monthly_topup_limit_usd"] or 20)
     spent = float(key_record["monthly_topup_spent_usd"] or 0)
     reset_at = key_record["monthly_topup_reset_at"]
+    usdc_active = payment_rail == "usdc"
 
-    return {
+    result = {
         "billing_permission": key_record["billing_permission"] or "none",
         "topup_trigger_calls": key_record["topup_trigger_calls"] or 100,
         "topup_amount_usd": float(key_record["topup_amount_usd"] or 5),
@@ -3285,7 +3297,13 @@ async def get_billing_settings(request: Request, db=Depends(get_db)):
         "monthly_topup_reset_at": reset_at.date().isoformat() if reset_at else None,
         "calls_remaining": min(balance // CREDITS_PER_CALL, PLANS.get(tier, PLANS["free"])["calls_included"]),
         "plan": tier,
+        "payment_rail": payment_rail,
+        "usdc_bonus_rate": 0.05,
+        "usdc_bonus_active": usdc_active,
     }
+    if not usdc_active:
+        result["usdc_bonus_message"] = "Switch to USDC and get 5% more calls every month."
+    return result
 
 
 @app.patch("/billing/settings")
