@@ -37,7 +37,7 @@ STRIPE_MOCK = (
     or not os.environ.get("STRIPE_SECRET_KEY", "")
 )
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 
 def get_fernet():
