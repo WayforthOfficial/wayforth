@@ -3,18 +3,53 @@ import base64
 import httpx
 
 SERVICE_CONFIGS = {
-    "groq":        {"key_var": "GROQ_API_KEY",        "credits": 3},
-    "deepl":       {"key_var": "DEEPL_API_KEY",       "credits": 1},
-    "openweather": {"key_var": "OPENWEATHER_API_KEY", "credits": 1},
-    "newsapi":     {"key_var": "NEWSAPI_API_KEY",     "credits": 1},
-    "resend":      {"key_var": "RESEND_API_KEY",      "credits": 2},
-    "serper":      {"key_var": "SERPER_API_KEY",      "credits": 1},
-    "assemblyai":  {"key_var": "ASSEMBLYAI_API_KEY",  "credits": 5},
-    "stability":   {"key_var": "STABILITY_API_KEY",   "credits": 10},
-    "tavily":       {"key_var": "TAVILY_API_KEY",       "credits": 3},
-    "jina":         {"key_var": "JINA_API_KEY",         "credits": 2},
-    "alphavantage": {"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 2},
-    "elevenlabs":   {"key_var": "ELEVENLABS_API_KEY",   "credits": 5},
+    # Inference
+    "groq":        {"key_var": "GROQ_API_KEY",          "credits": 3},
+    "together":    {"key_var": "TOGETHER_API_KEY",      "credits": 4},
+    # Translation
+    "deepl":       {"key_var": "DEEPL_API_KEY",         "credits": 20},
+    # Search
+    "serper":      {"key_var": "SERPER_API_KEY",        "credits": 3},
+    "tavily":      {"key_var": "TAVILY_API_KEY",        "credits": 4},
+    "brave":       {"key_var": "BRAVE_API_KEY",         "credits": 5},
+    "perplexity":  {"key_var": "PERPLEXITY_API_KEY",    "credits": 10},
+    # Data
+    "openweather": {"key_var": "OPENWEATHER_API_KEY",   "credits": 2},
+    "newsapi":     {"key_var": "NEWSAPI_API_KEY",       "credits": 5},
+    "alphavantage":{"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 4},
+    "jina":        {"key_var": "JINA_API_KEY",          "credits": 4},
+    # Audio / Voice
+    "assemblyai":  {"key_var": "ASSEMBLYAI_API_KEY",    "credits": 20},
+    "elevenlabs":  {"key_var": "ELEVENLABS_API_KEY",    "credits": 200},
+    # Image — stability credits: 45 for core (default), 100 for ultra (resolved at call time)
+    "stability":   {"key_var": "STABILITY_API_KEY",     "credits": 45},
+    # Email
+    "resend":      {"key_var": "RESEND_API_KEY",        "credits": 3},
+}
+
+# Suggested alternatives when a service env key is missing
+SERVICE_ALTERNATIVES = {
+    "together":   "groq",
+    "perplexity": "tavily",
+    "brave":      "serper",
+}
+
+SERVICE_DISPLAY_NAMES = {
+    "groq":        "Groq Inference",
+    "together":    "Together AI",
+    "deepl":       "DeepL Translation",
+    "serper":      "Serper Search",
+    "tavily":      "Tavily Search",
+    "brave":       "Brave Search",
+    "perplexity":  "Perplexity Sonar",
+    "openweather": "OpenWeather",
+    "newsapi":     "NewsAPI",
+    "alphavantage":"Alpha Vantage",
+    "jina":        "Jina Reader",
+    "assemblyai":  "AssemblyAI",
+    "elevenlabs":  "ElevenLabs TTS",
+    "stability":   "Stability AI",
+    "resend":      "Resend Email",
 }
 
 
@@ -224,36 +259,63 @@ async def call_stability(params: dict, api_key: str) -> dict:
     prompt = params.get("prompt", "")
     if not prompt:
         raise Exception("params.prompt is required")
-    text_prompts = [{"text": prompt, "weight": 1.0}]
-    negative_prompt = params.get("negative_prompt", "")
-    if negative_prompt:
-        text_prompts.append({"text": negative_prompt, "weight": -1.0})
-    body = {
-        "text_prompts": text_prompts,
-        "width": int(params.get("width", 1024)),
-        "height": int(params.get("height", 1024)),
-        "steps": int(params.get("steps", 30)),
-        "samples": 1,
-    }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(
-            "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            json=body,
-        )
-    if r.status_code != 200:
-        raise Exception(f"Stability AI error {r.status_code}: {r.text[:200]}")
-    data = r.json()
-    artifact = data["artifacts"][0]
-    return {
-        "image_base64": artifact["base64"],
-        "seed": artifact.get("seed", 0),
-        "finish_reason": artifact.get("finishReason", "SUCCESS"),
-    }
+    quality = params.get("quality", "core")  # "core" | "ultra"
+
+    if quality == "ultra":
+        # Stability AI v2beta Ultra endpoint uses multipart form
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                "https://api.stability.ai/v2beta/stable-image/generate/ultra",
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+                data={
+                    "prompt": prompt,
+                    "output_format": "png",
+                    "aspect_ratio": params.get("aspect_ratio", "1:1"),
+                },
+                files={"none": ("", b"")},  # multipart requires at least one file field
+            )
+        if r.status_code not in (200, 201):
+            raise Exception(f"Stability Ultra error {r.status_code}: {r.text[:200]}")
+        data = r.json()
+        return {
+            "image_base64": data.get("image", ""),
+            "seed": data.get("seed", 0),
+            "finish_reason": data.get("finish_reason", "SUCCESS"),
+            "quality": "ultra",
+        }
+    else:
+        # v1 SDXL endpoint (core quality)
+        text_prompts = [{"text": prompt, "weight": 1.0}]
+        negative_prompt = params.get("negative_prompt", "")
+        if negative_prompt:
+            text_prompts.append({"text": negative_prompt, "weight": -1.0})
+        body = {
+            "text_prompts": text_prompts,
+            "width": int(params.get("width", 1024)),
+            "height": int(params.get("height", 1024)),
+            "steps": int(params.get("steps", 30)),
+            "samples": 1,
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json=body,
+            )
+        if r.status_code != 200:
+            raise Exception(f"Stability AI error {r.status_code}: {r.text[:200]}")
+        data = r.json()
+        artifact = data["artifacts"][0]
+        return {
+            "image_base64": artifact["base64"],
+            "seed": artifact.get("seed", 0),
+            "finish_reason": artifact.get("finishReason", "SUCCESS"),
+            "quality": "core",
+        }
 
 
 async def call_tavily(params: dict, api_key: str) -> dict:
@@ -381,17 +443,94 @@ async def call_elevenlabs(params: dict, api_key: str) -> dict:
     }
 
 
+async def call_together(params: dict, api_key: str) -> dict:
+    messages = params.get("messages", [])
+    if not messages:
+        raise Exception("params.messages is required")
+    model = params.get("model", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
+    max_tokens = params.get("max_tokens", 1024)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.post(
+            "https://api.together.xyz/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "max_tokens": max_tokens},
+        )
+    if r.status_code != 200:
+        raise Exception(f"Together AI error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    choice = data["choices"][0]
+    usage = data.get("usage", {})
+    return {
+        "content": choice["message"]["content"],
+        "model": data.get("model", model),
+        "tokens_used": usage.get("total_tokens", 0),
+    }
+
+
+async def call_perplexity(params: dict, api_key: str) -> dict:
+    messages = params.get("messages", [])
+    if not messages:
+        raise Exception("params.messages is required")
+    model = params.get("model", "sonar")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages},
+        )
+    if r.status_code != 200:
+        raise Exception(f"Perplexity error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    choice = data["choices"][0]
+    return {
+        "content": choice["message"]["content"],
+        "model": data.get("model", model),
+        "citations": data.get("citations", []),
+    }
+
+
+async def call_brave(params: dict, api_key: str) -> dict:
+    query = params.get("query") or params.get("q", "")
+    if not query:
+        raise Exception("params.query is required")
+    count = min(int(params.get("count", 10)), 20)
+    qp: dict = {"q": query, "count": count}
+    freshness = params.get("freshness")
+    if freshness in ("pd", "pw", "pm", "py"):
+        qp["freshness"] = freshness
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            headers={"Accept": "application/json", "X-Subscription-Token": api_key},
+            params=qp,
+        )
+    if r.status_code != 200:
+        raise Exception(f"Brave Search error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    results = []
+    for item in (data.get("web", {}).get("results") or [])[:count]:
+        results.append({
+            "title": item.get("title", ""),
+            "url": item.get("url", ""),
+            "description": item.get("description", ""),
+        })
+    return {"query": query, "results": results}
+
+
 ADAPTERS = {
     "groq":        call_groq,
+    "together":    call_together,
     "deepl":       call_deepl,
+    "serper":      call_serper,
+    "tavily":      call_tavily,
+    "brave":       call_brave,
+    "perplexity":  call_perplexity,
     "openweather": call_openweather,
     "newsapi":     call_newsapi,
-    "resend":      call_resend,
-    "serper":      call_serper,
+    "alphavantage":call_alphavantage,
+    "jina":        call_jina,
     "assemblyai":  call_assemblyai,
+    "elevenlabs":  call_elevenlabs,
     "stability":   call_stability,
-    "tavily":       call_tavily,
-    "jina":         call_jina,
-    "alphavantage": call_alphavantage,
-    "elevenlabs":   call_elevenlabs,
+    "resend":      call_resend,
 }

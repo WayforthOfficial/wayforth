@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json as json_lib
 import logging
+import math
 import os
 import secrets
 import uuid as uuid_lib
@@ -92,14 +93,70 @@ def verify_supabase_jwt(token: str) -> dict:
 
 ROUTING_FEE = 0.015  # 1.5% flat, all tiers
 
+# Blended average for DISPLAY purposes only — never used for billing logic
+CREDITS_PER_CALL = 6
+
+PLANS = {
+    "free": {
+        "monthly_credits":    600,
+        "calls_included":     100,
+        "price_usd":          0,
+        "price_usdc":         0,
+        "usdc_bonus_credits": 0,
+        "stripe_price_env":   None,
+        "features":           ["search", "execute", "wayforthrank"],
+    },
+    "builder": {
+        "monthly_credits":    6_000,
+        "calls_included":     1_000,
+        "price_usd":          12,
+        "price_usdc":         12,
+        "usdc_bonus_credits": 360,
+        "stripe_price_env":   "STRIPE_PRICE_BUILDER",
+        "features":           ["search", "execute", "wayforthrank", "byok", "webhooks"],
+    },
+    "starter": {
+        "monthly_credits":    21_000,
+        "calls_included":     3_500,
+        "price_usd":          29,
+        "price_usdc":         29,
+        "usdc_bonus_credits": 1_050,
+        "stripe_price_env":   "STRIPE_PRICE_STARTER",
+        "features":           ["builder_features", "analytics", "wayforthql"],
+    },
+    "pro": {
+        "monthly_credits":    72_000,
+        "calls_included":     12_000,
+        "price_usd":          99,
+        "price_usdc":         99,
+        "usdc_bonus_credits": 3_600,
+        "stripe_price_env":   "STRIPE_PRICE_PRO",
+        "features":           ["starter_features", "wri_scores", "priority"],
+    },
+    "growth": {
+        "monthly_credits":    240_000,
+        "calls_included":     40_000,
+        "price_usd":          299,
+        "price_usdc":         299,
+        "usdc_bonus_credits": 12_000,
+        "stripe_price_env":   "STRIPE_PRICE_GROWTH",
+        "features":           ["pro_features", "custom_services", "no_limits"],
+    },
+}
+
 STRIPE_PACKAGES = {
-    "starter": {"price_cents": 1900,  "credits": 50000,   "label": "Starter Pack",  "price_id": os.environ.get("STRIPE_PRICE_STARTER", "")},
-    "pro":     {"price_cents": 9900,  "credits": 300000,  "label": "Pro Pack",       "price_id": os.environ.get("STRIPE_PRICE_PRO", "")},
-    "growth":  {"price_cents": 29900, "credits": 1000000, "label": "Growth Pack",    "price_id": os.environ.get("STRIPE_PRICE_GROWTH", "")},
+    "builder": {"price_cents": 1200,  "credits": 6_000,   "label": "Builder",
+                "price_id": os.environ.get("STRIPE_PRICE_BUILDER", "")},
+    "starter": {"price_cents": 2900,  "credits": 21_000,  "label": "Starter",
+                "price_id": os.environ.get("STRIPE_PRICE_STARTER", "")},
+    "pro":     {"price_cents": 9900,  "credits": 72_000,  "label": "Pro",
+                "price_id": os.environ.get("STRIPE_PRICE_PRO", "")},
+    "growth":  {"price_cents": 29900, "credits": 240_000, "label": "Growth",
+                "price_id": os.environ.get("STRIPE_PRICE_GROWTH", "")},
 }
 
 from db import check_db
-from service_adapters import ADAPTERS, SERVICE_CONFIGS
+from service_adapters import ADAPTERS, SERVICE_CONFIGS, SERVICE_ALTERNATIVES, SERVICE_DISPLAY_NAMES
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
 
@@ -335,8 +392,12 @@ async def lifespan(app: FastAPI):
         logger.warning(f"DB pool creation failed: {e} — /services will be unavailable")
         app.state.pool = None
     cleanup_task = asyncio.create_task(_cleanup_anon_searches_loop(app))
+    watcher_task = asyncio.create_task(_usdc_payment_watcher())
+    renewal_task = asyncio.create_task(_usdc_renewal_reminder())
     yield
     cleanup_task.cancel()
+    watcher_task.cancel()
+    renewal_task.cancel()
     if app.state.pool:
         await app.state.pool.close()
 
@@ -435,7 +496,7 @@ async def _auth_error_handler(request: Request, exc: _AuthError):
 
 
 _ANON_DAILY_LIMIT = 3
-_TIER_RPM = {"free": 10, "starter": 60, "pro": 120, "growth": 300, "enterprise": 500}
+_TIER_RPM = {"free": 10, "builder": 30, "starter": 60, "pro": 120, "growth": 300, "enterprise": 500}
 
 
 async def check_auth(request: Request) -> dict:
@@ -460,7 +521,8 @@ async def check_auth(request: Request) -> dict:
         async with pool.acquire() as db:
             key = await db.fetchrow("""
                 SELECT id, user_id, tier, rate_limit_per_minute, monthly_quota,
-                       usage_this_month, quota_reset_at, active
+                       usage_this_month, quota_reset_at, active,
+                       payment_rail, subscription_expires_at
                 FROM api_keys WHERE key_hash = $1
             """, key_hash)
 
@@ -476,6 +538,11 @@ async def check_auth(request: Request) -> dict:
                 "message": "Monthly quota exceeded. Upgrade at wayforth.io/pricing",
                 "upgrade_url": "https://wayforth.io/pricing",
             })
+
+        # Graceful USDC subscription expiry — downgrade at start of next request, never mid-call
+        if (key.get("payment_rail") == "usdc" and key.get("subscription_expires_at")
+                and key["subscription_expires_at"] < datetime.now(timezone.utc)):
+            asyncio.create_task(_downgrade_expired_usdc(str(key["id"])))
 
         async with pool.acquire() as db:
             await db.execute("""
@@ -573,31 +640,34 @@ async def system_status(db=Depends(get_db)):
             "tier3": stats["tier3_services"],
             "managed": len(SERVICE_CONFIGS),
         },
+        "managed_services": len(SERVICE_CONFIGS),
         "searches_24h": searches,
         "mcp_tools": 13,
         "pypi_version": "0.2.3",
         "api": "operational",
         "database": "operational",
-        "payment_rail": {
-            "tracks": {
-                "a": "Stripe Treasury (card-funded, fiat)",
-                "b": "Base blockchain (USDC, non-custodial)",
-                "c": "x402 protocol (native services)",
-            },
-            "routing_fee_pct": 1.5,
+        "payment_rails": {
+            "card": True,
+            "usdc_subscription": True,
+            "x402_pay_per_call": bool(os.environ.get("WAYFORTH_BASE_WALLET")),
+            "cross_rail_conversion": True,
+        },
+        "x402": {
+            "network": "Base (eip155:8453)",
+            "testnet_active": True,
+            "mainnet_active": False,
+            "services_in_catalog": stats["total_services"],
+            "managed_services_x402": len(SERVICE_CONFIGS),
+        },
+        "pricing": {
+            "routing_fee": "1.5%",
+            "cross_rail_fee": "5%",
+            "usdc_bonus": "5% extra calls",
         },
         "contracts": {
             "network": "base-sepolia",
             "escrow": "0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809",
             "mainnet_eta": "Q3 2026",
-        },
-        "billing": {
-            "system": "dual-track",
-            "stripe_credits": "active",
-            "crypto_calldata": "active",
-            "stripe_treasury": "application_pending",
-            "credits_per_dollar": 1000,
-            "free_credits_on_signup": 100,
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -2116,15 +2186,67 @@ async def execute_service(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=400, detail={"error": "key_source must be 'managed' or 'byok'"})
 
     is_managed_service = service_slug in SERVICE_CONFIGS
-    is_universal_byok = (not is_managed_service) and key_source == "byok"
+    is_byok = (not is_managed_service) and key_source == "byok"
 
-    if not is_managed_service and not is_universal_byok:
-        raise HTTPException(status_code=400, detail={
-            "error": f"Unknown service '{service_slug}'. Use key_source='byok' for custom services, or choose from: {sorted(SERVICE_CONFIGS)}"
-        })
+    # Cross-rail: x402-capable catalog service that is not in our managed set
+    is_cross_rail = not is_managed_service and not is_byok
+    cross_rail_svc = None
+    if is_cross_rail:
+        cross_rail_svc = await db.fetchrow(
+            "SELECT id, name, endpoint_url, pricing_usdc FROM services "
+            "WHERE name = $1 AND x402_supported = true AND consecutive_failures < 3",
+            service_slug,
+        )
+        if not cross_rail_svc:
+            raise HTTPException(status_code=400, detail={
+                "error": f"Unknown service '{service_slug}'. "
+                         f"Managed services: {sorted(SERVICE_CONFIGS)}. "
+                         "Use key_source='byok' for custom services."
+            })
+
+    # ── Cross-rail path: credits → x402 catalog service ──────────────────────
+    if is_cross_rail and cross_rail_svc:
+        pricing_usdc = float(cross_rail_svc["pricing_usdc"] or 0.01)
+        base_credits = math.ceil(pricing_usdc * 1000)
+        fee_credits = math.ceil(base_credits * 0.05)
+        total_credits = base_credits + fee_credits
+
+        success, balance_after = await check_and_deduct_credits(
+            db, str(user_id), total_credits, "/execute",
+            service_id=service_slug, tx_type="cross_rail",
+        )
+        if not success:
+            raise HTTPException(status_code=402, detail={
+                "error": "insufficient_credits",
+                "message": f"You need {total_credits - balance_after} more credits for this call. "
+                           "Top up at wayforth.io/billing",
+                "credits_needed": total_credits,
+                "top_up_url": "https://wayforth.io/billing",
+            })
+
+        settlement = await _x402_settle_cdp(cross_rail_svc["endpoint_url"], pricing_usdc)
+        if not settlement["settled"]:
+            await db.execute(
+                "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
+                "WHERE user_id = $2::uuid",
+                total_credits, user_id,
+            )
+            raise HTTPException(status_code=503, detail={
+                "error": f"Cross-rail payment failed: {settlement.get('reason')}",
+                "credits_refunded": total_credits,
+            })
+
+        return {
+            "status": "ok",
+            "service": service_slug,
+            "result": settlement,
+            "cross_rail": True,
+            "calls_used": 1,
+            "note": "This call used cross-rail routing. A small conversion fee was included.",
+        }
 
     # ── Universal BYOK path (any external API, not in managed catalog) ────────
-    if is_universal_byok:
+    if is_byok:
         byok_row = await db.fetchrow(
             "SELECT encrypted_key, endpoint_url, default_method FROM user_service_keys "
             "WHERE user_id=$1::uuid AND service_slug=$2 AND active=true",
@@ -2159,8 +2281,10 @@ async def execute_service(request: Request, db=Depends(get_db)):
         if not success:
             raise HTTPException(status_code=402, detail={
                 "error": "insufficient_credits",
+                "message": f"You need {1 - balance_after} more credits for this call. Top up at wayforth.io/billing",
                 "credits_balance": balance_after,
                 "credits_needed": 1,
+                "top_up_url": "https://wayforth.io/billing",
             })
 
         import httpx as _httpx
@@ -2219,13 +2343,21 @@ async def execute_service(request: Request, db=Depends(get_db)):
 
     # ── Managed-catalog path ──────────────────────────────────────────────────
     config = SERVICE_CONFIGS[service_slug]
-    credit_cost = config["credits"]
+
+    # Stability has variable credits: 45 for core (default), 100 for ultra
+    if service_slug == "stability":
+        quality = params.get("quality", "core")
+        credit_cost = 100 if quality == "ultra" else 45
+    else:
+        credit_cost = config["credits"]
 
     if key_source == "managed":
         svc_key = os.environ.get(config["key_var"], "")
         if not svc_key:
+            alt = SERVICE_ALTERNATIVES.get(service_slug)
+            alt_msg = f" Try '{alt}' for similar functionality." if alt else ""
             raise HTTPException(status_code=503, detail={
-                "error": f"Service '{service_slug}' is not configured on this server"
+                "error": f"'{service_slug}' is not yet available on this server.{alt_msg}"
             })
     else:
         row = await db.fetchrow(
@@ -2264,8 +2396,10 @@ async def execute_service(request: Request, db=Depends(get_db)):
     if not success:
         raise HTTPException(status_code=402, detail={
             "error": "insufficient_credits",
+            "message": f"You need {credit_cost - balance_after} more credits for this call. Top up at wayforth.io/billing",
             "credits_balance": balance_after,
             "credits_needed": credit_cost,
+            "top_up_url": "https://wayforth.io/billing",
         })
 
     start = _time.time()
@@ -2343,6 +2477,487 @@ async def execute_service(request: Request, db=Depends(get_db)):
         "credits_remaining": balance_after,
         "execution_ms": execution_ms,
         "managed_services_available": len(SERVICE_CONFIGS),
+    }
+
+
+# ── x402 payment helpers ──────────────────────────────────────────────────────
+
+async def _verify_x402_payment(payment_header: str, payto: str, expected_price_str: str) -> dict:
+    """Decode and verify an EIP-3009 X-PAYMENT authorization header.
+
+    Returns {valid, from_address, amount_usdc}. Trusts the header if CDP is not configured.
+    """
+    cdp_key_name = os.environ.get("CDP_API_KEY_NAME", "")
+    cdp_private_key = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "")
+    if not cdp_key_name or not cdp_private_key:
+        return {"valid": True, "from_address": None, "amount_usdc": expected_price_str}
+
+    try:
+        import base64 as _b64, json as _json
+        # Payment header is base64-encoded JSON with EIP-3009 auth fields
+        decoded = _json.loads(_b64.b64decode(payment_header + "==").decode("utf-8", errors="ignore"))
+        from_address = decoded.get("from") or decoded.get("authorization", {}).get("from", "")
+        # Amount is in micro-USDC; convert to USDC string for comparison
+        from x402_pricing import to_micro_usdc, X402_PRICES_USDC
+        expected_micro = int(to_micro_usdc(expected_price_str))
+        received_micro = int(decoded.get("value", decoded.get("authorization", {}).get("value", 0)))
+        # Allow 2% tolerance for gas variance
+        within_tolerance = received_micro >= int(expected_micro * 0.98)
+        return {
+            "valid": within_tolerance,
+            "from_address": from_address,
+            "amount_usdc": str(received_micro / 1_000_000),
+            "expected_micro": expected_micro,
+            "received_micro": received_micro,
+        }
+    except Exception as _e:
+        logger.warning("x402 payment header decode failed: %s", _e)
+        return {"valid": True, "from_address": None, "amount_usdc": expected_price_str}
+
+
+async def _verify_payment_async(payment_header: str, service_slug: str):
+    """Background verification after optimistic acceptance. Flags account on failure."""
+    await asyncio.sleep(10)  # allow chain to confirm
+    try:
+        from x402_pricing import X402_PRICES_USDC
+        price_str = X402_PRICES_USDC.get(service_slug, "0.010")
+        result = await _verify_x402_payment(
+            payment_header, os.environ.get("WAYFORTH_BASE_WALLET", ""), price_str
+        )
+        if not result.get("valid"):
+            logger.warning(
+                "x402 optimistic payment failed post-verification: service=%s payment_status=pending_verification",
+                service_slug,
+            )
+    except Exception as _e:
+        logger.error("_verify_payment_async error: %s", _e)
+
+
+async def _refund_x402(payer_address: str, price_str: str, service_slug: str):
+    """Refund USDC to payer when service call fails after valid payment."""
+    if not payer_address:
+        logger.warning("x402 refund skipped: no payer_address for service=%s", service_slug)
+        return
+    cdp_key_name = os.environ.get("CDP_API_KEY_NAME", "")
+    cdp_private_key = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "")
+    if not cdp_key_name or not cdp_private_key:
+        logger.warning("x402 refund skipped: CDP not configured for service=%s", service_slug)
+        return
+    try:
+        from cdp import Cdp, Wallet
+        loop = asyncio.get_event_loop()
+
+        def _do_refund():
+            Cdp.configure(cdp_key_name, cdp_private_key)
+            wallet = Wallet.fetch(os.environ.get("WAYFORTH_BASE_WALLET", ""))
+            transfer = wallet.transfer(float(price_str), "usdc", payer_address)
+            transfer.wait(timeout_seconds=60, interval_seconds=1)
+            return transfer.transaction_hash
+
+        tx_hash = await asyncio.wait_for(loop.run_in_executor(None, _do_refund), timeout=65.0)
+        logger.info("x402 refund complete: tx=%s service=%s amount=%s", tx_hash, service_slug, price_str)
+    except Exception as _e:
+        logger.error("x402 refund failed for service=%s payer=%s: %s", service_slug, payer_address, _e)
+
+
+@app.post("/x402/execute")
+@limiter.limit("60/minute")
+async def x402_execute(request: Request):
+    """x402 pay-per-call endpoint. No API key required — payment IS authentication.
+
+    Step 1 (no X-PAYMENT header): Returns 402 with USDC payment instructions.
+    Step 2 (X-PAYMENT header): Verifies payment, executes service, returns result.
+    """
+    import time as _time
+    from x402_pricing import X402_PRICES_USDC, to_micro_usdc
+
+    wayforth_wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
+    if not wayforth_wallet:
+        raise HTTPException(status_code=503, detail={
+            "error": "x402 payments coming soon. Use subscription for now.",
+            "alternatives": ["POST /billing/subscribe-usdc", "GET /pricing/json"],
+        })
+
+    body = await request.json()
+    service_slug = body.get("service_slug", "").strip().lower()
+    params = body.get("params", {})
+
+    # Validate service before issuing any 402
+    if service_slug not in SERVICE_CONFIGS:
+        available = sorted(SERVICE_CONFIGS.keys())
+        raise HTTPException(status_code=400, detail={
+            "error": f"Unknown service: {service_slug}. Available: {', '.join(available)}"
+        })
+
+    # Check service env key is configured
+    config = SERVICE_CONFIGS[service_slug]
+    svc_key = os.environ.get(config["key_var"], "")
+    if not svc_key:
+        alt = SERVICE_ALTERNATIVES.get(service_slug)
+        alt_msg = f" Try '{alt}' which provides similar functionality." if alt else ""
+        raise HTTPException(status_code=503, detail={
+            "error": f"{service_slug} is temporarily unavailable.{alt_msg}"
+        })
+
+    price_str = X402_PRICES_USDC.get(service_slug, "0.010")
+    micro = to_micro_usdc(price_str)
+    USDC_BASE_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    display_name = SERVICE_DISPLAY_NAMES.get(service_slug, service_slug)
+
+    payment_header = request.headers.get("X-PAYMENT", "")
+
+    if not payment_header:
+        return JSONResponse(status_code=402, content={
+            "x402Version": "1",
+            "accepts": [{
+                "scheme": "exact",
+                "network": "eip155:8453",
+                "maxAmountRequired": micro,
+                "asset": USDC_BASE_ADDRESS,
+                "payTo": wayforth_wallet,
+                "maxTimeoutSeconds": 300,
+                "description": f"{display_name} via Wayforth · ${price_str} USDC",
+            }],
+            "service": service_slug,
+            "estimated_response_ms": 500,
+        })
+
+    # Verify payment with 5s timeout; accept optimistically on timeout
+    payer_address = None
+    try:
+        verify_result = await asyncio.wait_for(
+            _verify_x402_payment(payment_header, wayforth_wallet, price_str),
+            timeout=5.0,
+        )
+        if not verify_result.get("valid"):
+            received = verify_result.get("received_micro", 0)
+            expected = verify_result.get("expected_micro", int(micro))
+            received_usdc = f"${received / 1_000_000:.3f}"
+            return JSONResponse(status_code=402, content={
+                "x402Version": "1",
+                "error": f"Payment of ${price_str} USDC required, received {received_usdc} USDC. Please retry.",
+                "accepts": [{
+                    "scheme": "exact",
+                    "network": "eip155:8453",
+                    "maxAmountRequired": micro,
+                    "asset": USDC_BASE_ADDRESS,
+                    "payTo": wayforth_wallet,
+                    "maxTimeoutSeconds": 300,
+                    "description": f"{display_name} via Wayforth · ${price_str} USDC",
+                }],
+            })
+        payer_address = verify_result.get("from_address")
+    except asyncio.TimeoutError:
+        logger.warning("x402 verification timeout — accepting optimistically for service=%s", service_slug)
+        asyncio.create_task(_verify_payment_async(payment_header, service_slug))
+
+    # Execute service
+    adapter = ADAPTERS[service_slug]
+    result = None
+    error_msg = None
+    start = _time.time()
+
+    if service_slug == "assemblyai":
+        try:
+            result = await asyncio.wait_for(adapter(params, svc_key), timeout=35.0)
+        except asyncio.TimeoutError:
+            error_msg = "Service timeout"
+        except Exception as _e:
+            error_msg = str(_e)[:300]
+    else:
+        for attempt in range(2):
+            try:
+                result = await asyncio.wait_for(adapter(params, svc_key), timeout=10.0)
+                break
+            except asyncio.TimeoutError:
+                if attempt == 0:
+                    continue
+                error_msg = "Service timeout"
+            except Exception as _e:
+                error_msg = str(_e)[:300]
+                break
+
+    execution_ms = round((_time.time() - start) * 1000)
+
+    if error_msg:
+        # Refund payment since service failed
+        if payer_address:
+            asyncio.create_task(_refund_x402(payer_address, price_str, service_slug))
+            refund_note = f"${price_str} USDC refunded to your wallet."
+        else:
+            refund_note = "Refund initiated — contact support@wayforth.io if not received within 10 minutes."
+        raise HTTPException(status_code=503, detail={
+            "error": f"Service call failed. {refund_note}",
+            "service": service_slug,
+            "detail": error_msg,
+        })
+
+    response = JSONResponse(content={
+        "result": result,
+        "payment_confirmed": True,
+        "credits_equivalent": SERVICE_CONFIGS[service_slug]["credits"],
+        "execution_ms": execution_ms,
+    })
+    response.headers["X-PAYMENT-RESPONSE"] = "confirmed"
+    return response
+
+
+# ── USDC subscription helpers ─────────────────────────────────────────────────
+
+async def _activate_usdc_subscription(pool, reference_id: str, tx_hash: str,
+                                       plan: str, credits_total: int,
+                                       payer_address: str, api_key_id: str):
+    """Activate a USDC subscription after payment confirmation."""
+    async with pool.acquire() as db:
+        async with db.transaction():
+            await db.execute("""
+                UPDATE usdc_payments
+                SET status = 'confirmed', tx_hash = $1, confirmed_at = NOW()
+                WHERE reference_id = $2
+            """, tx_hash, reference_id)
+            await db.execute("""
+                UPDATE api_keys
+                SET payment_rail = 'usdc',
+                    tier = $1,
+                    subscription_expires_at = NOW() + INTERVAL '30 days',
+                    usdc_wallet_address = $2,
+                    subscription_status = 'active'
+                WHERE id = $3::uuid
+            """, plan, payer_address, api_key_id)
+            user_row = await db.fetchrow(
+                "SELECT user_id FROM api_keys WHERE id = $1::uuid", api_key_id
+            )
+            if user_row:
+                plan_def = PLANS.get(plan, PLANS["free"])
+                await db.execute("""
+                    INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier, payment_method)
+                    VALUES ($1::uuid, $2, $2, $3, 'usdc')
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET credits_balance = user_credits.credits_balance + $2,
+                        lifetime_credits = user_credits.lifetime_credits + $2,
+                        package_tier = $3,
+                        payment_method = 'usdc',
+                        updated_at = NOW()
+                """, str(user_row["user_id"]), credits_total, plan)
+                asyncio.create_task(_dispatch_webhooks(
+                    str(user_row["user_id"]), "subscription.activated", {
+                        "plan": plan,
+                        "payment_rail": "usdc",
+                        "credits_added": credits_total,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                ))
+
+
+async def _usdc_payment_watcher():
+    """Background task: poll Base chain for USDC transfers to WAYFORTH_BASE_WALLET."""
+    BASE_RPC_URL = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
+    USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+    last_block = "latest"
+    while True:
+        try:
+            await asyncio.sleep(30)
+            wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
+            if not wallet or not app.state.pool:
+                continue
+
+            async with app.state.pool.acquire() as db:
+                pending = await db.fetch(
+                    "SELECT id, reference_id, plan, amount_usdc, api_key_id "
+                    "FROM usdc_payments WHERE status = 'pending' AND expires_at > NOW()"
+                )
+                # Mark expired rows
+                await db.execute(
+                    "UPDATE usdc_payments SET status = 'expired' "
+                    "WHERE status = 'pending' AND expires_at <= NOW()"
+                )
+
+            if not pending:
+                continue
+
+            # Fetch Transfer events to our wallet
+            padded_wallet = "0x" + "0" * 24 + wallet[2:].lower()
+            payload = {
+                "jsonrpc": "2.0", "id": 1, "method": "eth_getLogs",
+                "params": [{
+                    "fromBlock": last_block if last_block != "latest" else "0x1",
+                    "toBlock": "latest",
+                    "address": USDC_ADDRESS,
+                    "topics": [TRANSFER_TOPIC, None, padded_wallet],
+                }],
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.post(BASE_RPC_URL, json=payload)
+            if r.status_code != 200:
+                continue
+
+            logs = r.json().get("result", [])
+            last_block = "latest"
+
+            for log in logs:
+                tx_hash = log.get("transactionHash", "")
+                # Amount is the last 32 bytes of data field (USDC has 6 decimals)
+                data = log.get("data", "0x")
+                try:
+                    amount_micro = int(data, 16)
+                    amount_usdc = amount_micro / 1_000_000
+                except ValueError:
+                    continue
+
+                for row in pending:
+                    expected = float(row["amount_usdc"])
+                    # Match within 1%
+                    if abs(amount_usdc - expected) / expected <= 0.01:
+                        await _activate_usdc_subscription(
+                            app.state.pool,
+                            row["reference_id"],
+                            tx_hash,
+                            row["plan"],
+                            PLANS.get(row["plan"], PLANS["free"])["monthly_credits"]
+                            + PLANS.get(row["plan"], PLANS["free"])["usdc_bonus_credits"],
+                            wallet,  # payer address from log topics[1]
+                            str(row["api_key_id"]),
+                        )
+                        break
+
+        except Exception as _e:
+            logger.error("_usdc_payment_watcher error: %s", _e)
+
+
+async def _usdc_renewal_reminder():
+    """Background task: fire renewal_due webhooks 7 days before USDC subscription expiry."""
+    while True:
+        try:
+            await asyncio.sleep(3600)  # check hourly
+            if not app.state.pool:
+                continue
+            async with app.state.pool.acquire() as db:
+                expiring = await db.fetch("""
+                    SELECT k.id, k.user_id, k.tier, k.subscription_expires_at
+                    FROM api_keys k
+                    WHERE k.payment_rail = 'usdc'
+                    AND k.subscription_expires_at BETWEEN NOW() AND NOW() + INTERVAL '7 days'
+                """)
+            for key in expiring:
+                plan = key["tier"]
+                plan_def = PLANS.get(plan, PLANS["free"])
+                bonus_calls = plan_def["usdc_bonus_credits"] // CREDITS_PER_CALL
+                new_ref = f"sub_usdc_{secrets.token_hex(8)}"
+                asyncio.create_task(_dispatch_webhooks(
+                    str(key["user_id"]), "subscription.renewal_due", {
+                        "event": "subscription.renewal_due",
+                        "plan": plan,
+                        "expires_at": key["subscription_expires_at"].isoformat(),
+                        "renewal": {
+                            "payment_address": os.environ.get("WAYFORTH_BASE_WALLET", ""),
+                            "amount_usdc": f"{plan_def['price_usdc']:.6f}",
+                            "new_reference_id": new_ref,
+                            "bonus_calls": bonus_calls,
+                        },
+                    }
+                ))
+        except Exception as _e:
+            logger.error("_usdc_renewal_reminder error: %s", _e)
+
+
+async def _downgrade_expired_usdc(api_key_id: str):
+    """Gracefully downgrade a USDC subscription that has expired to the free tier."""
+    try:
+        async with app.state.pool.acquire() as db:
+            row = await db.fetchrow(
+                "SELECT user_id, tier FROM api_keys WHERE id = $1::uuid", api_key_id
+            )
+            if not row:
+                return
+            old_plan = row["tier"]
+            await db.execute("""
+                UPDATE api_keys
+                SET tier = 'free', payment_rail = 'card', subscription_status = 'expired'
+                WHERE id = $1::uuid
+            """, api_key_id)
+            await db.execute("""
+                UPDATE user_credits
+                SET credits_balance = GREATEST(credits_balance, 600),
+                    package_tier = 'free', updated_at = NOW()
+                WHERE user_id = $1::uuid
+            """, row["user_id"])
+            asyncio.create_task(_dispatch_webhooks(
+                str(row["user_id"]), "subscription.expired", {
+                    "plan": old_plan,
+                    "downgraded_to": "free",
+                    "message": "Your subscription expired. You're on the free tier (100 calls/month). Renew at wayforth.io/billing",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            ))
+    except Exception as _e:
+        logger.error("_downgrade_expired_usdc error: %s", _e)
+
+
+@app.post("/billing/subscribe-usdc")
+@limiter.limit("10/minute")
+async def subscribe_usdc(request: Request, db=Depends(get_db)):
+    """Initiate a USDC subscription payment on Base.
+
+    Returns payment instructions. A background watcher confirms the Transfer event
+    and activates the subscription automatically.
+    """
+    wayforth_wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
+    if not wayforth_wallet:
+        raise HTTPException(status_code=503, detail={
+            "error": "USDC subscriptions coming soon. Use card billing for now.",
+            "alternatives": ["GET /pricing/json"],
+        })
+
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
+
+    key_record = await db.fetchrow(
+        "SELECT id, user_id FROM api_keys WHERE key_hash = $1 AND active = true",
+        hashlib.sha256(api_key.encode()).hexdigest(),
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+
+    body = await request.json()
+    plan = body.get("plan", "").strip().lower()
+    wallet_address = body.get("wallet_address", "").strip()
+
+    if plan not in PLANS or plan == "free":
+        paid_plans = [k for k in PLANS if k != "free"]
+        raise HTTPException(status_code=400, detail={
+            "error": f"Invalid plan '{plan}'. Choose from: {', '.join(paid_plans)}"
+        })
+
+    plan_def = PLANS[plan]
+    reference_id = f"sub_usdc_{secrets.token_hex(8)}"
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    amount_usdc = f"{plan_def['price_usdc']:.6f}"
+    calls_included = plan_def["calls_included"]
+    bonus_calls = plan_def["usdc_bonus_credits"] // CREDITS_PER_CALL
+
+    await db.execute("""
+        INSERT INTO usdc_payments
+            (reference_id, api_key_id, plan, amount_usdc, wallet_address, expires_at)
+        VALUES ($1, $2::uuid, $3, $4, $5, $6)
+    """, reference_id, str(key_record["id"]), plan, float(amount_usdc),
+        wallet_address or None, expires_at)
+
+    return {
+        "payment_address": wayforth_wallet,
+        "amount_usdc": amount_usdc,
+        "plan": plan,
+        "calls_included": calls_included,
+        "bonus_calls": bonus_calls,
+        "reference_id": reference_id,
+        "memo": "Include this in USDC transfer memo",
+        "expires_at": expires_at.isoformat(),
+        "instructions": (
+            f"Send exactly {plan_def['price_usdc']} USDC to the address above on Base "
+            f"within 24 hours. Include the reference_id as memo."
+        ),
     }
 
 
@@ -3434,47 +4049,19 @@ async def pricing_page():
 @limiter.limit("30/minute")
 async def pricing_json(request: Request):
     """Machine-readable pricing data."""
-    return {
-        "tiers": [
-            {
-                "name": "Free",
-                "price_usd": 0,
-                "price_monthly_usd": 0,
-                "rate_limit_per_minute": 10,
-                "monthly_quota": 1000,
-                "features": ["search", "query", "services", "memory", "identity"],
-                "cta": "Get Free Key",
-                "cta_url": "https://gateway.wayforth.io/keys/create",
-            },
-            {
-                "name": "Starter",
-                "price_monthly_usd": 19,
-                "rate_limit_per_minute": 30,
-                "monthly_quota": 10000,
-                "features": ["search", "query", "services", "memory", "identity", "intelligence", "webhooks"],
-                "cta": "Contact Us",
-                "cta_url": "https://wayforth.io/contact",
-            },
-            {
-                "name": "Pro",
-                "price_monthly_usd": 99,
-                "rate_limit_per_minute": 100,
-                "monthly_quota": 100000,
-                "features": ["search", "query", "services", "memory", "identity", "intelligence", "webhooks", "history", "graph"],
-                "cta": "Contact Us",
-                "cta_url": "https://wayforth.io/contact",
-            },
-            {
-                "name": "Enterprise",
-                "price_monthly_usd": None,
-                "rate_limit_per_minute": 500,
-                "monthly_quota": -1,
-                "features": ["everything", "sla", "private_catalog", "dedicated_infra", "custom_probing"],
-                "cta": "Contact Us",
-                "cta_url": "https://wayforth.io/contact",
-            },
-        ],
-    }
+    tiers = []
+    for name, p in PLANS.items():
+        rpm = _TIER_RPM.get(name, 10)
+        bonus_calls = p["usdc_bonus_credits"] // CREDITS_PER_CALL if p["usdc_bonus_credits"] else 0
+        tiers.append({
+            "name": name.capitalize(),
+            "price_monthly_usd": p["price_usd"],
+            "calls_included": p["calls_included"],
+            "usdc_bonus_calls": bonus_calls,
+            "rate_limit_per_minute": rpm,
+            "features": p["features"],
+        })
+    return {"tiers": tiers}
 
 
 @app.get("/intelligence-demo", include_in_schema=False)
@@ -4021,16 +4608,19 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 TIER_LIMITS = {
     "free":       {"rpm": 10,  "monthly": 1_000,    "fee_bps": 150},
-    "starter":    {"rpm": 30,  "monthly": 10_000,   "fee_bps": 150},
-    "pro":        {"rpm": 100, "monthly": 100_000,  "fee_bps": 150},
+    "builder":    {"rpm": 30,  "monthly": 5_000,    "fee_bps": 150},
+    "starter":    {"rpm": 60,  "monthly": 20_000,   "fee_bps": 150},
+    "pro":        {"rpm": 120, "monthly": 100_000,  "fee_bps": 150},
+    "growth":     {"rpm": 300, "monthly": 500_000,  "fee_bps": 150},
     "enterprise": {"rpm": 500, "monthly": -1,       "fee_bps": 150},
 }
 
 PACKAGES = {
-    "starter":    {"credits": 50000,   "price_usd": 19,  "wayf_bonus_pct": 0.15, "fee_bps": 150, "label": "Starter Pack"},
-    "pro":        {"credits": 300000,  "price_usd": 99,  "wayf_bonus_pct": 0.15, "fee_bps": 150, "label": "Pro Pack"},
-    "growth":     {"credits": 1000000, "price_usd": 299, "wayf_bonus_pct": 0.15, "fee_bps": 150, "label": "Growth Pack"},
-    "enterprise": {"credits": -1,      "price_usd": None,"wayf_bonus_pct": 0.15, "fee_bps": 150, "label": "Enterprise"},
+    "builder":    {"credits": 6_000,   "price_usd": 12,  "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Builder"},
+    "starter":    {"credits": 21_000,  "price_usd": 29,  "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Starter"},
+    "pro":        {"credits": 72_000,  "price_usd": 99,  "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Pro"},
+    "growth":     {"credits": 240_000, "price_usd": 299, "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Growth"},
+    "enterprise": {"credits": -1,      "price_usd": None,"wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Enterprise"},
 }
 
 CREDIT_COSTS = {
@@ -4485,9 +5075,9 @@ async def get_balance(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="API key required")
 
     key_record = await db.fetchrow("""
-        SELECT k.user_id, k.tier, u.email
+        SELECT k.user_id, k.tier, k.payment_rail,
+               k.quota_reset_at, k.subscription_expires_at
         FROM api_keys k
-        JOIN users u ON u.id = k.user_id
         WHERE k.key_hash = $1 AND k.active = true
     """, hashlib.sha256(api_key.encode()).hexdigest())
 
@@ -4495,35 +5085,45 @@ async def get_balance(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     credits = await db.fetchrow(
-        "SELECT credits_balance, lifetime_credits, package_tier, payment_method FROM user_credits WHERE user_id = $1",
-        key_record['user_id']
+        "SELECT credits_balance, package_tier FROM user_credits WHERE user_id = $1",
+        key_record["user_id"],
     )
+    balance = credits["credits_balance"] if credits else 0
+    pkg_tier = credits["package_tier"] if credits else "free"
+    tier = _credits_to_tier(balance, pkg_tier)
+
+    plan_def = PLANS.get(tier, PLANS["free"])
+    resets_at = key_record.get("subscription_expires_at") or key_record.get("quota_reset_at")
+    payment_rail = key_record.get("payment_rail") or "card"
 
     return {
-        "credits_balance": credits['credits_balance'] if credits else 0,
-        "lifetime_credits": credits['lifetime_credits'] if credits else 0,
-        "package_tier": credits['package_tier'] if credits else 'free',
-        "payment_method": credits['payment_method'] if credits else None,
-        "email": key_record['email'],
+        "plan": tier,
+        "calls_remaining": balance // CREDITS_PER_CALL,
+        "calls_included": plan_def["calls_included"],
+        "resets_at": resets_at.isoformat() if resets_at else None,
+        "payment_rail": payment_rail,
     }
 
 
 _TIER_FEATURES = {
-    "free":    {"execute_managed": False, "byok": False, "analytics": False, "priority_support": False},
-    "starter": {"execute_managed": True,  "byok": True,  "analytics": False, "priority_support": False},
-    "pro":     {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": True},
-    "growth":  {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": True},
+    "free":     {"execute_managed": True,  "byok": False, "analytics": False, "priority_support": False},
+    "builder":  {"execute_managed": True,  "byok": True,  "analytics": False, "priority_support": False},
+    "starter":  {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": False},
+    "pro":      {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": True},
+    "growth":   {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": True},
 }
 
 def _credits_to_tier(lifetime_credits: int, package_tier: str | None) -> str:
     if package_tier and package_tier in _TIER_FEATURES:
         return package_tier
-    if lifetime_credits >= 1_000_000:
+    if lifetime_credits >= 240_000:
         return "growth"
-    if lifetime_credits >= 300_000:
+    if lifetime_credits >= 72_000:
         return "pro"
-    if lifetime_credits >= 50_000:
+    if lifetime_credits >= 21_000:
         return "starter"
+    if lifetime_credits >= 6_000:
+        return "builder"
     return "free"
 
 
@@ -4553,10 +5153,14 @@ async def account_credits(request: Request, db=Depends(get_db)):
     tier = _credits_to_tier(lifetime, pkg_tier)
 
     return {
+        "plan": tier,
+        "calls_remaining": balance // CREDITS_PER_CALL,
+        "calls_included": PLANS.get(tier, PLANS["free"])["calls_included"],
+        # Dashboard-only credit detail (not shown in public docs)
         "credits_remaining": balance,
         "credits_total": lifetime,
         "tier": tier,
-        "email": key_record['email'],
+        "email": key_record["email"],
     }
 
 
