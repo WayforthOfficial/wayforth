@@ -816,7 +816,7 @@ async def search_services(
         async with app.state.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, name, description, endpoint_url, category,
+                SELECT id, name, slug, description, endpoint_url, category,
                        coverage_tier, pricing_usdc, source, payment_protocol, created_at,
                        last_tested_at, consecutive_failures, x402_supported,
                        wri_score, wri_version
@@ -842,7 +842,7 @@ async def search_services(
             async with app.state.pool.acquire() as conn:
                 fb_rows = await conn.fetch(
                     """
-                    SELECT id, name, description, endpoint_url, category,
+                    SELECT id, name, slug, description, endpoint_url, category,
                            coverage_tier, pricing_usdc, source, payment_protocol,
                            last_tested_at, consecutive_failures, x402_supported,
                            wri_score, wri_version
@@ -901,6 +901,7 @@ async def search_services(
     results = [
         {
             "name": s.get("name"),
+            "slug": s.get("slug"),
             "description": s.get("description"),
             "score": s.get("score", 0),
             "wri": s["wri_score"] if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
@@ -914,7 +915,7 @@ async def search_services(
                 "credits_per_call": max(1, round((s.get("pricing_usdc") or 0.001) * 1000)),
             },
             "service_id": "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest(),
-            "wayforth_id": f"wayforth://{s.get('name','').lower().replace(' ','_').replace('/','_')[:30]}/{hashlib.sha256(s.get('endpoint_url','').encode()).hexdigest()[:8]}",
+            "wayforth_id": f"wayforth://{s.get('slug') or s.get('name','').lower().replace(' ','_').replace('/','_')[:30]}/{hashlib.sha256(s.get('endpoint_url','').encode()).hexdigest()[:8]}",
             "payment_options": {
                 "track_a": {
                     "method": "card",
