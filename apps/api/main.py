@@ -2524,7 +2524,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
         "service": service_slug,
         "result": result,
         "credits_deducted": credit_cost,
-        "credits_remaining": balance_after,
+        "credits_remaining": balance_after // CREDITS_PER_CALL,
         "execution_ms": execution_ms,
         "managed_services_available": len(SERVICE_CONFIGS),
     }
@@ -2741,7 +2741,7 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
             "results_considered": len(top5),
             "selected_rank": selected_rank,
         },
-        "credits_remaining": balance_after,
+        "credits_remaining": balance_after // CREDITS_PER_CALL,
         "calls_remaining": balance_after // CREDITS_PER_CALL,
         "execution_ms": execution_ms,
     }
