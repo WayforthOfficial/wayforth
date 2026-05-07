@@ -1982,8 +1982,9 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
 #   execution.completed
 #     {"service_slug": str, "credits_used": int, "status": "ok", "timestamp": ISO8601}
 #
-#   credits.low  (fires when balance drops below 20)
-#     {"credits_remaining": int, "threshold": int, "timestamp": ISO8601}
+#   credits.low  (fires when balance drops below topup_trigger_calls threshold)
+#     {"event": "credits.low", "calls_remaining": int, "billing_permission": str,
+#      "auto_topup": {...}, "timestamp": ISO8601}
 #
 #   tier.changed  (fires after admin or Stripe upgrades a user's tier)
 #     {"old_tier": str, "new_tier": str, "timestamp": ISO8601}
@@ -2460,14 +2461,9 @@ async def execute_service(request: Request, db=Depends(get_db)):
         }
     ))
     asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), service_slug))
-    if balance_after < 20:
-        asyncio.create_task(_dispatch_webhooks(
-            str(user_id), "credits.low", {
-                "credits_remaining": balance_after,
-                "threshold": 20,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        ))
+    asyncio.create_task(
+        _maybe_dispatch_credits_low(app.state.pool, str(user_id), api_key_header, balance_after)
+    )
 
     return {
         "status": "ok",
@@ -2478,6 +2474,130 @@ async def execute_service(request: Request, db=Depends(get_db)):
         "execution_ms": execution_ms,
         "managed_services_available": len(SERVICE_CONFIGS),
     }
+
+
+# ── billing permission helpers ────────────────────────────────────────────────
+
+async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amount_usdc: str) -> dict:
+    """Verify a USDC transfer tx_hash on Base using eth_getTransactionReceipt.
+
+    Returns {valid, reason}. Accepts optimistically on RPC failure.
+    """
+    BASE_RPC_URL = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
+    USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+    if not BASE_RPC_URL:
+        return {"valid": True, "reason": "no_rpc_configured"}
+
+    try:
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "eth_getTransactionReceipt",
+            "params": [tx_hash],
+        }
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.post(BASE_RPC_URL, json=payload)
+        if r.status_code != 200:
+            return {"valid": True, "reason": "rpc_unavailable"}
+
+        receipt = r.json().get("result")
+        if not receipt:
+            return {"valid": False, "reason": "transaction_not_found"}
+        if receipt.get("status") != "0x1":
+            return {"valid": False, "reason": "transaction_failed_on_chain"}
+
+        # Find Transfer log from USDC contract to expected_recipient
+        for log in receipt.get("logs", []):
+            if log.get("address", "").lower() != USDC_ADDRESS.lower():
+                continue
+            topics = log.get("topics", [])
+            if not topics or topics[0].lower() != TRANSFER_TOPIC.lower():
+                continue
+            # topics[2] is the `to` address (padded to 32 bytes)
+            if len(topics) < 3:
+                continue
+            to_addr = "0x" + topics[2][-40:]
+            if to_addr.lower() != expected_recipient.lower():
+                continue
+            # Amount is in log data (USDC has 6 decimals)
+            try:
+                amount_micro = int(log.get("data", "0x0"), 16)
+                amount_usdc = amount_micro / 1_000_000
+                expected = float(expected_amount_usdc)
+                if abs(amount_usdc - expected) / expected <= 0.02:
+                    return {"valid": True, "reason": "confirmed", "amount_usdc": str(amount_usdc)}
+                return {
+                    "valid": False,
+                    "reason": f"amount_mismatch: expected ${expected:.6f}, received ${amount_usdc:.6f}",
+                }
+            except (ValueError, ZeroDivisionError):
+                continue
+
+        return {"valid": False, "reason": "no_matching_usdc_transfer_found"}
+
+    except httpx.TimeoutException:
+        return {"valid": True, "reason": "optimistic_rpc_timeout"}
+    except Exception as _e:
+        logger.warning("_verify_tx_on_base error: %s", _e)
+        return {"valid": True, "reason": "optimistic_rpc_error"}
+
+
+async def _maybe_dispatch_credits_low(pool, user_id: str, api_key_str: str, balance_after: int):
+    """Fire credits.low webhook if balance is below the key's topup_trigger_calls threshold."""
+    try:
+        async with pool.acquire() as db:
+            key = await db.fetchrow("""
+                SELECT billing_permission, topup_trigger_calls, topup_amount_usd,
+                       monthly_topup_limit_usd, monthly_topup_spent_usd
+                FROM api_keys WHERE key_hash = $1 AND active = true
+            """, hashlib.sha256(api_key_str.encode()).hexdigest())
+
+        if not key:
+            return
+
+        threshold_credits = (key["topup_trigger_calls"] or 100) * CREDITS_PER_CALL
+        if balance_after >= threshold_credits:
+            return
+
+        calls_remaining = balance_after // CREDITS_PER_CALL
+        wayforth_wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
+        billing_perm = key["billing_permission"] or "none"
+
+        if billing_perm in ("auto_topup", "full"):
+            spent = float(key["monthly_topup_spent_usd"] or 0)
+            limit = float(key["monthly_topup_limit_usd"] or 20)
+            topup_amt = float(key["topup_amount_usd"] or 5)
+            remaining_budget = round(limit - spent, 2)
+            auto_topup_payload = {
+                "enabled": True,
+                "topup_amount_usd": topup_amt,
+                "monthly_remaining_usd": remaining_budget,
+                "payment_address": wayforth_wallet,
+                "amount_usdc": f"{topup_amt:.6f}",
+                "instructions": (
+                    f"Send {topup_amt} USDC to payment_address on Base "
+                    "then call POST /billing/topup-usdc with tx_hash to top up automatically."
+                ),
+            }
+        else:
+            auto_topup_payload = {"enabled": False}
+
+        payload: dict = {
+            "event": "credits.low",
+            "calls_remaining": calls_remaining,
+            "billing_permission": billing_perm,
+            "auto_topup": auto_topup_payload,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if billing_perm == "none":
+            payload["action_required"] = (
+                "Manual top-up needed. Visit wayforth.io/billing to add credits."
+            )
+
+        await _dispatch_webhooks(user_id, "credits.low", payload)
+    except Exception as _e:
+        logger.error("_maybe_dispatch_credits_low error: %s", _e)
 
 
 # ── x402 payment helpers ──────────────────────────────────────────────────────
@@ -2959,6 +3079,280 @@ async def subscribe_usdc(request: Request, db=Depends(get_db)):
             f"within 24 hours. Include the reference_id as memo."
         ),
     }
+
+
+@app.post("/billing/topup-usdc")
+@limiter.limit("10/minute")
+async def topup_usdc(request: Request, db=Depends(get_db)):
+    """Agent-initiated USDC top-up. api_key + tx_hash in body — no Authorization header needed.
+
+    Requires billing_permission = 'auto_topup' or 'full' on the API key.
+    Enforces monthly_topup_limit_usd. Replay-protected via usdc_payments tx_hash index.
+    """
+    body = await request.json()
+    api_key = body.get("api_key", "").strip()
+    tx_hash = body.get("tx_hash", "").strip()
+    amount_usdc_str = body.get("amount_usdc", "").strip()
+
+    if not api_key or not tx_hash or not amount_usdc_str:
+        raise HTTPException(status_code=400, detail={
+            "error": "api_key, tx_hash, and amount_usdc are required"
+        })
+
+    try:
+        amount_usdc_float = float(amount_usdc_str)
+        if amount_usdc_float <= 0:
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail={"error": "amount_usdc must be a positive number"})
+
+    # 1. Look up API key with billing settings
+    key_record = await db.fetchrow("""
+        SELECT id, user_id, billing_permission,
+               monthly_topup_limit_usd, topup_amount_usd,
+               monthly_topup_spent_usd, monthly_topup_reset_at
+        FROM api_keys
+        WHERE key_hash = $1 AND active = true
+    """, hashlib.sha256(api_key.encode()).hexdigest())
+
+    if not key_record:
+        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+
+    # 2. Permission check
+    billing_perm = key_record["billing_permission"] or "none"
+    if billing_perm == "none":
+        raise HTTPException(status_code=403, detail={
+            "error": "billing_permission_denied",
+            "message": (
+                "This API key does not have billing permissions. "
+                "Enable auto top-up in your dashboard at wayforth.io/dashboard"
+            ),
+        })
+
+    # 3. Monthly reset if period has rolled over
+    now_utc = datetime.now(timezone.utc)
+    reset_at = key_record["monthly_topup_reset_at"]
+    if reset_at and now_utc >= reset_at:
+        next_reset = reset_at + timedelta(days=32)
+        # Advance to start of next calendar month
+        next_reset = next_reset.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        await db.execute("""
+            UPDATE api_keys
+            SET monthly_topup_spent_usd = 0,
+                monthly_topup_reset_at = $1
+            WHERE id = $2::uuid
+        """, next_reset, str(key_record["id"]))
+        spent_usd = 0.0
+        reset_at = next_reset
+    else:
+        spent_usd = float(key_record["monthly_topup_spent_usd"] or 0)
+
+    # 4. Budget check
+    limit_usd = float(key_record["monthly_topup_limit_usd"] or 20)
+    remaining_usd = round(limit_usd - spent_usd, 2)
+    if amount_usdc_float > remaining_usd:
+        raise HTTPException(status_code=403, detail={
+            "error": "monthly_limit_reached",
+            "message": (
+                f"Monthly auto top-up limit of ${limit_usd:.2f} reached. "
+                f"Resets on {reset_at.strftime('%Y-%m-%d') if reset_at else 'next month'}."
+            ),
+            "limit_usd": limit_usd,
+            "spent_usd": round(spent_usd, 2),
+            "resets_at": reset_at.isoformat() if reset_at else None,
+        })
+
+    # 5. WAYFORTH_BASE_WALLET guard
+    wayforth_wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
+    if not wayforth_wallet:
+        raise HTTPException(status_code=503, detail={
+            "error": "Crypto payments not yet configured. Top up via dashboard instead.",
+            "dashboard_url": "https://wayforth.io/billing",
+        })
+
+    # 6. Replay protection
+    existing = await db.fetchval(
+        "SELECT id FROM usdc_payments WHERE tx_hash = $1", tx_hash
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail={
+            "error": "transaction_already_used",
+            "message": "This transaction hash has already been applied to a top-up.",
+        })
+
+    # 7. Verify tx_hash on Base
+    verify = await _verify_tx_on_base(tx_hash, wayforth_wallet, amount_usdc_str)
+    if not verify["valid"]:
+        raise HTTPException(status_code=402, detail={
+            "error": "payment_verification_failed",
+            "reason": verify.get("reason", "invalid_transaction"),
+            "message": (
+                f"Could not verify USDC transfer of ${amount_usdc_float:.6f} to "
+                f"Wayforth wallet. Ensure the transaction is confirmed on Base mainnet."
+            ),
+        })
+
+    # 8. Atomic credit + budget update
+    credits_to_add = math.floor(amount_usdc_float * 1000)
+    reference_id = f"topup_{secrets.token_hex(8)}"
+
+    async with db.transaction():
+        # Add credits to user
+        new_credits = await db.fetchval("""
+            UPDATE user_credits
+            SET credits_balance = credits_balance + $1,
+                lifetime_credits = lifetime_credits + $1,
+                updated_at = NOW()
+            WHERE user_id = $2::uuid
+            RETURNING credits_balance
+        """, credits_to_add, str(key_record["user_id"]))
+
+        if new_credits is None:
+            # First-time credit row
+            await db.execute("""
+                INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier, payment_method)
+                VALUES ($1::uuid, $2, $2, 'free', 'usdc')
+            """, str(key_record["user_id"]), credits_to_add)
+            new_credits = credits_to_add
+
+        # Update monthly spend tracker
+        await db.execute("""
+            UPDATE api_keys
+            SET monthly_topup_spent_usd = monthly_topup_spent_usd + $1
+            WHERE id = $2::uuid
+        """, amount_usdc_float, str(key_record["id"]))
+
+        # Record payment for replay protection and audit
+        await db.execute("""
+            INSERT INTO usdc_payments
+                (reference_id, api_key_id, plan, amount_usdc, tx_hash, status, expires_at)
+            VALUES ($1, $2::uuid, 'topup', $3, $4, 'confirmed', NOW() + INTERVAL '10 years')
+        """, reference_id, str(key_record["id"]), amount_usdc_float, tx_hash)
+
+    new_spent = round(spent_usd + amount_usdc_float, 2)
+    new_remaining = round(limit_usd - new_spent, 2)
+
+    return {
+        "success": True,
+        "credits_added": credits_to_add,
+        "calls_added": credits_to_add // CREDITS_PER_CALL,
+        "new_balance_calls": new_credits // CREDITS_PER_CALL,
+        "monthly_topup_spent_usd": new_spent,
+        "monthly_topup_limit_usd": limit_usd,
+        "monthly_topup_remaining_usd": new_remaining,
+        "resets_at": reset_at.isoformat() if reset_at else None,
+        "tx_confirmed": True,
+    }
+
+
+@app.get("/billing/settings")
+@limiter.limit("30/minute")
+async def get_billing_settings(request: Request, db=Depends(get_db)):
+    """Return current billing permission settings for the authenticated API key."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_record = await db.fetchrow("""
+        SELECT id, user_id, tier,
+               billing_permission, topup_trigger_calls,
+               topup_amount_usd, monthly_topup_limit_usd,
+               monthly_topup_spent_usd, monthly_topup_reset_at
+        FROM api_keys
+        WHERE key_hash = $1 AND active = true
+    """, hashlib.sha256(api_key.encode()).hexdigest())
+
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    credits = await db.fetchval(
+        "SELECT credits_balance FROM user_credits WHERE user_id = $1",
+        key_record["user_id"],
+    )
+    balance = credits or 0
+    tier = key_record["tier"] or "free"
+    limit = float(key_record["monthly_topup_limit_usd"] or 20)
+    spent = float(key_record["monthly_topup_spent_usd"] or 0)
+    reset_at = key_record["monthly_topup_reset_at"]
+
+    return {
+        "billing_permission": key_record["billing_permission"] or "none",
+        "topup_trigger_calls": key_record["topup_trigger_calls"] or 100,
+        "topup_amount_usd": float(key_record["topup_amount_usd"] or 5),
+        "monthly_topup_limit_usd": limit,
+        "monthly_topup_spent_usd": round(spent, 2),
+        "monthly_topup_remaining_usd": round(limit - spent, 2),
+        "monthly_topup_reset_at": reset_at.date().isoformat() if reset_at else None,
+        "calls_remaining": balance // CREDITS_PER_CALL,
+        "plan": tier,
+    }
+
+
+@app.patch("/billing/settings")
+@limiter.limit("10/minute")
+async def update_billing_settings(request: Request, db=Depends(get_db)):
+    """Update billing permission settings for the authenticated API key."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_record = await db.fetchrow(
+        "SELECT id, topup_amount_usd, monthly_topup_limit_usd FROM api_keys "
+        "WHERE key_hash = $1 AND active = true",
+        hashlib.sha256(api_key.encode()).hexdigest(),
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    body = await request.json()
+    updates: dict = {}
+
+    if "billing_permission" in body:
+        val = body["billing_permission"]
+        if val not in ("none", "auto_topup", "full"):
+            raise HTTPException(status_code=400, detail={
+                "error": "billing_permission must be one of: none, auto_topup, full"
+            })
+        updates["billing_permission"] = val
+
+    if "topup_trigger_calls" in body:
+        val = int(body["topup_trigger_calls"])
+        if not (50 <= val <= 1000):
+            raise HTTPException(status_code=400, detail={
+                "error": "topup_trigger_calls must be between 50 and 1000"
+            })
+        updates["topup_trigger_calls"] = val
+
+    if "topup_amount_usd" in body:
+        val = float(body["topup_amount_usd"])
+        if not (1.0 <= val <= 100.0):
+            raise HTTPException(status_code=400, detail={
+                "error": "topup_amount_usd must be between 1.00 and 100.00"
+            })
+        updates["topup_amount_usd"] = val
+
+    if "monthly_topup_limit_usd" in body:
+        val = float(body["monthly_topup_limit_usd"])
+        effective_topup = updates.get("topup_amount_usd", float(key_record["topup_amount_usd"] or 5))
+        if val < effective_topup:
+            raise HTTPException(status_code=400, detail={
+                "error": f"monthly_topup_limit_usd ({val:.2f}) must be >= topup_amount_usd ({effective_topup:.2f})"
+            })
+        updates["monthly_topup_limit_usd"] = val
+
+    if not updates:
+        raise HTTPException(status_code=400, detail={"error": "No valid fields provided"})
+
+    set_parts = [f"{col} = ${i + 2}" for i, col in enumerate(updates)]
+    set_clause = ", ".join(set_parts)
+    values = list(updates.values())
+
+    await db.execute(
+        f"UPDATE api_keys SET {set_clause} WHERE id = $1::uuid",
+        str(key_record["id"]), *values,
+    )
+
+    return await get_billing_settings(request, db)
 
 
 @app.post("/submit")
