@@ -159,6 +159,7 @@ from db import check_db
 from service_adapters import ADAPTERS, SERVICE_CONFIGS, SERVICE_ALTERNATIVES, SERVICE_DISPLAY_NAMES
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
+from param_mapper import map_params, missing_param_hint, SERVICE_REQUIRED_PARAMS, CATALOG_TO_MANAGED
 
 load_dotenv()
 
@@ -2526,6 +2527,225 @@ async def execute_service(request: Request, db=Depends(get_db)):
         "credits_remaining": balance_after,
         "execution_ms": execution_ms,
         "managed_services_available": len(SERVICE_CONFIGS),
+    }
+
+
+# ── /run — one-call runtime ───────────────────────────────────────────────────
+
+@app.post("/run")
+@limiter.limit("30/minute")
+async def run_endpoint(request: Request, db=Depends(get_db)):
+    """Intent → search → rank → execute → result in one call."""
+    import time as _time
+
+    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key_header:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
+
+    user_id = await _resolve_user(db, api_key_header)
+    body = await request.json()
+
+    intent = (body.get("intent") or "").strip()
+    if not intent:
+        raise HTTPException(status_code=400, detail={"error": "intent is required"})
+
+    input_dict = body.get("input") or {}
+    prefs = body.get("preferences") or {}
+    category_filter = prefs.get("category")
+    max_price = prefs.get("max_price_per_call")
+    tier_min = int(prefs.get("tier_min", 2))
+
+    run_start = _time.time()
+
+    # Step 1 — Search: same DB query as GET /search
+    conditions = [f"coverage_tier >= {tier_min}", "consecutive_failures < 3"]
+    params_q: list = []
+    idx = 1
+    if category_filter:
+        conditions.append(f"category = ${idx}")
+        params_q.append(category_filter)
+        idx += 1
+    if max_price is not None:
+        conditions.append(f"(pricing_usdc IS NULL OR pricing_usdc <= ${idx})")
+        params_q.append(float(max_price))
+        idx += 1
+
+    where = " AND ".join(conditions)
+    try:
+        async with app.state.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT id, name, slug, description, endpoint_url, category,
+                       pricing_usdc, coverage_tier, source, payment_protocol,
+                       last_tested_at, consecutive_failures, x402_supported,
+                       wri_score, wri_version
+                FROM services
+                WHERE {where}
+                ORDER BY CASE WHEN wri_version = 'v2' AND wri_score IS NOT NULL
+                              THEN wri_score ELSE 0 END DESC,
+                         coverage_tier DESC
+                LIMIT 30
+                """,
+                *params_q,
+            )
+    except Exception as _db_err:
+        logger.error("run: db error: %s", _db_err)
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    candidates = [dict(r) for r in rows]
+    ranked = await rank_services(intent, candidates)
+    top5 = ranked[:5]
+
+    # Step 2 — Select: first managed service in top-5 with a configured key
+    selected_slug: str | None = None
+    selected_svc: dict | None = None
+    selected_rank: int | None = None
+
+    for i, svc in enumerate(top5):
+        catalog_slug = svc.get("slug") or ""
+        managed_slug = CATALOG_TO_MANAGED.get(catalog_slug)
+        if not managed_slug:
+            continue
+        if managed_slug not in SERVICE_CONFIGS:
+            continue
+        if not os.environ.get(SERVICE_CONFIGS[managed_slug]["key_var"], ""):
+            continue
+        selected_slug = managed_slug
+        selected_svc = svc
+        selected_rank = i + 1
+        break
+
+    if not selected_slug:
+        top = top5[0] if top5 else {}
+        raise HTTPException(status_code=422, detail={
+            "error": "no_managed_service",
+            "intent": intent,
+            "message": (
+                f"No managed service matched this intent. "
+                f"Top catalog result: {top.get('name', 'unknown')} — "
+                "add your key via BYOK to use it."
+            ),
+            "top_result": {
+                "slug": top.get("slug"),
+                "name": top.get("name"),
+                "wri_score": top.get("wri_score"),
+            },
+            "action": "POST /call/keys/add",
+        })
+
+    # Step 3 — Map params
+    mapped_params, missing = map_params(selected_slug, input_dict)
+    if missing:
+        raise HTTPException(status_code=422, detail={
+            "error": "missing_param",
+            "service_selected": selected_slug,
+            "required_params": SERVICE_REQUIRED_PARAMS.get(selected_slug, []),
+            "provided_params": list(input_dict.keys()),
+            "missing": missing,
+            "hint": missing_param_hint(missing),
+        })
+
+    # Step 4 — Execute (managed path, mirrors /execute)
+    config = SERVICE_CONFIGS[selected_slug]
+    if selected_slug == "stability":
+        credit_cost = 100 if mapped_params.get("quality") == "ultra" else 45
+    else:
+        credit_cost = config["credits"]
+
+    svc_key = os.environ.get(config["key_var"], "")
+
+    success, balance_after = await check_and_deduct_credits(
+        db, str(user_id), credit_cost, "/run",
+        service_id=selected_slug, tx_type="execution",
+    )
+    if not success:
+        raise HTTPException(status_code=402, detail={
+            "error": "insufficient_credits",
+            "required_credits": credit_cost,
+            "current_balance_credits": balance_after,
+            "current_balance_calls": balance_after // CREDITS_PER_CALL,
+            "message": "Not enough credits for this call.",
+            "top_up": "https://wayforth.io/billing",
+        })
+
+    adapter = ADAPTERS[selected_slug]
+    result = None
+    error_msg = None
+    exec_start = _time.time()
+
+    if selected_slug == "assemblyai":
+        try:
+            result = await asyncio.wait_for(adapter(mapped_params, svc_key), timeout=35.0)
+        except asyncio.TimeoutError:
+            error_msg = "Service timeout"
+        except Exception as _e:
+            error_msg = str(_e)[:300]
+    else:
+        for _attempt in range(2):
+            try:
+                result = await asyncio.wait_for(adapter(mapped_params, svc_key), timeout=10.0)
+                break
+            except asyncio.TimeoutError:
+                if _attempt == 0:
+                    continue
+                error_msg = "Service timeout"
+            except Exception as _e:
+                error_msg = str(_e)[:300]
+                break
+
+    execution_ms = round((_time.time() - exec_start) * 1000)
+
+    if error_msg:
+        async with db.transaction():
+            _refund = await db.fetchrow(
+                "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
+                "WHERE user_id = $2::uuid RETURNING credits_balance",
+                credit_cost, user_id,
+            )
+            refunded_balance = _refund["credits_balance"] if _refund else balance_after
+            await db.execute("""
+                INSERT INTO credit_transactions
+                (user_id, amount, balance_after, type, description, api_endpoint, service_id)
+                VALUES ($1::uuid, $2, $3, 'execution_refund', $4, '/run', $5)
+            """, user_id, credit_cost, refunded_balance,
+                f"Refund: {selected_slug} failed — {error_msg[:100]}", selected_slug)
+        fallback_slug = SERVICE_ALTERNATIVES.get(selected_slug)
+        detail: dict = {
+            "error": "service_unavailable",
+            "service": selected_slug,
+            "message": f"{SERVICE_DISPLAY_NAMES.get(selected_slug, selected_slug)} is temporarily unavailable.",
+        }
+        if fallback_slug:
+            detail["fallback"] = {
+                "slug": fallback_slug,
+                "message": f"Try {SERVICE_DISPLAY_NAMES.get(fallback_slug, fallback_slug)} as an alternative.",
+            }
+        raise HTTPException(status_code=503, detail=detail)
+
+    asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), selected_slug))
+    asyncio.create_task(
+        _maybe_dispatch_credits_low(app.state.pool, str(user_id), api_key_header, balance_after)
+    )
+
+    # Step 5 — Return
+    wri = selected_svc.get("wri_score")
+    return {
+        "result": result,
+        "service_used": {
+            "slug": selected_slug,
+            "name": SERVICE_DISPLAY_NAMES.get(selected_slug, selected_slug),
+            "wri_score": round(float(wri), 1) if wri else None,
+            "category": selected_svc.get("category"),
+            "credits_used": credit_cost,
+        },
+        "search_context": {
+            "intent": intent,
+            "results_considered": len(top5),
+            "selected_rank": selected_rank,
+        },
+        "credits_remaining": balance_after,
+        "calls_remaining": balance_after // CREDITS_PER_CALL,
+        "execution_ms": execution_ms,
     }
 
 
