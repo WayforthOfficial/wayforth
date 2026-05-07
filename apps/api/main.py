@@ -665,7 +665,6 @@ async def system_status(db=Depends(get_db)):
         },
         "pricing": {
             "routing_fee": "1.5%",
-            "cross_rail_fee": "5%",
             "usdc_bonus": "5% extra calls",
         },
         "contracts": {
@@ -2197,24 +2196,73 @@ async def execute_service(request: Request, db=Depends(get_db)):
     is_cross_rail = not is_managed_service and not is_byok
     cross_rail_svc = None
     if is_cross_rail:
-        cross_rail_svc = await db.fetchrow(
-            "SELECT id, name, endpoint_url, pricing_usdc FROM services "
-            "WHERE name = $1 AND x402_supported = true AND consecutive_failures < 3",
+        catalog_svc = await db.fetchrow(
+            "SELECT id, name, category, x402_supported, endpoint_url, pricing_usdc, consecutive_failures "
+            "FROM services WHERE name = $1",
             service_slug,
         )
-        if not cross_rail_svc:
-            raise HTTPException(status_code=400, detail={
-                "error": f"Unknown service '{service_slug}'. "
-                         f"Managed services: {sorted(SERVICE_CONFIGS)}. "
-                         "Use key_source='byok' for custom services."
+
+        if not catalog_svc:
+            raise HTTPException(status_code=404, detail={
+                "error": "service_not_found",
+                "service": service_slug,
+                "message": "No service found with this slug.",
+                "suggestion": "Search for available services:",
+                "search_endpoint": f"GET /search?q={service_slug}",
+                "docs": "https://wayforth.io/docs",
             })
+
+        if not catalog_svc["x402_supported"]:
+            display_name_to_slug = {v: k for k, v in SERVICE_DISPLAY_NAMES.items()}
+            managed_names = list(SERVICE_DISPLAY_NAMES.values())
+            svc_category = catalog_svc["category"]
+            svc_name = catalog_svc["name"]
+
+            alt_rows = await db.fetch(
+                "SELECT name FROM services "
+                "WHERE category = $1 AND name = ANY($2::text[]) LIMIT 2",
+                svc_category, managed_names,
+            )
+            alternatives = [
+                display_name_to_slug[r["name"]]
+                for r in alt_rows
+                if r["name"] in display_name_to_slug
+            ]
+
+            raise HTTPException(status_code=422, detail={
+                "error": "key_required",
+                "service": service_slug,
+                "service_name": svc_name,
+                "message": "This service requires your own API key. Add it to execute through Wayforth.",
+                "action": {
+                    "label": "Add API key",
+                    "url": "https://wayforth.io/dashboard/keys",
+                    "endpoint": "POST /call/keys/add",
+                    "body_example": {
+                        "service_slug": service_slug,
+                        "service_name": svc_name,
+                        "api_key": "your_key_here",
+                    },
+                },
+                "alternatives": {
+                    "message": "Or use a managed service with zero setup:",
+                    "services": alternatives,
+                },
+            })
+
+        if catalog_svc["consecutive_failures"] >= 3:
+            raise HTTPException(status_code=503, detail={
+                "error": "service_unavailable",
+                "service": service_slug,
+                "message": "Service is temporarily unhealthy. Try again shortly.",
+            })
+
+        cross_rail_svc = catalog_svc
 
     # ── Cross-rail path: credits → x402 catalog service ──────────────────────
     if is_cross_rail and cross_rail_svc:
-        pricing_usdc = float(cross_rail_svc["pricing_usdc"] or 0.01)
-        base_credits = math.ceil(pricing_usdc * 1000)
-        fee_credits = math.ceil(base_credits * 0.05)
-        total_credits = base_credits + fee_credits
+        pricing_usdc  = float(cross_rail_svc["pricing_usdc"] or 0.01)
+        total_credits = math.ceil(pricing_usdc * 1000)
 
         success, balance_after = await check_and_deduct_credits(
             db, str(user_id), total_credits, "/execute",
@@ -2247,7 +2295,6 @@ async def execute_service(request: Request, db=Depends(get_db)):
             "result": settlement,
             "cross_rail": True,
             "calls_used": 1,
-            "note": "This call used cross-rail routing. A small conversion fee was included.",
         }
 
     # ── Universal BYOK path (any external API, not in managed catalog) ────────

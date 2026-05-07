@@ -40,8 +40,9 @@ def to_micro_usdc(price_str: str) -> str:
     return str(int(micro))
 
 
-# Cross-rail fee: ONLY on external x402 catalog services, never on our 16 managed services
-CROSS_RAIL_FEE_RATE = Decimal("0.05")
+# Cross-rail fee: zeroed out — users pay exactly the service's x402 price
+CROSS_RAIL_FEE_RATE = Decimal("0.0")
+CROSS_RAIL_FEE_MIN  = Decimal("0.0")
 
 # Routing fee: internal accounting only, NEVER shown to users
 ROUTING_FEE_RATE = Decimal("0.015")
