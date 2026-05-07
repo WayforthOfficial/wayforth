@@ -645,8 +645,8 @@ async def system_status(db=Depends(get_db)):
         },
         "managed_services": len(SERVICE_CONFIGS),
         "searches_24h": searches,
-        "mcp_tools": 13,
-        "pypi_version": "0.2.3",
+        "mcp_tools": 14,
+        "pypi_version": "0.2.4",
         "api": "operational",
         "database": "operational",
         "payment_rails": {
@@ -1502,9 +1502,9 @@ async def get_stats(request: Request, db=Depends(get_db)):
         "tier3_services": row["tier3"],
         "categories": row["categories"],
         "searches_7d": searches_7d,
-        "mcp_tools": 13,
+        "mcp_tools": 14,
         "api_version": VERSION,
-        "mcp_version": "0.2.3",
+        "mcp_version": "0.2.4",
     }
 
 
