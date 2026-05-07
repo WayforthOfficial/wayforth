@@ -125,3 +125,47 @@ def map_params(service_slug: str, input_dict: dict) -> tuple[dict, list[str]]:
 def missing_param_hint(missing: list[str]) -> str:
     """Build a human-readable hint for missing params."""
     return " ".join(_PARAM_HINTS.get(p, f"Add '{p}' to your input.") for p in missing)
+
+
+INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
+    "translation": [
+        "translat", "spanish", "french", "german", "italian",
+        "japanese", "portuguese", "chinese", "korean", "arabic",
+        "language", "languages", "english to", "to english",
+        "into english", "into spanish", "into french",
+    ],
+    "inference": [
+        "summarize", "summarise", "explain", "write", "generate text",
+        "rewrite", "paraphrase", "chat", "llm", "gpt", "ask",
+        "answer", "complete", "draft",
+    ],
+    "search": [
+        "search", "find", "look up", "google", "web search",
+        "news", "browse", "latest", "articles",
+    ],
+    "weather": [
+        "weather", "temperature", "forecast", "climate",
+        "rain", "sunny", "humidity", "wind",
+    ],
+    "finance": [
+        "stock", "price", "market", "financial", "crypto",
+        "trading", "ticker", "shares", "equity",
+    ],
+    "image": [
+        "image", "picture", "photo", "generate image",
+        "draw", "stable diffusion", "dalle", "illustration",
+    ],
+    "audio": [
+        "transcribe", "transcription", "speech", "audio",
+        "voice", "recording", "podcast", "mp3",
+    ],
+}
+
+
+def detect_category_hint(intent: str) -> str | None:
+    """Return a category name if intent strongly signals one, else None."""
+    intent_lower = intent.lower()
+    for category, keywords in INTENT_CATEGORY_HINTS.items():
+        if any(kw in intent_lower for kw in keywords):
+            return category
+    return None

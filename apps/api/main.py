@@ -159,7 +159,7 @@ from db import check_db
 from service_adapters import ADAPTERS, SERVICE_CONFIGS, SERVICE_ALTERNATIVES, SERVICE_DISPLAY_NAMES
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
-from param_mapper import map_params, missing_param_hint, SERVICE_REQUIRED_PARAMS, CATALOG_TO_MANAGED
+from param_mapper import map_params, missing_param_hint, SERVICE_REQUIRED_PARAMS, CATALOG_TO_MANAGED, detect_category_hint
 
 load_dotenv()
 
@@ -2551,7 +2551,7 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
 
     input_dict = body.get("input") or {}
     prefs = body.get("preferences") or {}
-    category_filter = prefs.get("category")
+    category_filter = prefs.get("category") or detect_category_hint(intent)
     max_price = prefs.get("max_price_per_call")
     tier_min = int(prefs.get("tier_min", 2))
 
