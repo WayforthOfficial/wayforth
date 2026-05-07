@@ -2581,10 +2581,8 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
                        wri_score, wri_version
                 FROM services
                 WHERE {where}
-                ORDER BY CASE WHEN wri_version = 'v2' AND wri_score IS NOT NULL
-                              THEN wri_score ELSE 0 END DESC,
-                         coverage_tier DESC
-                LIMIT 30
+                ORDER BY coverage_tier DESC
+                LIMIT 200
                 """,
                 *params_q,
             )
