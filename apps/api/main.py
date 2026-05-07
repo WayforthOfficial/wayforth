@@ -1217,7 +1217,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         async with request.app.state.pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT id, name, description, endpoint_url, category,
+                SELECT id, name, slug, description, endpoint_url, category,
                        pricing_usdc, coverage_tier, source, payment_protocol,
                        last_tested_at, consecutive_failures, x402_supported
                 FROM services
@@ -1256,9 +1256,10 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
     results = []
     for s in results_raw:
         service_id = "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest()
-        name_slug = s.get("name", "").lower().replace(" ", "_").replace("/", "_")[:30]
+        name_slug = s.get("slug") or s.get("name", "").lower().replace(" ", "_").replace("/", "_")[:30]
         entry = {
             "name": s.get("name"),
+            "slug": s.get("slug"),
             "score": s.get("score", 0),
             "wri": compute_wri(s, s.get("score", 0)),
             "reason": s.get("reason", ""),
@@ -2197,8 +2198,8 @@ async def execute_service(request: Request, db=Depends(get_db)):
     cross_rail_svc = None
     if is_cross_rail:
         catalog_svc = await db.fetchrow(
-            "SELECT id, name, category, x402_supported, endpoint_url, pricing_usdc, consecutive_failures "
-            "FROM services WHERE LOWER(name) = $1",
+            "SELECT id, name, slug, category, x402_supported, endpoint_url, pricing_usdc, consecutive_failures "
+            "FROM services WHERE slug = $1 OR LOWER(name) = $1",
             service_slug,
         )
 
@@ -2239,7 +2240,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
                     "url": "https://wayforth.io/dashboard/keys",
                     "endpoint": "POST /call/keys/add",
                     "body_example": {
-                        "service_slug": service_slug,
+                        "service_slug": catalog_svc["slug"] or service_slug,
                         "service_name": svc_name,
                         "api_key": "your_key_here",
                     },
