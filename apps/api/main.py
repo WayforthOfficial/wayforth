@@ -37,7 +37,7 @@ STRIPE_MOCK = (
     or not os.environ.get("STRIPE_SECRET_KEY", "")
 )
 
-VERSION = "0.2.3"
+VERSION = "0.4.0"
 
 
 def get_fernet():
@@ -394,10 +394,12 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(_cleanup_anon_searches_loop(app))
     watcher_task = asyncio.create_task(_usdc_payment_watcher())
     renewal_task = asyncio.create_task(_usdc_renewal_reminder())
+    reset_task = asyncio.create_task(_monthly_topup_reset())
     yield
     cleanup_task.cancel()
     watcher_task.cancel()
     renewal_task.cancel()
+    reset_task.cancel()
     if app.state.pool:
         await app.state.pool.close()
 
@@ -651,7 +653,9 @@ async def system_status(db=Depends(get_db)):
             "usdc_subscription": True,
             "x402_pay_per_call": bool(os.environ.get("WAYFORTH_BASE_WALLET")),
             "cross_rail_conversion": True,
+            "agent_auto_topup": True,
         },
+        "agent_billing_permissions": ["none", "auto_topup", "full"],
         "x402": {
             "network": "Base (eip155:8453)",
             "testnet_active": True,
@@ -2569,31 +2573,31 @@ async def _maybe_dispatch_credits_low(pool, user_id: str, api_key_str: str, bala
             limit = float(key["monthly_topup_limit_usd"] or 20)
             topup_amt = float(key["topup_amount_usd"] or 5)
             remaining_budget = round(limit - spent, 2)
-            auto_topup_payload = {
-                "enabled": True,
-                "topup_amount_usd": topup_amt,
-                "monthly_remaining_usd": remaining_budget,
-                "payment_address": wayforth_wallet,
+            base_cred = math.floor(topup_amt * 1000)
+            bonus_cred = math.floor(base_cred * 0.05)
+            calls_to_receive = (base_cred + bonus_cred) // CREDITS_PER_CALL
+            auto_topup_available = remaining_budget >= topup_amt
+            topup_instructions = {
+                "address": wayforth_wallet,
                 "amount_usdc": f"{topup_amt:.6f}",
-                "instructions": (
-                    f"Send {topup_amt} USDC to payment_address on Base "
-                    "then call POST /billing/topup-usdc with tx_hash to top up automatically."
-                ),
+                "calls_to_receive": calls_to_receive,
+                "endpoint": "/billing/topup-usdc",
             }
         else:
-            auto_topup_payload = {"enabled": False}
+            auto_topup_available = False
+            topup_instructions = None
 
         payload: dict = {
             "event": "credits.low",
             "calls_remaining": calls_remaining,
             "billing_permission": billing_perm,
-            "auto_topup": auto_topup_payload,
+            "auto_topup_available": auto_topup_available,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        if auto_topup_available and topup_instructions:
+            payload["topup_instructions"] = topup_instructions
         if billing_perm == "none":
-            payload["action_required"] = (
-                "Manual top-up needed. Visit wayforth.io/billing to add credits."
-            )
+            payload["message"] = "Top up at wayforth.io/billing"
 
         await _dispatch_webhooks(user_id, "credits.low", payload)
     except Exception as _e:
@@ -3371,6 +3375,123 @@ async def update_billing_settings(request: Request, db=Depends(get_db)):
     )
 
     return await get_billing_settings(request, db)
+
+
+@app.get("/account/billing-permissions")
+@limiter.limit("30/minute")
+async def get_billing_permissions(request: Request, db=Depends(get_db)):
+    """Return billing permission settings for the authenticated API key."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    row = await db.fetchrow("""
+        SELECT billing_permission, topup_trigger_calls, topup_amount_usd,
+               monthly_topup_limit_usd, monthly_topup_spent_usd, monthly_topup_reset_at
+        FROM api_keys
+        WHERE key_hash = $1 AND active = true
+    """, hashlib.sha256(api_key.encode()).hexdigest())
+
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    return {
+        "billing_permission": row["billing_permission"] or "none",
+        "topup_trigger_calls": row["topup_trigger_calls"] or 100,
+        "topup_amount_usd": float(row["topup_amount_usd"] or 5),
+        "monthly_topup_limit_usd": float(row["monthly_topup_limit_usd"] or 20),
+        "monthly_topup_spent_usd": float(row["monthly_topup_spent_usd"] or 0),
+        "monthly_topup_reset_at": row["monthly_topup_reset_at"].date().isoformat() if row["monthly_topup_reset_at"] else None,
+    }
+
+
+@app.put("/account/billing-permissions")
+@limiter.limit("10/minute")
+async def put_billing_permissions(request: Request, db=Depends(get_db)):
+    """Update billing permission settings for the authenticated API key."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_record = await db.fetchrow(
+        "SELECT id, topup_amount_usd, monthly_topup_limit_usd FROM api_keys "
+        "WHERE key_hash = $1 AND active = true",
+        hashlib.sha256(api_key.encode()).hexdigest(),
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    body = await request.json()
+    updates: dict = {}
+
+    if "billing_permission" in body:
+        val = body["billing_permission"]
+        if val not in ("none", "auto_topup", "full"):
+            raise HTTPException(status_code=400, detail={
+                "error": "billing_permission must be one of: none, auto_topup, full"
+            })
+        updates["billing_permission"] = val
+
+    if "topup_trigger_calls" in body:
+        val = int(body["topup_trigger_calls"])
+        if not (50 <= val <= 1000):
+            raise HTTPException(status_code=400, detail={
+                "error": "topup_trigger_calls must be between 50 and 1000"
+            })
+        updates["topup_trigger_calls"] = val
+
+    if "topup_amount_usd" in body:
+        val = float(body["topup_amount_usd"])
+        if not (5.0 <= val <= 100.0):
+            raise HTTPException(status_code=400, detail={
+                "error": "topup_amount_usd must be between 5.00 and 100.00"
+            })
+        updates["topup_amount_usd"] = val
+
+    if "monthly_topup_limit_usd" in body:
+        val = float(body["monthly_topup_limit_usd"])
+        if not (5.0 <= val <= 500.0):
+            raise HTTPException(status_code=400, detail={
+                "error": "monthly_topup_limit_usd must be between 5.00 and 500.00"
+            })
+        effective_topup = updates.get("topup_amount_usd", float(key_record["topup_amount_usd"] or 5))
+        if val < effective_topup:
+            raise HTTPException(status_code=400, detail={
+                "error": f"monthly_topup_limit_usd ({val:.2f}) must be >= topup_amount_usd ({effective_topup:.2f})"
+            })
+        updates["monthly_topup_limit_usd"] = val
+
+    if not updates:
+        raise HTTPException(status_code=400, detail={"error": "No valid fields provided"})
+
+    set_parts = [f"{col} = ${i + 2}" for i, col in enumerate(updates)]
+    await db.execute(
+        f"UPDATE api_keys SET {', '.join(set_parts)} WHERE id = $1::uuid",
+        str(key_record["id"]), *list(updates.values()),
+    )
+
+    return await get_billing_permissions(request, db)
+
+
+async def _monthly_topup_reset():
+    """Background task: reset monthly_topup_spent_usd on the first of each month."""
+    while True:
+        try:
+            await asyncio.sleep(3600)  # check hourly
+            if not app.state.pool:
+                continue
+            async with app.state.pool.acquire() as db:
+                updated = await db.execute("""
+                    UPDATE api_keys
+                    SET monthly_topup_spent_usd = 0,
+                        monthly_topup_reset_at = date_trunc('month', NOW()) + INTERVAL '1 month'
+                    WHERE monthly_topup_reset_at IS NOT NULL
+                      AND monthly_topup_reset_at <= NOW()
+                """)
+            if updated and updated != "UPDATE 0":
+                logger.info("Monthly topup spend reset: %s", updated)
+        except Exception as _e:
+            logger.error("_monthly_topup_reset error: %s", _e)
 
 
 @app.post("/submit")
