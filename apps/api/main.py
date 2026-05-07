@@ -159,7 +159,7 @@ from db import check_db
 from service_adapters import ADAPTERS, SERVICE_CONFIGS, SERVICE_ALTERNATIVES, SERVICE_DISPLAY_NAMES
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
-from param_mapper import map_params, missing_param_hint, SERVICE_REQUIRED_PARAMS, CATALOG_TO_MANAGED, detect_category_hint
+from param_mapper import map_params, missing_param_hint, SERVICE_REQUIRED_PARAMS, CATALOG_TO_MANAGED, detect_category_hint, MANAGED_TO_CATALOG
 
 load_dotenv()
 
@@ -347,6 +347,104 @@ async def _cleanup_anon_searches_loop(app: "FastAPI"):
             logger.info(f"Cleaned {len(stale)} stale anon search entries")
 
 
+# Probe payloads for each probeable managed service (skip resend, stability, assemblyai, elevenlabs)
+_PROBE_PARAMS: dict[str, dict] = {
+    "groq":        {"messages": [{"role": "user", "content": "Hi"}]},
+    "together":    {"messages": [{"role": "user", "content": "Hi"}]},
+    "deepl":       {"text": "Hi", "target_lang": "ES"},
+    "serper":      {"query": "test"},
+    "tavily":      {"query": "test"},
+    "brave":       {"query": "test"},
+    "perplexity":  {"messages": [{"role": "user", "content": "Hi"}]},
+    "openweather": {"city": "London"},
+    "newsapi":     {"query": "test"},
+    "alphavantage":{"symbol": "AAPL"},
+    "jina":        {"url": "https://example.com"},
+}
+
+
+async def _probe_managed_services_loop():
+    """Probe all probeable managed services every 30 minutes."""
+    import time as _time
+    await asyncio.sleep(60)  # brief startup delay
+    while True:
+        pool = getattr(app.state, "pool", None)
+        if not pool:
+            await asyncio.sleep(1800)
+            continue
+
+        async with pool.acquire() as conn:
+            catalog_slugs = list(MANAGED_TO_CATALOG.values())
+            slug_to_id = {
+                r["slug"]: str(r["id"])
+                for r in await conn.fetch(
+                    "SELECT id, slug FROM services WHERE slug = ANY($1::text[])",
+                    catalog_slugs,
+                )
+            }
+
+        for managed_slug, probe_params in _PROBE_PARAMS.items():
+            cfg = SERVICE_CONFIGS.get(managed_slug)
+            if not cfg:
+                continue
+            api_key = os.environ.get(cfg["key_var"], "")
+            if not api_key:
+                continue
+
+            catalog_slug = MANAGED_TO_CATALOG.get(managed_slug, managed_slug)
+            service_id = slug_to_id.get(catalog_slug)
+
+            t0 = _time.time()
+            success = False
+            error_msg = None
+            try:
+                adapter = ADAPTERS.get(managed_slug)
+                if adapter:
+                    mapped, _ = map_params(managed_slug, probe_params)
+                    await adapter(mapped, api_key)
+                    success = True
+            except Exception as exc:
+                error_msg = str(exc)[:200]
+
+            response_ms = round((_time.time() - t0) * 1000)
+
+            try:
+                pool2 = getattr(app.state, "pool", None)
+                if not pool2:
+                    continue
+                async with pool2.acquire() as conn2:
+                    if service_id:
+                        await conn2.execute(
+                            """
+                            INSERT INTO service_probes
+                              (service_id, reachable, response_time_ms, status_code, error_message)
+                            VALUES ($1::uuid, $2, $3, $4, $5)
+                            """,
+                            service_id, success, float(response_ms),
+                            200 if success else 500, error_msg,
+                        )
+                    # Update consecutive_failures and last_tested_at on the services row
+                    if success:
+                        await conn2.execute(
+                            "UPDATE services SET consecutive_failures=0, last_tested_at=NOW() WHERE slug=$1",
+                            catalog_slug,
+                        )
+                    else:
+                        await conn2.execute(
+                            "UPDATE services SET consecutive_failures=consecutive_failures+1, last_tested_at=NOW() WHERE slug=$1",
+                            catalog_slug,
+                        )
+                    # Purge probes older than 7 days
+                    await conn2.execute(
+                        "DELETE FROM service_probes WHERE probed_at < NOW() - INTERVAL '7 days'"
+                    )
+            except Exception as db_err:
+                logger.warning("probe db write failed for %s: %s", managed_slug, db_err)
+
+        logger.info("managed service probe cycle complete")
+        await asyncio.sleep(1800)  # 30 minutes
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Wayforth API starting, environment={ENVIRONMENT}")
@@ -396,11 +494,13 @@ async def lifespan(app: FastAPI):
     watcher_task = asyncio.create_task(_usdc_payment_watcher())
     renewal_task = asyncio.create_task(_usdc_renewal_reminder())
     reset_task = asyncio.create_task(_monthly_topup_reset())
+    probe_task = asyncio.create_task(_probe_managed_services_loop())
     yield
     cleanup_task.cancel()
     watcher_task.cancel()
     renewal_task.cancel()
     reset_task.cancel()
+    probe_task.cancel()
     if app.state.pool:
         await app.state.pool.close()
 
@@ -2745,6 +2845,185 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
         "calls_remaining": balance_after // CREDITS_PER_CALL,
         "execution_ms": execution_ms,
     }
+
+
+# ── /status/services — public service health ─────────────────────────────────
+
+_CATALOG_SLUGS = list(MANAGED_TO_CATALOG.values())
+_CATALOG_SLUG_TO_MANAGED = {v: k for k, v in MANAGED_TO_CATALOG.items()}
+
+
+def _service_status(consecutive_failures: int) -> tuple[str, str]:
+    if consecutive_failures == 0:
+        return "operational", "Operational"
+    if consecutive_failures <= 2:
+        return "degraded", "Degraded"
+    return "outage", "Outage"
+
+
+@app.get("/status/services", tags=["Public"])
+async def status_services():
+    """Public health status for all 15 managed services. No auth required."""
+    from datetime import datetime, timezone
+    pool = app.state.pool
+    if not pool:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.id::text, s.slug, s.name, s.category,
+                   s.wri_score, s.consecutive_failures, s.last_tested_at,
+                   sp_agg.avg_ms, sp_agg.total_probes, sp_agg.success_probes
+            FROM services s
+            LEFT JOIN LATERAL (
+                SELECT AVG(sp.response_time_ms)::float AS avg_ms,
+                       COUNT(*) AS total_probes,
+                       COUNT(*) FILTER (WHERE sp.reachable) AS success_probes
+                FROM service_probes sp
+                WHERE sp.service_id = s.id
+                  AND sp.probed_at > NOW() - INTERVAL '7 days'
+            ) sp_agg ON true
+            WHERE s.slug = ANY($1::text[])
+            """,
+            _CATALOG_SLUGS,
+        )
+
+    now = datetime.now(timezone.utc)
+    services_out = []
+    for row in sorted(rows, key=lambda r: (r["wri_score"] or 0), reverse=True):
+        managed_slug = _CATALOG_SLUG_TO_MANAGED.get(row["slug"], row["slug"])
+        status, status_label = _service_status(row["consecutive_failures"] or 0)
+        total_probes = row["total_probes"] or 0
+        success_probes = row["success_probes"] or 0
+        if total_probes > 0:
+            uptime_pct = round(success_probes / total_probes * 100, 1)
+        elif (row["consecutive_failures"] or 0) == 0:
+            uptime_pct = 99.9
+        else:
+            uptime_pct = max(0.0, round(100 - (row["consecutive_failures"] / max(total_probes, 1)) * 100, 1))
+
+        services_out.append({
+            "slug": managed_slug,
+            "name": SERVICE_DISPLAY_NAMES.get(managed_slug, row["name"]),
+            "category": row["category"],
+            "status": status,
+            "status_label": status_label,
+            "last_tested_at": row["last_tested_at"].isoformat() if row["last_tested_at"] else None,
+            "avg_response_ms": round(row["avg_ms"]) if row["avg_ms"] else None,
+            "uptime_7d_pct": uptime_pct,
+            "consecutive_failures": row["consecutive_failures"] or 0,
+            "wri_score": row["wri_score"],
+        })
+
+    # Add any managed services missing from DB with defaults
+    present = {s["slug"] for s in services_out}
+    for managed_slug in MANAGED_TO_CATALOG:
+        if managed_slug not in present:
+            services_out.append({
+                "slug": managed_slug,
+                "name": SERVICE_DISPLAY_NAMES.get(managed_slug, managed_slug),
+                "category": None,
+                "status": "unknown",
+                "status_label": "Unknown",
+                "last_tested_at": None,
+                "avg_response_ms": None,
+                "uptime_7d_pct": None,
+                "consecutive_failures": 0,
+                "wri_score": None,
+            })
+
+    statuses = {s["status"] for s in services_out}
+    if "outage" in statuses:
+        overall = "outage"
+    elif "degraded" in statuses:
+        overall = "degraded"
+    else:
+        overall = "operational"
+
+    return JSONResponse(
+        content={
+            "updated_at": now.isoformat(),
+            "overall_status": overall,
+            "services": services_out,
+            "incidents": [],
+        },
+        headers={"Cache-Control": "public, max-age=60", "Access-Control-Allow-Origin": "*"},
+    )
+
+
+# ── /leaderboard — public WRI rankings ───────────────────────────────────────
+
+@app.get("/leaderboard", tags=["Public"])
+async def leaderboard():
+    """Public WRI leaderboard for all managed services. No auth required."""
+    from datetime import datetime, timezone, timedelta
+    pool = app.state.pool
+    if not pool:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT slug, name, category, wri_score, x402_supported, consecutive_failures
+            FROM services
+            WHERE slug = ANY($1::text[])
+            ORDER BY wri_score DESC NULLS LAST
+            """,
+            _CATALOG_SLUGS,
+        )
+
+    now = datetime.now(timezone.utc)
+    services_out = []
+    rank = 1
+    for row in rows:
+        managed_slug = _CATALOG_SLUG_TO_MANAGED.get(row["slug"], row["slug"])
+        cfg = SERVICE_CONFIGS.get(managed_slug, {})
+        services_out.append({
+            "rank": rank,
+            "slug": managed_slug,
+            "name": SERVICE_DISPLAY_NAMES.get(managed_slug, row["name"]),
+            "category": row["category"],
+            "wri_score": row["wri_score"],
+            "managed": True,
+            "zero_setup": True,
+            "credits_per_call": cfg.get("credits"),
+            "x402_supported": bool(row["x402_supported"]),
+            "payment_rate": 100.0,
+        })
+        rank += 1
+
+    # Append any managed services not in DB
+    present_slugs = {s["slug"] for s in services_out}
+    for managed_slug, catalog_slug in MANAGED_TO_CATALOG.items():
+        if managed_slug not in present_slugs:
+            cfg = SERVICE_CONFIGS.get(managed_slug, {})
+            services_out.append({
+                "rank": rank,
+                "slug": managed_slug,
+                "name": SERVICE_DISPLAY_NAMES.get(managed_slug, managed_slug),
+                "category": None,
+                "wri_score": None,
+                "managed": True,
+                "zero_setup": True,
+                "credits_per_call": cfg.get("credits"),
+                "x402_supported": False,
+                "payment_rate": 100.0,
+            })
+            rank += 1
+
+    return JSONResponse(
+        content={
+            "updated_at": now.isoformat(),
+            "version": "2.0",
+            "services": services_out,
+            "total_ranked": len(services_out),
+            "next_update": (now + timedelta(hours=24)).replace(
+                hour=20, minute=0, second=0, microsecond=0
+            ).isoformat(),
+        },
+        headers={"Cache-Control": "public, max-age=60", "Access-Control-Allow-Origin": "*"},
+    )
 
 
 # ── billing permission helpers ────────────────────────────────────────────────
