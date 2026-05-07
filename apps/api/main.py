@@ -2198,7 +2198,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
     if is_cross_rail:
         catalog_svc = await db.fetchrow(
             "SELECT id, name, category, x402_supported, endpoint_url, pricing_usdc, consecutive_failures "
-            "FROM services WHERE name = $1",
+            "FROM services WHERE LOWER(name) = $1",
             service_slug,
         )
 
