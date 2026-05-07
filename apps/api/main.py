@@ -1669,9 +1669,9 @@ async def health_report(request: Request):
     }
 
 
-@app.get("/leaderboard")
+@app.get("/leaderboard/x402")
 @limiter.limit("20/minute")
-async def leaderboard(request: Request, limit: int = 20, db=Depends(get_db)):
+async def leaderboard_x402(request: Request, limit: int = 20, db=Depends(get_db)):
     rows = await db.fetch("""
         SELECT
             s.name,
@@ -2952,10 +2952,10 @@ async def status_services():
     )
 
 
-# ── /leaderboard — public WRI rankings ───────────────────────────────────────
+# ── /leaderboard — public WRI rankings for managed services ──────────────────
 
 @app.get("/leaderboard", tags=["Public"])
-async def leaderboard():
+async def leaderboard_managed():
     """Public WRI leaderboard for all managed services. No auth required."""
     from datetime import datetime, timezone, timedelta
     pool = app.state.pool
