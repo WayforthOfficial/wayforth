@@ -162,6 +162,26 @@ INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
 }
 
 
+# Managed slug → canonical catalog slug in the services table
+MANAGED_TO_CATALOG: dict[str, str] = {
+    "groq":        "groq",
+    "together":    "together_ai",
+    "deepl":       "deepl",
+    "serper":      "serper",
+    "tavily":      "tavily_ai_search",
+    "brave":       "brave_search_2",
+    "perplexity":  "perplexity_ai",
+    "openweather": "openweathermap",
+    "newsapi":     "newsapi",
+    "alphavantage":"alpha_vantage",
+    "jina":        "jina_reader",
+    "assemblyai":  "assemblyai",
+    "elevenlabs":  "elevenlabs",
+    "stability":   "stability_ai",
+    "resend":      "resend",
+}
+
+
 def detect_category_hint(intent: str) -> str | None:
     """Return a category name if intent strongly signals one, else None."""
     intent_lower = intent.lower()
