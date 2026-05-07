@@ -5806,9 +5806,9 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     if not _TIER_FEATURES[tier]["analytics"]:
         raise HTTPException(status_code=403, detail="Analytics requires Pro or Growth tier")
 
-    # searches (via credit_transactions where api_endpoint='/search')
+    # searches (via credit_transactions where api_endpoint='/search') — this month only
     searches_total = await db.fetchval(
-        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND api_endpoint='/search'", user_id) or 0
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND api_endpoint='/search' AND created_at >= date_trunc('month', NOW())", user_id) or 0
     searches_7d = await db.fetchval(
         "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND api_endpoint='/search' AND created_at > NOW()-INTERVAL '7 days'", user_id) or 0
     searches_24h = await db.fetchval(
@@ -5892,6 +5892,13 @@ async def account_analytics(request: Request, db=Depends(get_db)):
             "last_called": r["last_called"].isoformat() if r["last_called"] else None,
         })
 
+    credits_balance = credits["credits_balance"] if credits else 0
+    plan_tier = credits["package_tier"] if credits else "free"
+    plan_def = PLANS.get(plan_tier, PLANS["free"])
+    calls_included = plan_def["calls_included"]
+    calls_remaining = min(credits_balance // CREDITS_PER_CALL, calls_included)
+    calls_used_month = consumed_month // CREDITS_PER_CALL
+
     return {
         "searches": {
             "total": searches_total,
@@ -5907,9 +5914,12 @@ async def account_analytics(request: Request, db=Depends(get_db)):
         },
         "credits": {
             "consumed_this_month": consumed_month,
-            "remaining": credits["credits_balance"] if credits else 0,
-            "total": credits["lifetime_credits"] if credits else 0,
+            "remaining": credits_balance,
+            "total": calls_included * CREDITS_PER_CALL,
             "reset_date": reset.isoformat(),
+            "calls_used": calls_used_month,
+            "calls_remaining": calls_remaining,
+            "calls_included": calls_included,
         },
         "wri_scores": wri_score_entries,
     }
