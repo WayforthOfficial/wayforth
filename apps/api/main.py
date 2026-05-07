@@ -2965,10 +2965,18 @@ async def leaderboard_managed():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT slug, name, category, wri_score, x402_supported, consecutive_failures
-            FROM services
-            WHERE slug = ANY($1::text[])
-            ORDER BY wri_score DESC NULLS LAST
+            SELECT s.slug, s.name, s.category, s.wri_score, s.x402_supported,
+                   s.consecutive_failures,
+                   COALESCE(sig.total_signals, 0) AS total_signals
+            FROM services s
+            LEFT JOIN (
+                SELECT clicked_slug, COUNT(*) AS total_signals
+                FROM search_analytics
+                WHERE clicked_slug = ANY($1::text[])
+                GROUP BY clicked_slug
+            ) sig ON sig.clicked_slug = s.slug
+            WHERE s.slug = ANY($1::text[])
+            ORDER BY s.wri_score DESC NULLS LAST
             """,
             _CATALOG_SLUGS,
         )
@@ -2985,6 +2993,7 @@ async def leaderboard_managed():
             "name": SERVICE_DISPLAY_NAMES.get(managed_slug, row["name"]),
             "category": row["category"],
             "wri_score": row["wri_score"],
+            "total_signals": row["total_signals"],
             "managed": True,
             "zero_setup": True,
             "credits_per_call": cfg.get("credits"),
