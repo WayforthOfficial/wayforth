@@ -3283,7 +3283,7 @@ async def get_billing_settings(request: Request, db=Depends(get_db)):
         "monthly_topup_spent_usd": round(spent, 2),
         "monthly_topup_remaining_usd": round(limit - spent, 2),
         "monthly_topup_reset_at": reset_at.date().isoformat() if reset_at else None,
-        "calls_remaining": balance // CREDITS_PER_CALL,
+        "calls_remaining": min(balance // CREDITS_PER_CALL, PLANS.get(tier, PLANS["free"])["calls_included"]),
         "plan": tier,
     }
 
@@ -5492,7 +5492,7 @@ async def get_balance(request: Request, db=Depends(get_db)):
 
     return {
         "plan": tier,
-        "calls_remaining": balance // CREDITS_PER_CALL,
+        "calls_remaining": min(balance // CREDITS_PER_CALL, plan_def["calls_included"]),
         "calls_included": plan_def["calls_included"],
         "resets_at": resets_at.isoformat() if resets_at else None,
         "payment_rail": payment_rail,
@@ -5548,7 +5548,7 @@ async def account_credits(request: Request, db=Depends(get_db)):
 
     return {
         "plan": tier,
-        "calls_remaining": balance // CREDITS_PER_CALL,
+        "calls_remaining": min(balance // CREDITS_PER_CALL, PLANS.get(tier, PLANS["free"])["calls_included"]),
         "calls_included": PLANS.get(tier, PLANS["free"])["calls_included"],
         # Dashboard-only credit detail (not shown in public docs)
         "credits_remaining": balance,
