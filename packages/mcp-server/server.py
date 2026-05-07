@@ -11,6 +11,8 @@ from pydantic import Field
 
 logger = logging.getLogger("wayforth-mcp")
 
+VERSION = "0.2.4"
+
 load_dotenv()
 
 API_BASE = os.getenv("WAYFORTH_API_URL", "https://gateway.wayforth.io")
@@ -90,7 +92,7 @@ async def server_card(request):
     from starlette.responses import JSONResponse
     return JSONResponse({
         "name": "wayforth",
-        "version": "0.2.4",
+        "version": VERSION,
         "description": "The search engine AI agents use to find and pay for APIs. 300+ verified APIs ranked by WayforthRank v2.",
         "icon": "https://wayforth.io/favicon.png",
         "repository": "https://github.com/WayforthOfficial/wayforth",
