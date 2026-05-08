@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from core.auth import _resolve_user
 from core.db import get_db
 from core.rate_limit import limiter
-from wayf_points import AIRDROP_POOL_WAYF, DISCLAIMER, MONTHLY_POINTS_CAP, calculate_tge_allocation
+from wayf_points import AIRDROP_POOL_WAYF, DISCLAIMER, MONTHLY_POINTS_CAP, WAYF_CAP, get_current_rate
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ async def get_wayf_points(request: Request, db=Depends(get_db)):
 
     row = await db.fetchrow(
         """SELECT points_balance, points_earned_total, points_earned_this_month,
-                  monthly_points_reset_at
+                  monthly_points_reset_at, COALESCE(wayf_balance, 0) AS wayf_balance
            FROM wayf_points WHERE user_id = $1::uuid""",
         str(user_id),
     )
@@ -42,14 +42,13 @@ async def get_wayf_points(request: Request, db=Depends(get_db)):
     points_earned_total = row["points_earned_total"] if row else 0
     points_earned_this_month = row["points_earned_this_month"] if row else 0
     reset_at = row["monthly_points_reset_at"] if row else None
+    wayf_balance = float(row["wayf_balance"]) if row else 0.0
 
-    total_all = await db.fetchval("SELECT SUM(points_earned_total) FROM wayf_points") or 0
-
-    estimated_wayf = calculate_tge_allocation(points_earned_total, int(total_all))
-    your_share_pct = round((points_earned_total / int(total_all) * 100), 4) if total_all else 0.0
+    current_rate = await get_current_rate(db)
 
     recent_rows = await db.fetch(
-        """SELECT points, reason, source, created_at
+        """SELECT points, COALESCE(rate_at_award, 10) AS rate_at_award,
+                  reason, source, created_at
            FROM wayf_points_log
            WHERE user_id = $1::uuid
            ORDER BY created_at DESC LIMIT 10""",
@@ -64,26 +63,20 @@ async def get_wayf_points(request: Request, db=Depends(get_db)):
 
     return {
         "points_balance": points_balance,
-        "points_earned_total": points_earned_total,
+        "wayf_balance": round(wayf_balance, 6),
+        "wayf_cap": WAYF_CAP,
+        "wayf_remaining_to_cap": round(max(0.0, float(WAYF_CAP) - wayf_balance), 6),
+        "current_rate": current_rate,
         "points_earned_this_month": points_earned_this_month,
         "monthly_cap": MONTHLY_POINTS_CAP,
         "monthly_remaining": max(0, MONTHLY_POINTS_CAP - points_earned_this_month),
         "resets_at": reset_at.date().isoformat() if reset_at else None,
         "earning_active": earning_active,
-        "tge_estimate": {
-            "your_points": points_earned_total,
-            "total_all_users": int(total_all),
-            "your_share_pct": your_share_pct,
-            "estimated_wayf": round(estimated_wayf),
-            "airdrop_pool": AIRDROP_POOL_WAYF,
-            "note": (
-                "Estimate based on current totals. Grows more accurate over time. "
-                "Final allocation at TGE snapshot."
-            ),
-        },
         "recent_earnings": [
             {
                 "points": r["points"],
+                "wayf_earned": round(r["points"] / r["rate_at_award"], 4),
+                "rate_at_award": r["rate_at_award"],
                 "reason": r["reason"],
                 "source": r["source"],
                 "earned_at": r["created_at"].isoformat(),
@@ -101,17 +94,19 @@ async def admin_wayf_totals(request: Request, db=Depends(get_db)):
     if not admin_key or admin_key != os.environ.get("ADMIN_KEY", ""):
         raise HTTPException(status_code=403, detail={"error": "forbidden"})
 
-    total_users = await db.fetchval(
+    total_users = int(await db.fetchval(
         "SELECT COUNT(*) FROM wayf_points WHERE points_earned_total > 0"
-    ) or 0
-    total_points = await db.fetchval(
-        "SELECT SUM(points_earned_total) FROM wayf_points"
-    ) or 0
-    points_this_month = await db.fetchval(
-        "SELECT SUM(points_earned_this_month) FROM wayf_points"
-    ) or 0
+    ) or 0)
+    total_wayf = float(await db.fetchval(
+        "SELECT COALESCE(SUM(wayf_balance), 0) FROM wayf_points"
+    ) or 0)
+    points_this_month = int(await db.fetchval(
+        "SELECT COALESCE(SUM(points_earned_this_month), 0) FROM wayf_points"
+    ) or 0)
 
-    avg_wayf = round(AIRDROP_POOL_WAYF / int(total_users)) if total_users else 0
+    current_rate = await get_current_rate(db)
+    pool_remaining = float(AIRDROP_POOL_WAYF) - total_wayf
+    pool_used_pct = round(total_wayf / AIRDROP_POOL_WAYF * 100, 6) if AIRDROP_POOL_WAYF else 0.0
 
     cutoff = os.getenv("WAYF_POINTS_CUTOFF_DATE")
     earning_active = True
@@ -120,11 +115,13 @@ async def admin_wayf_totals(request: Request, db=Depends(get_db)):
         earning_active = datetime.now(timezone.utc) < cutoff_dt
 
     return {
-        "total_users_earning": int(total_users),
-        "total_points_all_users": int(total_points),
+        "total_users_earning": total_users,
+        "current_rate": current_rate,
+        "total_wayf_committed": round(total_wayf, 4),
+        "pool_remaining": round(pool_remaining, 4),
+        "pool_used_pct": pool_used_pct,
+        "points_awarded_this_month": points_this_month,
         "airdrop_pool": AIRDROP_POOL_WAYF,
-        "estimated_avg_wayf_per_user": avg_wayf,
-        "points_awarded_this_month": int(points_this_month),
         "earning_active": earning_active,
         "cutoff_date": cutoff,
     }
