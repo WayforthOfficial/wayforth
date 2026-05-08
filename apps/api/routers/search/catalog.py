@@ -460,7 +460,6 @@ async def leaderboard_managed():
             "total_signals": row["total_signals"],
             "managed": True,
             "zero_setup": True,
-            "credits_per_call": cfg.get("credits"),
             "x402_supported": bool(row["x402_supported"]),
             "payment_rate": 100.0,
         })
@@ -479,7 +478,6 @@ async def leaderboard_managed():
                 "wri_score": None,
                 "managed": True,
                 "zero_setup": True,
-                "credits_per_call": cfg.get("credits"),
                 "x402_supported": False,
                 "payment_rate": 100.0,
             })

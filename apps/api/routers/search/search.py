@@ -119,8 +119,9 @@ async def search_services(
 ):
     from main import app
     from ranker_client import rank_services
+    import html as _html
 
-    q = q.strip().lower()
+    q = _html.escape(q.strip().lower())
     if auth.get("authenticated") and auth.get("user_id"):
         if auth.get("tier") == "free" and auth.get("user_id"):
             from datetime import datetime, timezone
@@ -254,7 +255,6 @@ async def search_services(
             "endpoint_url": s.get("endpoint_url"),
             "pricing": {
                 "per_call_usd": s.get("pricing_usdc"),
-                "credits_per_call": max(1, round((s.get("pricing_usdc") or 0.001) * 1000)),
             },
             "service_id": "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest(),
             "wayforth_id": f"wayforth://{s.get('slug') or s.get('name','').lower().replace(' ','_').replace('/','_')[:30]}/{hashlib.sha256(s.get('endpoint_url','').encode()).hexdigest()[:8]}",
@@ -263,13 +263,11 @@ async def search_services(
                     "method": "card",
                     "processor": "Stripe Treasury",
                     "credits_needed": max(1, round((s.get("pricing_usdc") or 0.001) * 1000)),
-                    "fee_pct": 1.5,
                 },
                 "track_b": {
                     "method": "crypto",
                     "network": "base-sepolia",
                     "amount_usdc": s.get("pricing_usdc") or 0.001,
-                    "fee_pct": 1.5,
                     "calldata_via": "wayforth_pay(service_id, amount_usd, track='crypto')",
                 },
                 "x402_supported": bool(s.get("x402_supported", False)),
