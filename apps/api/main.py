@@ -2657,7 +2657,6 @@ async def execute_service(request: Request, db=Depends(get_db)):
         "service": service_slug,
         "result": result,
         "credits_deducted": credit_cost,
-        "credits_remaining": balance_after // CREDITS_PER_CALL,
         "execution_ms": execution_ms,
         "managed_services_available": len(SERVICE_CONFIGS),
     }
@@ -2876,7 +2875,6 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
             "results_considered": len(top5),
             "selected_rank": selected_rank,
         },
-        "credits_remaining": balance_after // CREDITS_PER_CALL,
         "calls_remaining": balance_after // CREDITS_PER_CALL,
         "execution_ms": execution_ms,
     }
@@ -6853,7 +6851,7 @@ async def account_agent_detail(request: Request, agent_id: str, db=Depends(get_d
             COUNT(*) AS calls_total,
             COUNT(*) FILTER (WHERE created_at >= $3) AS calls_this_month,
             ABS(SUM(amount)) AS credits_used_total,
-            ABS(SUM(amount)) FILTER (WHERE created_at >= $3) AS credits_used_this_month,
+            ABS(SUM(amount) FILTER (WHERE created_at >= $3)) AS credits_used_this_month,
             MIN(created_at) AS first_seen,
             MAX(created_at) AS last_seen
         FROM credit_transactions
