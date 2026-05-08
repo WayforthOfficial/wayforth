@@ -199,7 +199,12 @@ async def lifespan(app: FastAPI):
     app.state.db_ok = ok
     app.state.anon_searches = {}
     try:
-        app.state.pool = await asyncpg.create_pool(_ASYNCPG_URL, min_size=2, max_size=10)
+        app.state.pool = await asyncpg.create_pool(
+            _ASYNCPG_URL,
+            min_size=2,
+            max_size=20,
+            command_timeout=30.0,
+        )
         app.state.db_ok = True
         async with app.state.pool.acquire() as _mconn:
             await _mconn.execute("""
