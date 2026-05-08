@@ -6094,34 +6094,7 @@ async def list_webhooks(request: Request, db=Depends(get_db)):
     return {"webhooks": webhooks, "total": len(webhooks)}
 
 
-@app.delete("/webhooks/{webhook_id}")
-@limiter.limit("10/minute")
-async def delete_webhook(request: Request, webhook_id: str, db=Depends(get_db)):
-    """Deactivate a registered webhook. Requires the API key of the registrant."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    user_id, _api_key_id = await _resolve_user(db, api_key)
-
-    owner = await db.fetchrow(
-        "SELECT owner_email FROM api_keys WHERE user_id = $1 AND active = true LIMIT 1", user_id
-    )
-    webhook = await db.fetchrow(
-        "SELECT id, contact_email FROM provider_webhooks WHERE id = $1::uuid AND active = true",
-        webhook_id,
-    )
-    if not webhook:
-        raise HTTPException(status_code=404, detail="Webhook not found")
-    if not owner or webhook["contact_email"] != owner["owner_email"]:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this webhook")
-
-    await db.execute(
-        "UPDATE provider_webhooks SET active = FALSE WHERE id = $1::uuid", webhook_id
-    )
-    return {"webhook_id": webhook_id, "status": "deactivated"}
-
-
-# ── WRI alert webhooks ────────────────────────────────────────────────────────
+# ── WRI alert webhooks — must be before /webhooks/{webhook_id} (static before parameterized) ───
 
 @app.post("/webhooks/wri-alerts", tags=["Webhooks"])
 @limiter.limit("20/minute")
@@ -6235,6 +6208,33 @@ async def delete_wri_alert(request: Request, alert_id: str, db=Depends(get_db)):
         "UPDATE wri_alerts SET active = false WHERE id = $1::uuid", alert_id
     )
     return {"id": alert_id, "status": "deactivated"}
+
+
+@app.delete("/webhooks/{webhook_id}")
+@limiter.limit("10/minute")
+async def delete_webhook(request: Request, webhook_id: str, db=Depends(get_db)):
+    """Deactivate a registered webhook. Requires the API key of the registrant."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
+    user_id, _api_key_id = await _resolve_user(db, api_key)
+
+    owner = await db.fetchrow(
+        "SELECT owner_email FROM api_keys WHERE user_id = $1 AND active = true LIMIT 1", user_id
+    )
+    webhook = await db.fetchrow(
+        "SELECT id, contact_email FROM provider_webhooks WHERE id = $1::uuid AND active = true",
+        webhook_id,
+    )
+    if not webhook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    if not owner or webhook["contact_email"] != owner["owner_email"]:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this webhook")
+
+    await db.execute(
+        "UPDATE provider_webhooks SET active = FALSE WHERE id = $1::uuid", webhook_id
+    )
+    return {"webhook_id": webhook_id, "status": "deactivated"}
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
