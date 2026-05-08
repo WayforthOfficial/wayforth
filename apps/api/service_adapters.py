@@ -4,27 +4,27 @@ import httpx
 
 SERVICE_CONFIGS = {
     # Inference
-    "groq":        {"key_var": "GROQ_API_KEY",          "credits": 3},
-    "together":    {"key_var": "TOGETHER_API_KEY",      "credits": 4},
+    "groq":        {"key_var": "GROQ_API_KEY",          "credits": 3,   "real_cost_per_call": 0.001},
+    "together":    {"key_var": "TOGETHER_API_KEY",      "credits": 4,   "real_cost_per_call": 0.001},
     # Translation
-    "deepl":       {"key_var": "DEEPL_API_KEY",         "credits": 20},
+    "deepl":       {"key_var": "DEEPL_API_KEY",         "credits": 20,  "real_cost_per_call": 0.013},
     # Search
-    "serper":      {"key_var": "SERPER_API_KEY",        "credits": 3},
-    "tavily":      {"key_var": "TAVILY_API_KEY",        "credits": 4},
-    "brave":       {"key_var": "BRAVE_API_KEY",         "credits": 5},
-    "perplexity":  {"key_var": "PERPLEXITY_API_KEY",    "credits": 10},
+    "serper":      {"key_var": "SERPER_API_KEY",        "credits": 3,   "real_cost_per_call": 0.001},
+    "tavily":      {"key_var": "TAVILY_API_KEY",        "credits": 4,   "real_cost_per_call": 0.002},
+    "brave":       {"key_var": "BRAVE_API_KEY",         "credits": 5,   "real_cost_per_call": 0.002},
+    "perplexity":  {"key_var": "PERPLEXITY_API_KEY",    "credits": 10,  "real_cost_per_call": 0.006},
     # Data
-    "openweather": {"key_var": "OPENWEATHER_API_KEY",   "credits": 2},
-    "newsapi":     {"key_var": "NEWSAPI_API_KEY",       "credits": 5},
-    "alphavantage":{"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 4},
-    "jina":        {"key_var": "JINA_API_KEY",          "credits": 4},
+    "openweather": {"key_var": "OPENWEATHER_API_KEY",   "credits": 2,   "real_cost_per_call": 0.001},
+    "newsapi":     {"key_var": "NEWSAPI_API_KEY",       "credits": 5,   "real_cost_per_call": 0.003},
+    "alphavantage":{"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 4,   "real_cost_per_call": 0.002},
+    "jina":        {"key_var": "JINA_API_KEY",          "credits": 4,   "real_cost_per_call": 0.002},
     # Audio / Voice
-    "assemblyai":  {"key_var": "ASSEMBLYAI_API_KEY",    "credits": 20},
-    "elevenlabs":  {"key_var": "ELEVENLABS_API_KEY",    "credits": 200},
+    "assemblyai":  {"key_var": "ASSEMBLYAI_API_KEY",    "credits": 20,  "real_cost_per_call": 0.012},
+    "elevenlabs":  {"key_var": "ELEVENLABS_API_KEY",    "credits": 200, "real_cost_per_call": 0.150},
     # Image — stability credits: 45 for core (default), 100 for ultra (resolved at call time)
-    "stability":   {"key_var": "STABILITY_API_KEY",     "credits": 45},
+    "stability":   {"key_var": "STABILITY_API_KEY",     "credits": 45,  "real_cost_per_call": 0.080},
     # Email
-    "resend":      {"key_var": "RESEND_API_KEY",        "credits": 3},
+    "resend":      {"key_var": "RESEND_API_KEY",        "credits": 3,   "real_cost_per_call": 0.001},
 }
 
 # Suggested alternatives when a service env key is missing
