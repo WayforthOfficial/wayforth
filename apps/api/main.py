@@ -160,7 +160,7 @@ from db import check_db
 from service_adapters import ADAPTERS, SERVICE_CONFIGS, SERVICE_ALTERNATIVES, SERVICE_DISPLAY_NAMES
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
-from param_mapper import map_params, missing_param_hint, SERVICE_REQUIRED_PARAMS, CATALOG_TO_MANAGED, detect_category_hint, MANAGED_TO_CATALOG
+from param_mapper import map_params, missing_param_hint, SERVICE_REQUIRED_PARAMS, CATALOG_TO_MANAGED, detect_category_hint, MANAGED_TO_CATALOG, INTENT_CATEGORY_MAP
 
 load_dotenv()
 
@@ -3010,6 +3010,8 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     selected_svc: dict | None = None
     selected_rank: int | None = None
 
+    _compatible_cats = INTENT_CATEGORY_MAP.get(category_filter) if category_filter else None
+
     for i, svc in enumerate(ranked):
         catalog_slug = svc.get("slug") or ""
         managed_slug = CATALOG_TO_MANAGED.get(catalog_slug)
@@ -3019,6 +3021,8 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
             continue
         if not os.environ.get(SERVICE_CONFIGS[managed_slug]["key_var"], ""):
             continue
+        if _compatible_cats and svc.get("category") not in _compatible_cats:
+            continue  # wrong category for this intent
         _, _missing = map_params(managed_slug, input_dict)
         if _missing:
             continue  # params not satisfied — try next service
@@ -3056,6 +3060,8 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
                     continue
                 if not os.environ.get(SERVICE_CONFIGS[managed_slug]["key_var"], ""):
                     continue
+                if _compatible_cats and row.get("category") not in _compatible_cats:
+                    continue  # wrong category for this intent
                 _, _fb_missing = map_params(managed_slug, input_dict)
                 if _fb_missing:
                     continue  # params not satisfied — try next service
