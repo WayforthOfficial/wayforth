@@ -1126,6 +1126,39 @@ async def compute_calls_remaining(conn, api_key_id: str) -> int:
     return max(0, p["calls_included"] - row["monthly_calls_count"])
 
 
+async def _increment_calls(pool, api_key_id: str) -> int:
+    """Single increment site for calls_count and monthly_calls_count.
+    All call paths (/run, /execute) go through here — nowhere else.
+    Returns calls_remaining, or 0 on failure.
+    """
+    try:
+        async with pool.acquire() as _conn:
+            row = await _conn.fetchrow(
+                "UPDATE api_keys "
+                "SET calls_count = calls_count + 1, "
+                "    monthly_calls_count = monthly_calls_count + 1, "
+                "    monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, "
+                "        date_trunc('month', NOW()) + INTERVAL '1 month') "
+                "WHERE id = $1::uuid "
+                "RETURNING calls_count, monthly_calls_count, tier",
+                api_key_id,
+            )
+        if row:
+            p = PLANS.get(row["tier"], PLANS["free"])
+            remaining = max(0, p["calls_included"] - row["monthly_calls_count"])
+            logger.info(
+                "CALLS_INCREMENT_OK key=%s calls=%s monthly=%s tier=%s remaining=%s",
+                api_key_id, row["calls_count"], row["monthly_calls_count"],
+                row["tier"], remaining,
+            )
+            return remaining
+        logger.error("CALLS_INCREMENT_NOMATCH key=%s — UPDATE matched 0 rows", api_key_id)
+        return 0
+    except Exception as _e:
+        logger.error("CALLS_INCREMENT_FAIL key=%s err=%s", api_key_id, _e)
+        return 0
+
+
 @app.get(
     "/search",
     summary="Semantic service search",
@@ -2661,12 +2694,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
             })
 
         if _api_key_id:
-            await db.execute(
-                "UPDATE api_keys SET calls_count = calls_count + 1, monthly_calls_count = monthly_calls_count + 1, "
-                "monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, date_trunc('month', NOW()) + INTERVAL '1 month') "
-                "WHERE id = $1::uuid",
-                _api_key_id,
-            )
+            await _increment_calls(app.state.pool, str(_api_key_id))
         return {
             "status": "ok",
             "service": service_slug,
@@ -2763,12 +2791,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
 
         asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), service_slug))
         if _api_key_id:
-            await db.execute(
-                "UPDATE api_keys SET calls_count = calls_count + 1, monthly_calls_count = monthly_calls_count + 1, "
-                "monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, date_trunc('month', NOW()) + INTERVAL '1 month') "
-                "WHERE id = $1::uuid",
-                _api_key_id,
-            )
+            await _increment_calls(app.state.pool, str(_api_key_id))
         return {
             "status": "ok",
             "service": service_slug,
@@ -2903,12 +2926,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
         _maybe_dispatch_credits_low(app.state.pool, str(user_id), api_key_header, balance_after)
     )
     if _api_key_id:
-        await db.execute(
-            "UPDATE api_keys SET calls_count = calls_count + 1, monthly_calls_count = monthly_calls_count + 1, "
-            "monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, date_trunc('month', NOW()) + INTERVAL '1 month') "
-            "WHERE id = $1::uuid",
-            _api_key_id,
-        )
+        await _increment_calls(app.state.pool, str(_api_key_id))
 
     return {
         "status": "ok",
@@ -3110,36 +3128,11 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
             "top_up": "https://wayforth.io/billing",
         })
 
-    _calls_remaining: int = balance_after // CREDITS_PER_CALL  # emergency fallback only
+    _calls_remaining: int = balance_after // CREDITS_PER_CALL  # fallback if key absent
     if _api_key_id:
-        try:
-            async with app.state.pool.acquire() as _cnt_conn:
-                _upd = await _cnt_conn.fetchrow(
-                    "UPDATE api_keys "
-                    "SET calls_count = calls_count + 1, "
-                    "    monthly_calls_count = monthly_calls_count + 1, "
-                    "    monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, "
-                    "        date_trunc('month', NOW()) + INTERVAL '1 month') "
-                    "WHERE id = $1::uuid "
-                    "RETURNING calls_count, monthly_calls_count, tier",
-                    str(_api_key_id),
-                )
-            if _upd:
-                _p = PLANS.get(_upd["tier"], PLANS["free"])
-                _calls_remaining = max(0, _p["calls_included"] - _upd["monthly_calls_count"])
-                logger.info(
-                    "CALLS_INCREMENT_OK key=%s calls=%s monthly=%s tier=%s remaining=%s",
-                    _api_key_id, _upd["calls_count"], _upd["monthly_calls_count"],
-                    _upd["tier"], _calls_remaining,
-                )
-            else:
-                logger.error(
-                    "CALLS_INCREMENT_NOMATCH key=%s — UPDATE matched 0 rows. "
-                    "UUID not found in api_keys.",
-                    _api_key_id,
-                )
-        except Exception as _cnt_err:
-            logger.error("CALLS_INCREMENT_FAIL key=%s err=%s", _api_key_id, _cnt_err)
+        _inc = await _increment_calls(app.state.pool, str(_api_key_id))
+        if _inc:
+            _calls_remaining = _inc
 
     adapter = ADAPTERS[selected_slug]
     result = None
