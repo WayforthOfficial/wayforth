@@ -699,6 +699,12 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS monthly_calls_reset_at TIMESTAMPTZ
             """)
             await _mconn.execute("""
+                UPDATE services
+                SET consecutive_failures = 0
+                WHERE slug = ANY($1::text[])
+                  AND consecutive_failures >= 3
+            """, list(MANAGED_TO_CATALOG.values()))
+            await _mconn.execute("""
                 UPDATE api_keys ak
                 SET calls_count = sub.total,
                     monthly_calls_count = sub.monthly,
@@ -2986,8 +2992,53 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
         selected_rank = i + 1
         break
 
+    # If category filter produced no managed service, retry without category constraint.
+    # The DB category (e.g. "data") may not match the detected intent category (e.g. "search").
+    if not selected_slug and category_filter:
+        try:
+            async with app.state.pool.acquire() as _fb_conn:
+                fb_rows = await _fb_conn.fetch(
+                    f"""
+                    SELECT id, name, slug, description, endpoint_url, category,
+                           pricing_usdc, coverage_tier, source, payment_protocol,
+                           last_tested_at, consecutive_failures, x402_supported,
+                           wri_score, wri_version
+                    FROM services
+                    WHERE coverage_tier >= {tier_min} AND consecutive_failures < 3
+                    ORDER BY coverage_tier DESC
+                    LIMIT 200
+                    """,
+                )
+            fb_candidates = [dict(r) for r in fb_rows]
+            fb_ranked = await rank_services(intent, fb_candidates)
+            for i, svc in enumerate(fb_ranked[:5]):
+                catalog_slug = svc.get("slug") or ""
+                managed_slug = CATALOG_TO_MANAGED.get(catalog_slug)
+                if not managed_slug:
+                    continue
+                if managed_slug not in SERVICE_CONFIGS:
+                    continue
+                if not os.environ.get(SERVICE_CONFIGS[managed_slug]["key_var"], ""):
+                    continue
+                selected_slug = managed_slug
+                selected_svc = svc
+                selected_rank = i + 1
+                top5 = fb_ranked[:5]
+                break
+        except Exception as _fb_err:
+            logger.warning("run: category-free fallback failed: %s", _fb_err)
+
     if not selected_slug:
-        top = top5[0] if top5 else {}
+        top = top5[0] if top5 else None
+        if not top:
+            try:
+                _best = await db.fetchrow(
+                    "SELECT slug, name, wri_score FROM services "
+                    "WHERE consecutive_failures < 3 ORDER BY wri_score DESC NULLS LAST LIMIT 1"
+                )
+                top = dict(_best) if _best else {}
+            except Exception:
+                top = {}
         raise HTTPException(status_code=422, detail={
             "error": "no_managed_service",
             "intent": intent,
@@ -3000,7 +3051,7 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
                 "slug": top.get("slug"),
                 "name": top.get("name"),
                 "wri_score": top.get("wri_score"),
-            },
+            } if top else None,
             "action": "POST /call/keys/add",
         })
 
