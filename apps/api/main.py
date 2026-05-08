@@ -692,6 +692,30 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS provider_sessions_token_idx ON provider_sessions(token)
             """)
+            await _mconn.execute("""
+                ALTER TABLE api_keys
+                    ADD COLUMN IF NOT EXISTS calls_count INTEGER NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS monthly_calls_count INTEGER NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS monthly_calls_reset_at TIMESTAMPTZ
+            """)
+            await _mconn.execute("""
+                UPDATE api_keys ak
+                SET calls_count = sub.total,
+                    monthly_calls_count = sub.monthly,
+                    monthly_calls_reset_at = COALESCE(ak.monthly_calls_reset_at,
+                        date_trunc('month', NOW()) + INTERVAL '1 month')
+                FROM (
+                    SELECT api_key_id,
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE created_at >= date_trunc('month', NOW())) AS monthly
+                    FROM credit_transactions
+                    WHERE api_key_id IS NOT NULL
+                      AND type IN ('execution', 'cross_rail')
+                    GROUP BY api_key_id
+                ) sub
+                WHERE ak.id = sub.api_key_id
+                  AND ak.calls_count = 0
+            """)
     except Exception as e:
         logger.error(f"DB error: {e}")
         logger.warning(f"DB pool creation failed: {e} — /services will be unavailable")
@@ -2618,6 +2642,13 @@ async def execute_service(request: Request, db=Depends(get_db)):
                 "credits_refunded": total_credits,
             })
 
+        if _api_key_id:
+            await db.execute(
+                "UPDATE api_keys SET calls_count = calls_count + 1, monthly_calls_count = monthly_calls_count + 1, "
+                "monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, date_trunc('month', NOW()) + INTERVAL '1 month') "
+                "WHERE id = $1::uuid",
+                _api_key_id,
+            )
         return {
             "status": "ok",
             "service": service_slug,
@@ -2713,6 +2744,13 @@ async def execute_service(request: Request, db=Depends(get_db)):
             })
 
         asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), service_slug))
+        if _api_key_id:
+            await db.execute(
+                "UPDATE api_keys SET calls_count = calls_count + 1, monthly_calls_count = monthly_calls_count + 1, "
+                "monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, date_trunc('month', NOW()) + INTERVAL '1 month') "
+                "WHERE id = $1::uuid",
+                _api_key_id,
+            )
         return {
             "status": "ok",
             "service": service_slug,
@@ -2846,6 +2884,13 @@ async def execute_service(request: Request, db=Depends(get_db)):
     asyncio.create_task(
         _maybe_dispatch_credits_low(app.state.pool, str(user_id), api_key_header, balance_after)
     )
+    if _api_key_id:
+        await db.execute(
+            "UPDATE api_keys SET calls_count = calls_count + 1, monthly_calls_count = monthly_calls_count + 1, "
+            "monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, date_trunc('month', NOW()) + INTERVAL '1 month') "
+            "WHERE id = $1::uuid",
+            _api_key_id,
+        )
 
     return {
         "status": "ok",
@@ -3054,7 +3099,19 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
         _maybe_dispatch_credits_low(app.state.pool, str(user_id), api_key_header, balance_after)
     )
 
-    # Step 5 — Return
+    # Step 5 — Increment call counter and return
+    calls_remaining = balance_after // CREDITS_PER_CALL  # fallback if no key row
+    if _api_key_id:
+        count_row = await db.fetchrow(
+            "UPDATE api_keys SET calls_count = calls_count + 1, monthly_calls_count = monthly_calls_count + 1, "
+            "monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, date_trunc('month', NOW()) + INTERVAL '1 month') "
+            "WHERE id = $1::uuid RETURNING monthly_calls_count, tier",
+            _api_key_id,
+        )
+        if count_row:
+            _plan = PLANS.get(count_row["tier"], PLANS["free"])
+            calls_remaining = max(0, _plan["calls_included"] - count_row["monthly_calls_count"])
+
     wri = selected_svc.get("wri_score")
     return {
         "result": result,
@@ -3070,7 +3127,7 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
             "results_considered": len(top5),
             "selected_rank": selected_rank,
         },
-        "calls_remaining": balance_after // CREDITS_PER_CALL,
+        "calls_remaining": calls_remaining,
         "execution_ms": execution_ms,
     }
 
@@ -4586,8 +4643,17 @@ async def _monthly_topup_reset():
                     WHERE monthly_topup_reset_at IS NOT NULL
                       AND monthly_topup_reset_at <= NOW()
                 """)
+                calls_reset = await db.execute("""
+                    UPDATE api_keys
+                    SET monthly_calls_count = 0,
+                        monthly_calls_reset_at = date_trunc('month', NOW()) + INTERVAL '1 month'
+                    WHERE monthly_calls_reset_at IS NOT NULL
+                      AND monthly_calls_reset_at <= NOW()
+                """)
             if updated and updated != "UPDATE 0":
                 logger.info("Monthly topup spend reset: %s", updated)
+            if calls_reset and calls_reset != "UPDATE 0":
+                logger.info("Monthly calls count reset: %s", calls_reset)
         except Exception as _e:
             logger.error("_monthly_topup_reset error: %s", _e)
 
@@ -7850,7 +7916,8 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     """Per-user analytics — Pro and Growth tiers only."""
     raw_key, key_hash = _account_auth_key(request)
     key_record = await db.fetchrow(
-        "SELECT k.user_id FROM api_keys k WHERE k.key_hash = $1 AND k.active = true", key_hash
+        "SELECT k.user_id, k.id, k.monthly_calls_count, k.monthly_calls_reset_at, k.tier "
+        "FROM api_keys k WHERE k.key_hash = $1 AND k.active = true", key_hash
     )
     if not key_record:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -7953,13 +8020,8 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     plan_tier = credits["package_tier"] if credits else "free"
     plan_def = PLANS.get(plan_tier, PLANS["free"])
     calls_included = plan_def["calls_included"]
-    monthly_credits = plan_def["monthly_credits"]
-    calls_remaining = min(credits_balance // CREDITS_PER_CALL, calls_included)
-    # calls_used = credits drawn from the monthly allocation (balance delta).
-    # This matches what users see on their dashboard and resets naturally when
-    # the monthly credit grant restores the balance to monthly_credits.
-    credits_consumed_from_allocation = max(0, monthly_credits - credits_balance)
-    calls_used_month = credits_consumed_from_allocation // CREDITS_PER_CALL
+    calls_used_month = key_record["monthly_calls_count"] or 0
+    calls_remaining = max(0, calls_included - calls_used_month)
 
     return {
         "searches": {
@@ -7977,8 +8039,11 @@ async def account_analytics(request: Request, db=Depends(get_db)):
         "credits": {
             "consumed_this_month": consumed_month,
             "remaining": credits_balance,
-            "total": monthly_credits,
-            "reset_date": reset.isoformat(),
+            "total": plan_def["monthly_credits"],
+            "resets_at": (
+                key_record["monthly_calls_reset_at"].date().isoformat()
+                if key_record["monthly_calls_reset_at"] else reset.isoformat()
+            ),
             "calls_used": calls_used_month,
             "calls_remaining": calls_remaining,
             "calls_included": calls_included,
