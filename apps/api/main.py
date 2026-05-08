@@ -497,54 +497,6 @@ async def add_request_id(request: Request, call_next):
     return response
 
 
-_SCRUB_KEYS = frozenset({
-    "credits_per_call", "fee_pct", "fee_type", "fee_bps",
-    "markup_pct", "managed_30pct", "byok_10pct",
-    "service_receives_usd", "wayf_burn_allocation_usd",
-    "wayforth_revenue", "wayf_bonus_pct",
-})
-
-
-def _deep_scrub(obj):
-    if isinstance(obj, dict):
-        return {k: _deep_scrub(v) for k, v in obj.items() if k not in _SCRUB_KEYS}
-    if isinstance(obj, list):
-        return [_deep_scrub(item) for item in obj]
-    return obj
-
-
-@app.middleware("http")
-async def scrub_response(request: Request, call_next):
-    import json as _json
-    from fastapi.responses import Response
-    response = await call_next(request)
-    ct = response.headers.get("content-type", "")
-    if "application/json" not in ct:
-        return response
-    body = b""
-    async for chunk in response.body_iterator:
-        body += chunk
-    # Drop content-length so it gets recalculated for the rewritten body
-    safe_headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
-    try:
-        data = _json.loads(body)
-        scrubbed = _deep_scrub(data)
-        new_body = _json.dumps(scrubbed).encode()
-        return Response(
-            content=new_body,
-            status_code=response.status_code,
-            headers=safe_headers,
-            media_type="application/json",
-        )
-    except Exception:
-        return Response(
-            content=body,
-            status_code=response.status_code,
-            headers=safe_headers,
-            media_type=ct,
-        )
-
-
 # Register _AuthError exception handler
 app.add_exception_handler(_AuthError, _auth_error_handler)
 

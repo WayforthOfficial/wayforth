@@ -195,7 +195,7 @@ async def compare_services(
             "wri_score": wri,
             "total_signals": row["total_signals"],
             "payment_rate": 100.0 if ms in SERVICE_CONFIGS else None,
-            "credits_per_call": credits,
+            "_credits": credits,  # internal only — popped before response
             "cost_per_call_usd": cost_usd,
             "x402_price_usd": float(x402_price_str) if x402_price_str else None,
             "x402_supported": bool(row["x402_supported"]),
@@ -211,7 +211,7 @@ async def compare_services(
 
     # Assign rank and verdict
     best_wri_val = max((s["wri_score"] or 0) for s in services_out)
-    min_credits = min((s["credits_per_call"] or 9999) for s in services_out)
+    min_credits = min((s["_credits"] or 9999) for s in services_out)
     max_signals = max((s["total_signals"] or 0) for s in services_out)
     min_ms = min((s["avg_response_ms"] or 9999) for s in services_out)
 
@@ -221,7 +221,7 @@ async def compare_services(
             svc["verdict"] = "best_overall"
         elif (svc["wri_score"] or 0) > 0 and (svc["wri_score"] or 0) == best_wri_val and i > 0:
             svc["verdict"] = "best_wri"
-        elif svc["credits_per_call"] == min_credits and min_credits < 9999:
+        elif svc["_credits"] == min_credits and min_credits < 9999:
             svc["verdict"] = "best_value"
         elif svc["avg_response_ms"] and svc["avg_response_ms"] == min_ms and min_ms < 9999:
             svc["verdict"] = "fastest"
@@ -255,11 +255,15 @@ async def compare_services(
 
     comparison_matrix = {
         "fastest": fastest_svc["slug"] if fastest_svc["avg_response_ms"] else None,
-        "cheapest": cheapest_svc["slug"] if (cheapest_svc["credits_per_call"] or 9999) < 9999 else None,
+        "cheapest": cheapest_svc["slug"] if (cheapest_svc["_credits"] or 9999) < 9999 else None,
         "most_signals": signals_svc["slug"] if signals_svc["total_signals"] else None,
         "best_wri": wri_svc["slug"] if wri_svc["wri_score"] else None,
         "x402_native": x402_svcs[0]["slug"] if x402_svcs else None,
     }
+
+    # Strip internal computation keys before serialization
+    for svc in services_out:
+        svc.pop("_credits", None)
 
     from datetime import datetime, timezone
     result: dict = {
