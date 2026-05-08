@@ -15,7 +15,7 @@ import httpx
 # ── Connection config ─────────────────────────────────────────────────────────
 
 BASE_URL  = "https://gateway.wayforth.io"
-API_KEY   = "wf_live_ad904d50gkXeXW2AJgE1Z3H3AmuZ8OWinKYB6EYisQM"
+API_KEY   = "wf_live_d_p27ycBFzuM3mZf8mTpjTWasOMndDesT94WqZ7xLfU"
 ADMIN_KEY = "qTpI8_3XdY3TaLdN_lSAULlq9GL1fnnZHO-DzMsJUgY"
 
 # ── Fields that must NEVER appear in any API response ─────────────────────────
