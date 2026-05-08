@@ -3151,17 +3151,31 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     )
 
     # Step 5 — Increment call counter and return
-    calls_remaining = balance_after // CREDITS_PER_CALL  # fallback if no key row
+    # Use a fresh pool connection — the `db` dependency connection may be in a
+    # degraded state after check_and_deduct_credits' transaction + the seconds-long
+    # external API call, causing fetchrow to return None silently.
+    calls_remaining = balance_after // CREDITS_PER_CALL  # credit-math fallback
     if _api_key_id:
-        count_row = await db.fetchrow(
-            "UPDATE api_keys SET calls_count = calls_count + 1, monthly_calls_count = monthly_calls_count + 1, "
-            "monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, date_trunc('month', NOW()) + INTERVAL '1 month') "
-            "WHERE id = $1::uuid RETURNING monthly_calls_count, tier",
-            _api_key_id,
-        )
-        if count_row:
-            _plan = PLANS.get(count_row["tier"], PLANS["free"])
-            calls_remaining = max(0, _plan["calls_included"] - count_row["monthly_calls_count"])
+        try:
+            async with app.state.pool.acquire() as _cnt_conn:
+                await _cnt_conn.execute(
+                    "UPDATE api_keys "
+                    "SET calls_count = calls_count + 1, "
+                    "    monthly_calls_count = monthly_calls_count + 1, "
+                    "    monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, "
+                    "        date_trunc('month', NOW()) + INTERVAL '1 month') "
+                    "WHERE id = $1::uuid",
+                    _api_key_id,
+                )
+                count_row = await _cnt_conn.fetchrow(
+                    "SELECT monthly_calls_count, tier FROM api_keys WHERE id = $1::uuid",
+                    _api_key_id,
+                )
+            if count_row:
+                _plan = PLANS.get(count_row["tier"], PLANS["free"])
+                calls_remaining = max(0, _plan["calls_included"] - count_row["monthly_calls_count"])
+        except Exception as _cnt_err:
+            logger.warning("calls_count update failed for key %s: %s", _api_key_id, _cnt_err)
 
     wri = selected_svc.get("wri_score")
     return {
