@@ -1102,29 +1102,33 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     tier = _credits_to_tier(credits["lifetime_credits"] or 0 if credits else 0, credits["package_tier"] if credits else None)
     require_tier(tier, "analytics")
 
-    # searches (via credit_transactions where api_endpoint='/search') — this month only
-    searches_total = await db.fetchval(
-        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND api_endpoint='/search' AND created_at >= date_trunc('month', NOW())", user_id) or 0
+    # ── Searches — source of truth: search_analytics table ──────────────────
+    searches_month = await db.fetchval(
+        "SELECT COUNT(*) FROM search_analytics WHERE user_id=$1 AND created_at >= date_trunc('month', NOW())", user_id) or 0
+    searches_today = await db.fetchval(
+        "SELECT COUNT(*) FROM search_analytics WHERE user_id=$1 AND created_at >= date_trunc('day', NOW())", user_id) or 0
     searches_7d = await db.fetchval(
-        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND api_endpoint='/search' AND created_at > NOW()-INTERVAL '7 days'", user_id) or 0
-    searches_24h = await db.fetchval(
-        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND api_endpoint='/search' AND created_at > NOW()-INTERVAL '24 hours'", user_id) or 0
+        "SELECT COUNT(*) FROM search_analytics WHERE user_id=$1 AND created_at >= NOW() - INTERVAL '7 days'", user_id) or 0
     top_query_rows = await db.fetch(
-        "SELECT query, COUNT(*) as count FROM search_analytics WHERE user_id=$1 GROUP BY query ORDER BY count DESC LIMIT 5", user_id)
+        "SELECT query, COUNT(*) as count FROM search_analytics "
+        "WHERE user_id=$1 AND created_at >= date_trunc('month', NOW()) AND query IS NOT NULL "
+        "GROUP BY query ORDER BY count DESC LIMIT 5", user_id)
 
-    # executions
-    exec_total = await db.fetchval(
-        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND type='execution'", user_id) or 0
-    exec_7d = await db.fetchval(
-        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND type='execution' AND created_at > NOW()-INTERVAL '7 days'", user_id) or 0
-    exec_24h = await db.fetchval(
-        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND type='execution' AND created_at > NOW()-INTERVAL '24 hours'", user_id) or 0
-    top_svc_rows = await db.fetch(
-        "SELECT service_id, COUNT(*) as count FROM credit_transactions WHERE user_id=$1 AND type='execution' AND service_id IS NOT NULL GROUP BY service_id ORDER BY count DESC LIMIT 5", user_id)
+    # ── Executions — source of truth: credit_transactions type='execution' ──
+    exec_month = await db.fetchval(
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id=$1 AND type='execution' "
+        "AND created_at >= date_trunc('month', NOW())", user_id) or 0
+    endpoint_rows = await db.fetch(
+        "SELECT api_endpoint, COUNT(*) as count FROM credit_transactions "
+        "WHERE user_id=$1 AND type='execution' AND created_at >= date_trunc('month', NOW()) "
+        "AND api_endpoint IS NOT NULL GROUP BY api_endpoint ORDER BY count DESC", user_id)
+    by_endpoint = {r["api_endpoint"].lstrip("/"): r["count"] for r in endpoint_rows}
+    svc_rows = await db.fetch(
+        "SELECT service_id, COUNT(*) as count FROM credit_transactions "
+        "WHERE user_id=$1 AND type='execution' AND created_at >= date_trunc('month', NOW()) "
+        "AND service_id IS NOT NULL GROUP BY service_id ORDER BY count DESC LIMIT 10", user_id)
 
-    # credits this month
-    consumed_month = await db.fetchval(
-        "SELECT COALESCE(SUM(ABS(amount)),0) FROM credit_transactions WHERE user_id=$1 AND type IN ('usage','execution') AND created_at >= date_trunc('month', NOW())", user_id) or 0
+    # ── Calls — source of truth: monthly_calls_count on api_keys ─────────────
     today = _datetime.date.today()
     if today.month == 12:
         reset = _datetime.date(today.year + 1, 1, 1)
@@ -1186,38 +1190,33 @@ async def account_analytics(request: Request, db=Depends(get_db)):
             "last_called": r["last_called"].isoformat() if r["last_called"] else None,
         })
 
-    credits_balance = credits["credits_balance"] if credits else 0
     plan_tier = credits["package_tier"] if credits else "free"
     plan_def = PLANS.get(plan_tier, PLANS["free"])
     calls_included = plan_def["calls_included"]
-    calls_used_month = key_record["monthly_calls_count"] or 0
-    calls_remaining = max(0, calls_included - calls_used_month)
+    calls_used = key_record["monthly_calls_count"] or 0
+    calls_remaining = max(0, calls_included - calls_used)
 
     return {
         "searches": {
-            "total": searches_total,
+            "this_month": searches_month,
+            "today": searches_today,
             "last_7_days": searches_7d,
-            "last_24h": searches_24h,
-            "top_queries": [{"query": r["query"], "count": r["count"]} for r in top_query_rows],
         },
         "executions": {
-            "total": exec_total,
-            "last_7_days": exec_7d,
-            "last_24h": exec_24h,
-            "top_services": [{"service": r["service_id"], "count": r["count"]} for r in top_svc_rows],
+            "this_month": exec_month,
+            "by_endpoint": by_endpoint,
+            "by_service": [{"service": r["service_id"], "count": r["count"]} for r in svc_rows],
         },
-        "credits": {
-            "consumed_this_month": consumed_month,
-            "remaining": credits_balance,
-            "total": plan_def["monthly_credits"],
+        "calls": {
+            "used": calls_used,
+            "included": calls_included,
+            "remaining": calls_remaining,
             "resets_at": (
                 key_record["monthly_calls_reset_at"].date().isoformat()
                 if key_record["monthly_calls_reset_at"] else reset.isoformat()
             ),
-            "calls_used": calls_used_month,
-            "calls_remaining": calls_remaining,
-            "calls_included": calls_included,
         },
+        "top_queries": [{"query": r["query"], "count": r["count"]} for r in top_query_rows],
         "wri_scores": wri_score_entries,
     }
 
