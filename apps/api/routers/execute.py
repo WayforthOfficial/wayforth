@@ -947,20 +947,19 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     from main import app
     from ranker_client import rank_services
     try:
-        async with app.state.pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT id, name, slug, description, endpoint_url, category,
-                       pricing_usdc, coverage_tier, source, payment_protocol,
-                       last_tested_at, consecutive_failures, x402_supported,
-                       wri_score, wri_version
-                FROM services
-                WHERE {where}
-                ORDER BY coverage_tier DESC
-                LIMIT 200
-                """,
-                *params_q,
-            )
+        rows = await db.fetch(
+            f"""
+            SELECT id, name, slug, description, endpoint_url, category,
+                   pricing_usdc, coverage_tier, source, payment_protocol,
+                   last_tested_at, consecutive_failures, x402_supported,
+                   wri_score, wri_version
+            FROM services
+            WHERE {where}
+            ORDER BY coverage_tier DESC
+            LIMIT 200
+            """,
+            *params_q,
+        )
     except Exception as _db_err:
         logger.error("run: db error: %s", _db_err)
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -1015,18 +1014,17 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     if not selected_slug and category_filter:
         try:
             managed_catalog_slugs = list(CATALOG_TO_MANAGED.keys())
-            async with app.state.pool.acquire() as _fb_conn:
-                fb_rows = await _fb_conn.fetch(
-                    """SELECT id, name, slug, description, endpoint_url, category,
-                              pricing_usdc, coverage_tier, source, payment_protocol,
-                              last_tested_at, consecutive_failures, x402_supported,
-                              wri_score, wri_version
-                       FROM services
-                       WHERE slug = ANY($1::text[])
-                         AND consecutive_failures < 3
-                       ORDER BY wri_score DESC NULLS LAST""",
-                    managed_catalog_slugs,
-                )
+            fb_rows = await db.fetch(
+                """SELECT id, name, slug, description, endpoint_url, category,
+                          pricing_usdc, coverage_tier, source, payment_protocol,
+                          last_tested_at, consecutive_failures, x402_supported,
+                          wri_score, wri_version
+                   FROM services
+                   WHERE slug = ANY($1::text[])
+                     AND consecutive_failures < 3
+                   ORDER BY wri_score DESC NULLS LAST""",
+                managed_catalog_slugs,
+            )
             logger.info("run fallback: found %d managed catalog services; slugs: %s",
                         len(fb_rows), [r["slug"] for r in fb_rows])
             for row in fb_rows:

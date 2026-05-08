@@ -123,19 +123,18 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
 
     fetch_n = (offset + limit) * 4
     try:
-        async with request.app.state.pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT id, name, slug, description, endpoint_url, category,
-                       pricing_usdc, coverage_tier, source, payment_protocol,
-                       last_tested_at, consecutive_failures, x402_supported
-                FROM services
-                WHERE {where}
-                ORDER BY coverage_tier DESC
-                LIMIT {fetch_n}
-                """,
-                *params,
-            )
+        rows = await db.fetch(
+            f"""
+            SELECT id, name, slug, description, endpoint_url, category,
+                   pricing_usdc, coverage_tier, source, payment_protocol,
+                   last_tested_at, consecutive_failures, x402_supported
+            FROM services
+            WHERE {where}
+            ORDER BY coverage_tier DESC
+            LIMIT {fetch_n}
+            """,
+            *params,
+        )
     except Exception as e:
         logger.error(f"DB error in /query: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -205,25 +204,24 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
     if body.with_similar and results_raw:
         top_id = str(results_raw[0].get("id", ""))
         try:
-            async with request.app.state.pool.acquire() as conn:
-                graph_rows = await conn.fetch(
-                    """
-                    SELECT
-                        CASE WHEN service_a_id = $1 THEN service_b_id ELSE service_a_id END AS related_id,
-                        co_search_count
-                    FROM service_graph
-                    WHERE service_a_id = $1 OR service_b_id = $1
-                    ORDER BY co_search_count DESC LIMIT 5
-                    """,
-                    top_id,
+            graph_rows = await db.fetch(
+                """
+                SELECT
+                    CASE WHEN service_a_id = $1 THEN service_b_id ELSE service_a_id END AS related_id,
+                    co_search_count
+                FROM service_graph
+                WHERE service_a_id = $1 OR service_b_id = $1
+                ORDER BY co_search_count DESC LIMIT 5
+                """,
+                top_id,
+            )
+            similar = []
+            for gr in graph_rows:
+                svc = await db.fetchrow(
+                    "SELECT name, category, coverage_tier FROM services WHERE id::text = $1",
+                    gr["related_id"],
                 )
-                similar = []
-                for gr in graph_rows:
-                    svc = await conn.fetchrow(
-                        "SELECT name, category, coverage_tier FROM services WHERE id::text = $1",
-                        gr["related_id"],
-                    )
-                    if svc:
+                if svc:
                         similar.append({
                             "service_id": gr["related_id"],
                             "name": svc["name"],
