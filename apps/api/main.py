@@ -3114,17 +3114,30 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     if _api_key_id:
         try:
             async with app.state.pool.acquire() as _cnt_conn:
-                await _cnt_conn.execute(
+                _upd = await _cnt_conn.fetchrow(
                     "UPDATE api_keys "
                     "SET calls_count = calls_count + 1, "
                     "    monthly_calls_count = monthly_calls_count + 1, "
                     "    monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, "
                     "        date_trunc('month', NOW()) + INTERVAL '1 month') "
-                    "WHERE id = $1::uuid",
+                    "WHERE id = $1::uuid "
+                    "RETURNING calls_count, monthly_calls_count, tier",
                     str(_api_key_id),
                 )
-                _calls_remaining = await compute_calls_remaining(_cnt_conn, str(_api_key_id))
-                logger.info("CALLS_INCREMENT_OK key=%s remaining=%s", _api_key_id, _calls_remaining)
+            if _upd:
+                _p = PLANS.get(_upd["tier"], PLANS["free"])
+                _calls_remaining = max(0, _p["calls_included"] - _upd["monthly_calls_count"])
+                logger.info(
+                    "CALLS_INCREMENT_OK key=%s calls=%s monthly=%s tier=%s remaining=%s",
+                    _api_key_id, _upd["calls_count"], _upd["monthly_calls_count"],
+                    _upd["tier"], _calls_remaining,
+                )
+            else:
+                logger.error(
+                    "CALLS_INCREMENT_NOMATCH key=%s — UPDATE matched 0 rows. "
+                    "UUID not found in api_keys.",
+                    _api_key_id,
+                )
         except Exception as _cnt_err:
             logger.error("CALLS_INCREMENT_FAIL key=%s err=%s", _api_key_id, _cnt_err)
 
