@@ -572,7 +572,7 @@ async def test_T060_byok_add(c):
 async def test_T061_byok_in_list(c):
     r = rec(await c.get("/call/keys", headers=_uh()))
     assert r.status_code == 200
-    keys = r.json().get("keys", r.json().get("services", []))
+    keys = r.json().get("service_keys", r.json().get("keys", r.json().get("services", [])))
     slugs = {k.get("service_slug", k.get("slug", "")) for k in keys}
     assert _SLUG_MAIN in slugs, \
         f"Added key '{_SLUG_MAIN}' not found in /call/keys: {slugs}"
@@ -590,7 +590,7 @@ async def test_T063_byok_delete(c):
 async def test_T064_byok_gone_after_delete(c):
     r = rec(await c.get("/call/keys", headers=_uh()))
     assert r.status_code == 200
-    keys = r.json().get("keys", r.json().get("services", []))
+    keys = r.json().get("service_keys", r.json().get("keys", r.json().get("services", [])))
     active_slugs = {
         k.get("service_slug", k.get("slug", ""))
         for k in keys
