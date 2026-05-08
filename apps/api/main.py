@@ -3019,6 +3019,9 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
             continue
         if not os.environ.get(SERVICE_CONFIGS[managed_slug]["key_var"], ""):
             continue
+        _, _missing = map_params(managed_slug, input_dict)
+        if _missing:
+            continue  # params not satisfied — try next service
         selected_slug = managed_slug
         selected_svc = svc
         selected_rank = i + 1
@@ -3053,6 +3056,9 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
                     continue
                 if not os.environ.get(SERVICE_CONFIGS[managed_slug]["key_var"], ""):
                     continue
+                _, _fb_missing = map_params(managed_slug, input_dict)
+                if _fb_missing:
+                    continue  # params not satisfied — try next service
                 selected_svc = dict(row)
                 selected_slug = managed_slug
                 selected_rank = 999
