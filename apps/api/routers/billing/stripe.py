@@ -475,12 +475,30 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
 
         # Store subscription_id on the api_key if this was a subscription checkout
         sub_id = session.get("subscription")
+        api_key_id_row = None
         if sub_id:
             await db.execute("""
                 UPDATE api_keys
                 SET stripe_subscription_id = $1, subscription_status = 'active'
                 WHERE user_id = $2::uuid
             """, sub_id, user_id)
+
+        # Award subscription points
+        from wayf_points import award_points, SUBSCRIPTION_POINTS
+        tier_for_points = package.split("_")[0] if package else "free"
+        pts = SUBSCRIPTION_POINTS.get(tier_for_points, 0)
+        if pts > 0:
+            api_key_id_row = await db.fetchval(
+                "SELECT id FROM api_keys WHERE user_id = $1::uuid ORDER BY created_at DESC LIMIT 1",
+                user_id,
+            )
+            await award_points(
+                db, user_id, str(api_key_id_row) if api_key_id_row else user_id,
+                tier_for_points, pts,
+                f"{tier_for_points.title()} plan — monthly payment",
+                "subscription",
+                {"package": package, "credits": credits},
+            )
 
         return {"status": "credited", "credits_added": credits, "new_balance": new_balance}
 
