@@ -44,6 +44,46 @@ logger = logging.getLogger("wayforth")
 router = APIRouter()
 
 
+async def _award_execution_points(pool, user_id: str, api_key_id: str, tier: str) -> None:
+    """Fire-and-forget: award WAYF points for a successful execution."""
+    from wayf_points import (
+        EXECUTIONS_PER_POINT, DAILY_BONUS_POINTS, award_points, check_milestones
+    )
+    try:
+        async with pool.acquire() as conn:
+            calls_count = await conn.fetchval(
+                "SELECT calls_count FROM api_keys WHERE id = $1::uuid", api_key_id
+            ) or 0
+
+            if calls_count > 0 and calls_count % EXECUTIONS_PER_POINT == 0:
+                await award_points(
+                    conn, user_id, api_key_id, tier, 1,
+                    f"Every {EXECUTIONS_PER_POINT} executions",
+                    "execution",
+                    {"total_calls": calls_count},
+                )
+
+            had_daily = await conn.fetchval(
+                """SELECT 1 FROM wayf_points_log
+                   WHERE user_id = $1::uuid
+                   AND source = 'daily_bonus'
+                   AND created_at >= date_trunc('day', NOW())
+                   LIMIT 1""",
+                user_id,
+            )
+            if not had_daily:
+                await award_points(
+                    conn, user_id, api_key_id, tier,
+                    DAILY_BONUS_POINTS,
+                    "First execution of the day",
+                    "daily_bonus",
+                )
+
+            await check_milestones(conn, user_id, api_key_id, tier, calls_count)
+    except Exception as _e:
+        logger.warning("_award_execution_points error: %s", _e)
+
+
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
 class PayRequest(BaseModel):
@@ -843,6 +883,12 @@ async def execute_service(request: Request, db=Depends(get_db)):
     if _api_key_id:
         await _increment_calls(app.state.pool, str(_api_key_id))
 
+    # Award WAYF points asynchronously (fire-and-forget)
+    if _api_key_id and user_id:
+        asyncio.create_task(_award_execution_points(
+            app.state.pool, str(user_id), str(_api_key_id), _tier
+        ))
+
     return {
         "status": "ok",
         "service": service_slug,
@@ -1064,6 +1110,12 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
         _inc = await _increment_calls(app.state.pool, str(_api_key_id))
         if _inc:
             _calls_remaining = _inc
+
+    # Award WAYF points asynchronously for /run
+    if _api_key_id and user_id:
+        asyncio.create_task(_award_execution_points(
+            app.state.pool, str(user_id), str(_api_key_id), _tier
+        ))
 
     adapter = ADAPTERS[selected_slug]
     result = None

@@ -335,6 +335,39 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS provider_sessions_token_idx ON provider_sessions(token)
             """)
             await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS wayf_points (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID REFERENCES users(id) ON DELETE CASCADE UNIQUE,
+                    api_key_id UUID REFERENCES api_keys(id),
+                    points_balance INTEGER NOT NULL DEFAULT 0,
+                    points_earned_total INTEGER NOT NULL DEFAULT 0,
+                    points_earned_this_month INTEGER NOT NULL DEFAULT 0,
+                    monthly_points_reset_at TIMESTAMPTZ,
+                    wallet_address TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS wayf_points_log (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID REFERENCES users(id),
+                    api_key_id UUID REFERENCES api_keys(id),
+                    points INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK (source IN ('subscription','execution','daily_bonus','milestone')),
+                    metadata JSONB DEFAULT '{}',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS wayf_points_user_idx ON wayf_points(user_id)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS wayf_points_log_user_created_idx
+                ON wayf_points_log(user_id, created_at)
+            """)
+            await _mconn.execute("""
                 ALTER TABLE api_keys
                     ADD COLUMN IF NOT EXISTS calls_count INTEGER NOT NULL DEFAULT 0,
                     ADD COLUMN IF NOT EXISTS monthly_calls_count INTEGER NOT NULL DEFAULT 0,
@@ -551,7 +584,7 @@ async def check_auth(request: Request) -> dict:
 # ── Include routers ───────────────────────────────────────────────────────────
 
 from routers import (
-    search, execute, billing, webhooks, provider, admin, x402, auth, agent
+    search, execute, billing, webhooks, provider, admin, x402, auth, agent, wayf
 )
 
 app.include_router(search.router)
@@ -563,6 +596,7 @@ app.include_router(admin.router)
 app.include_router(x402.router)
 app.include_router(auth.router)
 app.include_router(agent.router)
+app.include_router(wayf.router)
 
 # ── Static files ──────────────────────────────────────────────────────────────
 

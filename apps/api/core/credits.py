@@ -345,6 +345,13 @@ async def _monthly_topup_reset():
                     WHERE monthly_calls_reset_at IS NOT NULL
                       AND monthly_calls_reset_at <= NOW()
                 """)
+                wayf_reset = await db.execute("""
+                    UPDATE wayf_points
+                    SET points_earned_this_month = 0,
+                        monthly_points_reset_at = date_trunc('month', NOW()) + INTERVAL '1 month'
+                    WHERE monthly_points_reset_at <= NOW()
+                    AND points_earned_this_month > 0
+                """)
             if updated and updated != "UPDATE 0":
                 logger.info("Monthly topup spend reset: %s", updated)
             if calls_reset and calls_reset != "UPDATE 0":
