@@ -161,6 +161,7 @@ from service_adapters import ADAPTERS, SERVICE_CONFIGS, SERVICE_ALTERNATIVES, SE
 from notifications import send_submission_confirmation, send_tier3_application_notification, send_welcome_email
 from ranker_client import rank_services
 from param_mapper import map_params, missing_param_hint, SERVICE_REQUIRED_PARAMS, CATALOG_TO_MANAGED, detect_category_hint, MANAGED_TO_CATALOG, INTENT_CATEGORY_MAP
+from tier_gates import require_tier, check_rate_limit, TIER_FEATURES, FREE_TIER_MONTHLY_SEARCH_LIMIT
 
 load_dotenv()
 
@@ -696,7 +697,8 @@ async def lifespan(app: FastAPI):
                 ALTER TABLE api_keys
                     ADD COLUMN IF NOT EXISTS calls_count INTEGER NOT NULL DEFAULT 0,
                     ADD COLUMN IF NOT EXISTS monthly_calls_count INTEGER NOT NULL DEFAULT 0,
-                    ADD COLUMN IF NOT EXISTS monthly_calls_reset_at TIMESTAMPTZ
+                    ADD COLUMN IF NOT EXISTS monthly_calls_reset_at TIMESTAMPTZ,
+                    ADD COLUMN IF NOT EXISTS monthly_searches INTEGER NOT NULL DEFAULT 0
             """)
             await _mconn.execute("""
                 UPDATE services
@@ -1180,6 +1182,21 @@ async def search_services(
 ):
     q = q.strip().lower()
     if auth.get("authenticated") and auth.get("user_id"):
+        if auth.get("tier") == "free" and auth.get("user_id"):
+            _month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            _searches_this_month = await db.fetchval(
+                "SELECT COUNT(*) FROM credit_transactions "
+                "WHERE user_id = $1::uuid AND api_endpoint = '/search' AND created_at >= $2",
+                auth["user_id"], _month_start,
+            ) or 0
+            if _searches_this_month >= FREE_TIER_MONTHLY_SEARCH_LIMIT:
+                raise HTTPException(status_code=429, detail={
+                    "error": "monthly_search_limit",
+                    "limit": FREE_TIER_MONTHLY_SEARCH_LIMIT,
+                    "searches_used": int(_searches_this_month),
+                    "message": f"Free tier: {FREE_TIER_MONTHLY_SEARCH_LIMIT} searches/month reached. Upgrade to continue.",
+                    "upgrade_url": "https://wayforth.io/pricing",
+                })
         success, balance = await check_and_deduct_credits(
             db, auth["user_id"], CREDIT_COSTS["search"], "/search"
         )
@@ -1546,6 +1563,7 @@ class WayforthQLQuery(BaseModel):
 @app.post("/query")
 async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depends(check_auth), db=Depends(get_db)):
     """WayforthQL — declarative query language for agent service discovery."""
+    require_tier(auth.get("tier") or "free", "wayforthql")
     if auth.get("authenticated") and auth.get("user_id"):
         success, balance = await check_and_deduct_credits(
             db, auth["user_id"], CREDIT_COSTS["query"], "/query"
@@ -2445,14 +2463,14 @@ async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
 # ── BYOK KEY STORAGE ─────────────────────────────────────────────────────────
 
 async def _resolve_user(db, api_key: str):
-    """Return (user_id, api_key_id) for a valid active API key, or raise 401."""
+    """Return (user_id, api_key_id, tier) for a valid active API key, or raise 401."""
     key_record = await db.fetchrow(
-        "SELECT id, user_id FROM api_keys WHERE key_hash=$1 AND active=true",
+        "SELECT id, user_id, tier FROM api_keys WHERE key_hash=$1 AND active=true",
         hashlib.sha256(api_key.encode()).hexdigest(),
     )
     if not key_record:
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
-    return key_record["user_id"], key_record["id"]
+    return key_record["user_id"], key_record["id"], key_record["tier"] or "free"
 
 
 _AGENT_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
@@ -2478,7 +2496,7 @@ async def list_service_keys(request: Request, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401)
-    user_id, _api_key_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
 
     rows = await db.fetch("""
         SELECT service_slug, service_name, key_preview,
@@ -2498,7 +2516,8 @@ async def add_service_key(request: Request, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401)
-    user_id, _api_key_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
+    require_tier(_tier, "byok")
 
     body = await request.json()
     service_slug = body.get("service_slug", "").strip().lower()
@@ -2558,7 +2577,7 @@ async def deactivate_service_key(request: Request, service_slug: str, db=Depends
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401)
-    user_id, _api_key_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
 
     result = await db.execute("""
         UPDATE user_service_keys
@@ -2581,7 +2600,8 @@ async def execute_service(request: Request, db=Depends(get_db)):
     if not api_key_header:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
 
-    user_id, _api_key_id = await _resolve_user(db, api_key_header)
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
+    check_rate_limit(str(_api_key_id), _tier)
 
     body = await request.json()
     service_slug = body.get("service_slug", "").strip().lower()
@@ -2701,6 +2721,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
             "result": settlement,
             "cross_rail": True,
             "calls_used": 1,
+            "priority": _tier in ("pro", "growth"),
         }
 
     # ── Universal BYOK path (any external API, not in managed catalog) ────────
@@ -2800,6 +2821,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
             "credits_deducted": 1,
             "credits_remaining": balance_after,
             "execution_ms": execution_ms,
+            "priority": _tier in ("pro", "growth"),
         }
 
     # ── Managed-catalog path ──────────────────────────────────────────────────
@@ -2935,6 +2957,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
         "credits_deducted": credit_cost,
         "execution_ms": execution_ms,
         "managed_services_available": len(SERVICE_CONFIGS),
+        "priority": _tier in ("pro", "growth"),
     }
 
 
@@ -2950,7 +2973,8 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     if not api_key_header:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
 
-    user_id, _api_key_id = await _resolve_user(db, api_key_header)
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
+    check_rate_limit(str(_api_key_id), _tier)
     body = await request.json()
 
     intent = (body.get("intent") or "").strip()
@@ -3222,6 +3246,7 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
         },
         "calls_remaining": _calls_remaining,
         "execution_ms": execution_ms,
+        "priority": _tier in ("pro", "growth"),
     }
 
 
@@ -3237,6 +3262,7 @@ async def compare_services(
     db=Depends(get_db),
 ):
     """Compare 2-5 services side by side: WRI, cost, signals, response time, recommendation."""
+    require_tier(auth.get("tier") or "free", "compare")
     slug_list = [s.strip().lower() for s in slugs.split(",") if s.strip()]
 
     if len(slug_list) < 2:
@@ -3326,12 +3352,13 @@ async def compare_services(
 
     # Step 3 — Build service objects and rank
     services_out = []
+    from x402_pricing import X402_PRICES_USDC
     for row in rows:
         ms = row["managed_slug"]
         cfg = SERVICE_CONFIGS.get(ms, {})
         credits = cfg.get("credits")
-        pricing_usdc = float(row["pricing_usdc"] or 0) if row["pricing_usdc"] else None
-        cost_usd = (credits * 0.001 / 6) if credits else (pricing_usdc if pricing_usdc else None)
+        cost_usd = cfg.get("real_cost_per_call")
+        x402_price_str = X402_PRICES_USDC.get(ms)
 
         total_probes = row["total_probes"] or 0
         success_probes = row["success_probes"] or 0
@@ -3351,8 +3378,8 @@ async def compare_services(
             "total_signals": row["total_signals"],
             "payment_rate": 100.0 if ms in SERVICE_CONFIGS else None,
             "credits_per_call": credits,
-            "cost_per_call_usd": round(cost_usd, 6) if cost_usd else None,
-            "x402_price_usd": round(float(pricing_usdc), 6) if pricing_usdc else None,
+            "cost_per_call_usd": cost_usd,
+            "x402_price_usd": float(x402_price_str) if x402_price_str else None,
             "x402_supported": bool(row["x402_supported"]),
             "managed": ms in SERVICE_CONFIGS,
             "zero_setup": ms in SERVICE_CONFIGS,
@@ -4365,7 +4392,7 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
 
     # 1. Look up API key with billing settings
     key_record = await db.fetchrow("""
-        SELECT id, user_id, billing_permission,
+        SELECT id, user_id, tier, billing_permission,
                monthly_topup_limit_usd, topup_amount_usd,
                monthly_topup_spent_usd, monthly_topup_reset_at
         FROM api_keys
@@ -4374,6 +4401,8 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
 
     if not key_record:
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+
+    require_tier(key_record["tier"] or "free", "topup_usdc")
 
     # 2. Permission check
     billing_perm = key_record["billing_permission"] or "none"
@@ -6446,7 +6475,8 @@ async def register_webhook(request: Request, body: WebhookRegistration, db=Depen
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
-    user_id, _api_key_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
+    require_tier(_tier, "webhooks")
 
     webhook_url = body.resolved_url
     if not webhook_url.startswith("https://"):
@@ -6487,7 +6517,8 @@ async def list_webhooks(request: Request, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
-    user_id, _api_key_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
+    require_tier(_tier, "webhooks")
 
     owner = await db.fetchrow(
         "SELECT owner_email FROM api_keys WHERE user_id=$1::uuid AND active=true LIMIT 1", user_id
@@ -6525,7 +6556,8 @@ async def create_wri_alert(request: Request, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    user_id, api_key_id = await _resolve_user(db, api_key)
+    user_id, api_key_id, _tier = await _resolve_user(db, api_key)
+    require_tier(_tier, "wri_alerts")
 
     body = await request.json()
     threshold = body.get("threshold_score")
@@ -6579,7 +6611,8 @@ async def list_wri_alerts(request: Request, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    user_id, api_key_id = await _resolve_user(db, api_key)
+    user_id, api_key_id, _tier = await _resolve_user(db, api_key)
+    require_tier(_tier, "wri_alerts")
 
     rows = await db.fetch("""
         SELECT id, category, threshold_score, min_signals, notify_url,
@@ -6615,7 +6648,8 @@ async def delete_wri_alert(request: Request, alert_id: str, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    user_id, api_key_id = await _resolve_user(db, api_key)
+    user_id, api_key_id, _tier = await _resolve_user(db, api_key)
+    require_tier(_tier, "wri_alerts")
 
     row = await db.fetchrow(
         "SELECT id FROM wri_alerts WHERE id = $1::uuid AND api_key_id = $2 AND active = true",
@@ -6639,7 +6673,7 @@ async def delete_webhook(request: Request, webhook_id: str, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    user_id, _api_key_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
 
     owner = await db.fetchrow(
         "SELECT owner_email FROM api_keys WHERE user_id = $1 AND active = true LIMIT 1", user_id
@@ -7571,6 +7605,12 @@ async def key_usage(request: Request, db=Depends(get_db)):
 @limiter.limit("10/minute")
 async def register_identity(request: Request, body: AgentIdentityRequest, db=Depends(get_db)):
     """Register an agent identity. Idempotent — safe to call multiple times."""
+    _ident_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not _ident_key:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
+    _, _, _ident_tier = await _resolve_user(db, _ident_key)
+    require_tier(_ident_tier, "agent_identity")
+
     existing = await db.fetchrow("""
         SELECT id, trust_score, total_searches, total_payments
         FROM agent_identities WHERE agent_id = $1
@@ -8020,8 +8060,7 @@ async def account_analytics(request: Request, db=Depends(get_db)):
         "SELECT credits_balance, lifetime_credits, package_tier FROM user_credits WHERE user_id = $1", user_id
     )
     tier = _credits_to_tier(credits["lifetime_credits"] or 0 if credits else 0, credits["package_tier"] if credits else None)
-    if not _TIER_FEATURES[tier]["analytics"]:
-        raise HTTPException(status_code=403, detail="Analytics requires Pro or Growth tier")
+    require_tier(tier, "analytics")
 
     # searches (via credit_transactions where api_endpoint='/search') — this month only
     searches_total = await db.fetchval(
@@ -8231,10 +8270,11 @@ async def account_agents(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     key_record = await db.fetchrow(
-        "SELECT user_id FROM api_keys WHERE key_hash=$1 AND active=true", key_hash
+        "SELECT user_id, tier FROM api_keys WHERE key_hash=$1 AND active=true", key_hash
     )
     if not key_record:
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+    require_tier(key_record["tier"] or "free", "account_agents")
     user_id = key_record["user_id"]
 
     now = datetime.now(timezone.utc)
@@ -8300,10 +8340,11 @@ async def account_agent_detail(request: Request, agent_id: str, db=Depends(get_d
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     key_record = await db.fetchrow(
-        "SELECT user_id FROM api_keys WHERE key_hash=$1 AND active=true", key_hash
+        "SELECT user_id, tier FROM api_keys WHERE key_hash=$1 AND active=true", key_hash
     )
     if not key_record:
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+    require_tier(key_record["tier"] or "free", "account_agents")
     user_id = key_record["user_id"]
 
     now = datetime.now(timezone.utc)
