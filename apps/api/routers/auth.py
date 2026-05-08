@@ -279,6 +279,41 @@ async def register_user(request: Request, db=Depends(get_db)):
     }
 
 
+@router.post("/auth/regenerate-key")
+@limiter.limit("3/minute")
+async def regenerate_api_key(request: Request, db=Depends(get_db)):
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not raw_key:
+        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+
+    old_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    row = await db.fetchrow("""
+        SELECT id, tier, user_id, owner_email, rate_limit_per_minute, monthly_quota
+        FROM api_keys WHERE key_hash = $1 AND active = TRUE
+    """, old_hash)
+
+    if not row:
+        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+
+    new_raw = "wf_live_" + secrets.token_urlsafe(32)
+    new_hash = hashlib.sha256(new_raw.encode()).hexdigest()
+    new_prefix = new_raw[:12]
+    try:
+        encrypted = get_fernet().encrypt(new_raw.encode()).decode()
+    except Exception:
+        encrypted = None
+
+    await db.execute("""
+        UPDATE api_keys
+        SET key_hash = $1, key_prefix = $2, encrypted_key = $3, last_used_at = NULL
+        WHERE id = $4
+    """, new_hash, new_prefix, encrypted, row["id"])
+
+    response = JSONResponse(content={"api_key": new_raw})
+    response.headers["Cache-Control"] = "no-store, no-cache"
+    return response
+
+
 @router.get("/auth/me")
 @limiter.limit("30/minute")
 async def auth_me(request: Request, db=Depends(get_db)):
