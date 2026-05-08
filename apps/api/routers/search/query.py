@@ -60,10 +60,14 @@ class Tier3Application(BaseModel):
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/query")
+@limiter.limit("15/minute")
 async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depends(check_auth), db=Depends(get_db)):
     """WayforthQL — declarative query language for agent service discovery."""
     from ranker_client import rank_services
     from core.auth import _ANON_DAILY_LIMIT
+
+    if len(body.query) > 500:
+        raise HTTPException(status_code=400, detail={"error": "query_too_long", "max_length": 500})
 
     require_tier(auth.get("tier") or "free", "wayforthql")
     if auth.get("authenticated") and auth.get("user_id"):
@@ -140,7 +144,11 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         return {"query": body.query, "results": [], "total": 0, "protocol": "WayforthQL/2.0"}
 
     candidates = [dict(r) for r in rows]
-    ranked = await rank_services(body.query, candidates)
+    try:
+        ranked = await rank_services(body.query, candidates)
+    except Exception as _re:
+        logger.error("query ranker error: %s", _re)
+        raise HTTPException(status_code=503, detail={"error": "ranker_unavailable"})
 
     # Secondary sort before slicing
     if body.sort_by == "price":
