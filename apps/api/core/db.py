@@ -7,5 +7,5 @@ _ASYNCPG_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 
 async def get_db(request: Request):
-    async with request.app.state.pool.acquire() as conn:
+    async with request.app.state.pool.acquire(timeout=8.0) as conn:
         yield conn
