@@ -904,7 +904,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
 # ── /run — one-call runtime ───────────────────────────────────────────────────
 
 @router.post("/run")
-@limiter.limit("30/minute")
+@limiter.limit("15/minute")
 async def run_endpoint(request: Request, db=Depends(get_db)):
     """Intent → search → rank → execute → result in one call."""
     import time as _time
@@ -966,7 +966,11 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     candidates = [dict(r) for r in rows]
-    ranked = await rank_services(intent, candidates)
+    try:
+        ranked = await rank_services(intent, candidates)
+    except Exception as _re:
+        logger.error("run ranker error: %s", _re)
+        raise HTTPException(status_code=503, detail={"error": "ranker_unavailable"})
     top5 = ranked[:5]
 
     # Enrich input_dict with any params extractable from the intent string itself

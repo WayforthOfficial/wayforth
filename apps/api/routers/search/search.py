@@ -106,6 +106,7 @@ async def _update_identity_search(pool, agent_id: str):
         "Falls back to keyword scoring when ANTHROPIC_API_KEY is not set."
     ),
 )
+@limiter.limit("15/minute")
 async def search_services(
     request: Request,
     q: str = Query(description="Natural language query, e.g. 'fast cheap inference for coding'"),
@@ -122,6 +123,8 @@ async def search_services(
     import html as _html
 
     q = _html.escape(q.strip().lower())
+    if len(q) > 500:
+        raise HTTPException(status_code=400, detail={"error": "query_too_long", "max_length": 500})
     if auth.get("authenticated") and auth.get("user_id"):
         if auth.get("tier") == "free" and auth.get("user_id"):
             from datetime import datetime, timezone
@@ -175,7 +178,11 @@ async def search_services(
         logger.error(f"DB error: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
     services = [dict(r) for r in rows]
-    ranked = await rank_services(q, services, db=db)
+    try:
+        ranked = await rank_services(q, services, db=db)
+    except Exception as _re:
+        logger.error("search ranker error: %s", _re)
+        raise HTTPException(status_code=503, detail={"error": "ranker_unavailable"})
     top = ranked[:limit]
 
     fallback_used = False
