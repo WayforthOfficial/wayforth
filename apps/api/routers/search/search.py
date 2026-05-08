@@ -109,7 +109,7 @@ async def _update_identity_search(pool, agent_id: str):
 @limiter.limit("15/minute")
 async def search_services(
     request: Request,
-    q: str = Query(description="Natural language query, e.g. 'fast cheap inference for coding'"),
+    q: str = Query(max_length=500, description="Natural language query, e.g. 'fast cheap inference for coding'"),
     category: str | None = Query(default=None, description="Filter by category: inference, data, translation, …"),
     tier: int | None = Query(default=None, description="Filter by exact coverage tier (0=free, 1=basic, 2=standard, 3=premium)"),
     limit: int = Query(default=5, ge=1, le=20, description="Number of results to return (1–20)"),
@@ -123,8 +123,6 @@ async def search_services(
     import html as _html
 
     q = _html.escape(q.strip().lower())
-    if len(q) > 500:
-        raise HTTPException(status_code=400, detail={"error": "query_too_long", "max_length": 500})
     if auth.get("authenticated") and auth.get("user_id"):
         if auth.get("tier") == "free" and auth.get("user_id"):
             from datetime import datetime, timezone
@@ -159,21 +157,20 @@ async def search_services(
             )
 
     try:
-        async with app.state.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id, name, slug, description, endpoint_url, category,
-                       coverage_tier, pricing_usdc, source, payment_protocol, created_at,
-                       last_tested_at, consecutive_failures, x402_supported,
-                       wri_score, wri_version
-                FROM services
-                WHERE ($1::text IS NULL OR category = $1)
-                  AND ($2::int IS NULL OR coverage_tier = $2)
-                ORDER BY created_at DESC
-                """,
-                category,
-                tier,
-            )
+        rows = await db.fetch(
+            """
+            SELECT id, name, slug, description, endpoint_url, category,
+                   coverage_tier, pricing_usdc, source, payment_protocol, created_at,
+                   last_tested_at, consecutive_failures, x402_supported,
+                   wri_score, wri_version
+            FROM services
+            WHERE ($1::text IS NULL OR category = $1)
+              AND ($2::int IS NULL OR coverage_tier = $2)
+            ORDER BY created_at DESC
+            """,
+            category,
+            tier,
+        )
     except Exception as e:
         logger.error(f"DB error: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -189,20 +186,19 @@ async def search_services(
     fallback_reason = None
     if not top:
         try:
-            async with app.state.pool.acquire() as conn:
-                fb_rows = await conn.fetch(
-                    """
-                    SELECT id, name, slug, description, endpoint_url, category,
-                           coverage_tier, pricing_usdc, source, payment_protocol,
-                           last_tested_at, consecutive_failures, x402_supported,
-                           wri_score, wri_version
-                    FROM services
-                    WHERE coverage_tier >= 0
-                      AND (name ILIKE $1 OR description ILIKE $1 OR category ILIKE $1)
-                    ORDER BY coverage_tier DESC LIMIT 50
-                    """,
-                    f"%{q}%",
-                )
+            fb_rows = await db.fetch(
+                """
+                SELECT id, name, slug, description, endpoint_url, category,
+                       coverage_tier, pricing_usdc, source, payment_protocol,
+                       last_tested_at, consecutive_failures, x402_supported,
+                       wri_score, wri_version
+                FROM services
+                WHERE coverage_tier >= 0
+                  AND (name ILIKE $1 OR description ILIKE $1 OR category ILIKE $1)
+                ORDER BY coverage_tier DESC LIMIT 50
+                """,
+                f"%{q}%",
+            )
             if fb_rows:
                 fb_ranked = await rank_services(q, [dict(r) for r in fb_rows], db=db)
                 top = fb_ranked[:limit]
@@ -222,28 +218,27 @@ async def search_services(
     popular_ids: dict = {}
     payment_ids: dict = {}
     try:
-        async with app.state.pool.acquire() as conn:
-            pop_rows = await conn.fetch("""
-                SELECT top_result_id, COUNT(*) as c
-                FROM search_analytics
-                WHERE created_at > NOW() - INTERVAL '7 days'
-                  AND top_result_id IS NOT NULL
-                GROUP BY top_result_id
-                ORDER BY c DESC LIMIT 50
-            """)
-            max_count = max((r["c"] for r in pop_rows), default=1)
-            popular_ids = {str(r["top_result_id"]): (r["c"] / max_count) * 5 for r in pop_rows}
+        pop_rows = await db.fetch("""
+            SELECT top_result_id, COUNT(*) as c
+            FROM search_analytics
+            WHERE created_at > NOW() - INTERVAL '7 days'
+              AND top_result_id IS NOT NULL
+            GROUP BY top_result_id
+            ORDER BY c DESC LIMIT 50
+        """)
+        max_count = max((r["c"] for r in pop_rows), default=1)
+        popular_ids = {str(r["top_result_id"]): (r["c"] / max_count) * 5 for r in pop_rows}
 
-            pay_rows = await conn.fetch("""
-                SELECT service_id, COUNT(*) as c
-                FROM search_outcomes
-                WHERE outcome_type = 'payment_initiated'
-                  AND created_at > NOW() - INTERVAL '7 days'
-                  AND service_id IS NOT NULL
-                GROUP BY service_id ORDER BY c DESC LIMIT 50
-            """)
-            max_pay = max((r["c"] for r in pay_rows), default=1)
-            payment_ids = {str(r["service_id"]): (r["c"] / max_pay) * 8 for r in pay_rows}
+        pay_rows = await db.fetch("""
+            SELECT service_id, COUNT(*) as c
+            FROM search_outcomes
+            WHERE outcome_type = 'payment_initiated'
+              AND created_at > NOW() - INTERVAL '7 days'
+              AND service_id IS NOT NULL
+            GROUP BY service_id ORDER BY c DESC LIMIT 50
+        """)
+        max_pay = max((r["c"] for r in pay_rows), default=1)
+        payment_ids = {str(r["service_id"]): (r["c"] / max_pay) * 8 for r in pay_rows}
     except Exception:
         pass
 
