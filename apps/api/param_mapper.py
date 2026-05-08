@@ -143,13 +143,15 @@ INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
         "search", "find", "look up", "google", "web search",
         "news", "browse", "latest", "articles",
     ],
-    "weather": [
+    "data": [
         "weather", "temperature", "forecast", "climate",
         "rain", "sunny", "humidity", "wind",
-    ],
-    "finance": [
         "stock", "price", "market", "financial", "crypto",
         "trading", "ticker", "shares", "equity",
+        "news", "latest", "headlines", "articles",
+    ],
+    "finance": [
+        "alphavantage", "alpha vantage", "stock quote",
     ],
     "image": [
         "image", "picture", "photo", "generate image",
