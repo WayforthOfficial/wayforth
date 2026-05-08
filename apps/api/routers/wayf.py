@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from core.auth import _resolve_user
 from core.db import get_db
 from core.rate_limit import limiter
-from wayf_points import AIRDROP_POOL_WAYF, DISCLAIMER, MONTHLY_POINTS_CAP, WAYF_CAP, get_current_rate
+from wayf_points import AIRDROP_POOL_WAYF, DISCLAIMER, MONTHLY_POINTS_CAP, get_current_rate
 
 router = APIRouter()
 
@@ -64,8 +64,6 @@ async def get_wayf_points(request: Request, db=Depends(get_db)):
     return {
         "points_balance": points_balance,
         "wayf_balance": round(wayf_balance, 6),
-        "wayf_cap": WAYF_CAP,
-        "wayf_remaining_to_cap": round(max(0.0, float(WAYF_CAP) - wayf_balance), 6),
         "current_rate": current_rate,
         "points_earned_this_month": points_earned_this_month,
         "monthly_cap": MONTHLY_POINTS_CAP,
