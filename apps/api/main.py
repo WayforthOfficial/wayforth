@@ -2973,12 +2973,14 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     ranked = await rank_services(intent, candidates)
     top5 = ranked[:5]
 
-    # Step 2 — Select: first managed service in top-5 with a configured key
+    # Step 2 — Select: first managed service in ranked results with a configured key.
+    # Scan all ranked results (not just top-5) so managed services ranked outside
+    # top-5 by the LLM still get found.
     selected_slug: str | None = None
     selected_svc: dict | None = None
     selected_rank: int | None = None
 
-    for i, svc in enumerate(top5):
+    for i, svc in enumerate(ranked):
         catalog_slug = svc.get("slug") or ""
         managed_slug = CATALOG_TO_MANAGED.get(catalog_slug)
         if not managed_slug:
@@ -2992,26 +2994,30 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
         selected_rank = i + 1
         break
 
-    # If category filter produced no managed service, retry without category constraint.
-    # The DB category (e.g. "data") may not match the detected intent category (e.g. "search").
+    # If category filter produced no managed service, retry without any category or
+    # tier constraint. The DB category (e.g. "data") may not match the detected intent
+    # category (e.g. "search"), and managed services may rank outside the LLM's top-5.
     if not selected_slug and category_filter:
         try:
             async with app.state.pool.acquire() as _fb_conn:
                 fb_rows = await _fb_conn.fetch(
-                    f"""
+                    """
                     SELECT id, name, slug, description, endpoint_url, category,
                            pricing_usdc, coverage_tier, source, payment_protocol,
                            last_tested_at, consecutive_failures, x402_supported,
                            wri_score, wri_version
                     FROM services
-                    WHERE coverage_tier >= {tier_min} AND consecutive_failures < 3
+                    WHERE consecutive_failures < 3
                     ORDER BY coverage_tier DESC
                     LIMIT 200
                     """,
                 )
             fb_candidates = [dict(r) for r in fb_rows]
             fb_ranked = await rank_services(intent, fb_candidates)
-            for i, svc in enumerate(fb_ranked[:5]):
+            logger.info("run fallback: ranked %d services for intent=%r; top slugs: %s",
+                        len(fb_ranked), intent,
+                        [s.get("slug") for s in fb_ranked[:10]])
+            for i, svc in enumerate(fb_ranked):
                 catalog_slug = svc.get("slug") or ""
                 managed_slug = CATALOG_TO_MANAGED.get(catalog_slug)
                 if not managed_slug:
@@ -3024,7 +3030,11 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
                 selected_svc = svc
                 selected_rank = i + 1
                 top5 = fb_ranked[:5]
+                logger.info("run fallback: selected managed slug=%s at rank=%d", managed_slug, selected_rank)
                 break
+            if not selected_slug:
+                logger.warning("run fallback: no managed service found; managed slugs checked: %s",
+                               list(CATALOG_TO_MANAGED.keys()))
         except Exception as _fb_err:
             logger.warning("run: category-free fallback failed: %s", _fb_err)
 
@@ -3091,6 +3101,29 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
             "top_up": "https://wayforth.io/billing",
         })
 
+    # Increment calls_count NOW — immediately after credit deduction while `db` is
+    # fresh. Doing it after the external API call (1-10s) leaves the connection
+    # idle long enough for asyncpg to silently return None from RETURNING.
+    _calls_remaining: int = balance_after // CREDITS_PER_CALL  # fallback
+    if _api_key_id:
+        try:
+            _cnt_row = await db.fetchrow(
+                "UPDATE api_keys "
+                "SET calls_count = calls_count + 1, "
+                "    monthly_calls_count = monthly_calls_count + 1, "
+                "    monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, "
+                "        date_trunc('month', NOW()) + INTERVAL '1 month') "
+                "WHERE id = $1::uuid RETURNING monthly_calls_count, tier",
+                _api_key_id,
+            )
+            if _cnt_row:
+                _p = PLANS.get(_cnt_row["tier"], PLANS["free"])
+                _calls_remaining = max(0, _p["calls_included"] - _cnt_row["monthly_calls_count"])
+                logger.info("calls_count incremented: monthly=%s tier=%s remaining=%s",
+                            _cnt_row["monthly_calls_count"], _cnt_row["tier"], _calls_remaining)
+        except Exception as _cnt_err:
+            logger.warning("calls_count update failed for key %s: %s", _api_key_id, _cnt_err)
+
     adapter = ADAPTERS[selected_slug]
     result = None
     error_msg = None
@@ -3150,33 +3183,6 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
         _maybe_dispatch_credits_low(app.state.pool, str(user_id), api_key_header, balance_after)
     )
 
-    # Step 5 — Increment call counter and return
-    # Use a fresh pool connection — the `db` dependency connection may be in a
-    # degraded state after check_and_deduct_credits' transaction + the seconds-long
-    # external API call, causing fetchrow to return None silently.
-    calls_remaining = balance_after // CREDITS_PER_CALL  # credit-math fallback
-    if _api_key_id:
-        try:
-            async with app.state.pool.acquire() as _cnt_conn:
-                await _cnt_conn.execute(
-                    "UPDATE api_keys "
-                    "SET calls_count = calls_count + 1, "
-                    "    monthly_calls_count = monthly_calls_count + 1, "
-                    "    monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, "
-                    "        date_trunc('month', NOW()) + INTERVAL '1 month') "
-                    "WHERE id = $1::uuid",
-                    _api_key_id,
-                )
-                count_row = await _cnt_conn.fetchrow(
-                    "SELECT monthly_calls_count, tier FROM api_keys WHERE id = $1::uuid",
-                    _api_key_id,
-                )
-            if count_row:
-                _plan = PLANS.get(count_row["tier"], PLANS["free"])
-                calls_remaining = max(0, _plan["calls_included"] - count_row["monthly_calls_count"])
-        except Exception as _cnt_err:
-            logger.warning("calls_count update failed for key %s: %s", _api_key_id, _cnt_err)
-
     wri = selected_svc.get("wri_score")
     return {
         "result": result,
@@ -3192,7 +3198,7 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
             "results_considered": len(top5),
             "selected_rank": selected_rank,
         },
-        "calls_remaining": calls_remaining,
+        "calls_remaining": _calls_remaining,
         "execution_ms": execution_ms,
     }
 
