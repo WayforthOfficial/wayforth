@@ -184,6 +184,21 @@ MANAGED_TO_CATALOG: dict[str, str] = {
 }
 
 
+# Maps detected intent category → DB service categories considered compatible.
+# Serper/Tavily/Brave live in "data" not "search" in the DB, so "search" intent
+# must allow both. Keep each list tight — too broad defeats the purpose.
+INTENT_CATEGORY_MAP: dict[str, list[str]] = {
+    "translation": ["translation"],
+    "inference":   ["inference", "llm", "ai"],
+    "search":      ["search", "data"],
+    "data":        ["data", "search"],
+    "finance":     ["finance", "data"],
+    "image":       ["image", "media"],
+    "audio":       ["audio", "media"],
+    "email":       ["email", "communication"],
+}
+
+
 def detect_category_hint(intent: str) -> str | None:
     """Return a category name if intent strongly signals one, else None."""
     intent_lower = intent.lower()
