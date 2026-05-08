@@ -6652,8 +6652,13 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     plan_tier = credits["package_tier"] if credits else "free"
     plan_def = PLANS.get(plan_tier, PLANS["free"])
     calls_included = plan_def["calls_included"]
+    monthly_credits = plan_def["monthly_credits"]
     calls_remaining = min(credits_balance // CREDITS_PER_CALL, calls_included)
-    calls_used_month = consumed_month // CREDITS_PER_CALL
+    # calls_used = credits drawn from the monthly allocation (balance delta).
+    # This matches what users see on their dashboard and resets naturally when
+    # the monthly credit grant restores the balance to monthly_credits.
+    credits_consumed_from_allocation = max(0, monthly_credits - credits_balance)
+    calls_used_month = credits_consumed_from_allocation // CREDITS_PER_CALL
 
     return {
         "searches": {
@@ -6671,7 +6676,7 @@ async def account_analytics(request: Request, db=Depends(get_db)):
         "credits": {
             "consumed_this_month": consumed_month,
             "remaining": credits_balance,
-            "total": calls_included * CREDITS_PER_CALL,
+            "total": monthly_credits,
             "reset_date": reset.isoformat(),
             "calls_used": calls_used_month,
             "calls_remaining": calls_remaining,
