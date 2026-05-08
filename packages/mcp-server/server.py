@@ -1005,6 +1005,75 @@ async def wayforth_compare(
     return "\n".join(lines)
 
 
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+async def wayforth_set_wri_alert(
+    notify_url: str = Field(
+        description="HTTPS webhook URL to POST to when a service crosses the WRI threshold."
+    ),
+    threshold_score: float = Field(
+        description="WRI score threshold (50.0 – 99.9). Alert fires when any matching service crosses this score upward."
+    ),
+    category: str = Field(
+        default=None,
+        description=(
+            "Optional: only alert for services in this category. "
+            "Options: translation, inference, search, image, audio, finance, weather, email, data. "
+            "Leave unset to watch all categories."
+        ),
+    ),
+    min_signals: int = Field(
+        default=5,
+        description=(
+            "Minimum signal count before alerting. Prevents noise from newly-added services "
+            "with very few data points. Default: 5."
+        ),
+    ),
+) -> str:
+    """
+    Register a webhook to be notified when any API service crosses a WayforthRank WRI score threshold.
+
+    The webhook fires once per service per 24 hours when the score crosses upward through the threshold.
+    Payload is HMAC-SHA256 signed with X-Wayforth-Signature for verification.
+
+    Use this to automatically discover new high-quality services as they accumulate payment signals.
+    """
+    api_key = os.getenv("WAYFORTH_API_KEY", "")
+    if not api_key:
+        return "Error: WAYFORTH_API_KEY not set."
+    body: dict = {
+        "threshold_score": threshold_score,
+        "notify_url": notify_url,
+        "min_signals": min_signals,
+    }
+    if category:
+        body["category"] = category
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                f"{GATEWAY_URL}/webhooks/wri-alerts",
+                json=body,
+                headers={"X-Wayforth-API-Key": api_key},
+            )
+        data = resp.json()
+        if resp.status_code != 200:
+            return f"Error {resp.status_code}: {data}"
+        lines = [
+            f"WRI alert registered.",
+            f"  ID:              {data.get('id')}",
+            f"  Threshold:       {data.get('threshold_score')}",
+            f"  Category:        {data.get('category') or 'all categories'}",
+            f"  Min signals:     {data.get('min_signals')}",
+            f"  Notify URL:      {data.get('notify_url')}",
+            f"  Created:         {data.get('created_at')}",
+            "",
+            "The webhook fires when any service crosses this WRI threshold upward (24hr cooldown).",
+            "Payload is HMAC-SHA256 signed. Verify with X-Wayforth-Signature header.",
+        ]
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 async def wayforth_quickstart() -> str:
     """
@@ -1070,6 +1139,7 @@ All tools (in recommended order):
   wayforth_identity    — agent trust score and reputation
   wayforth_remember    — save a service to agent memory
   wayforth_recall      — retrieve saved services
+  wayforth_set_wri_alert — register webhook for WRI threshold alerts
   wayforth_stats       — catalog statistics
   wayforth_status      — API health check
   wayforth_quickstart  — this guide
