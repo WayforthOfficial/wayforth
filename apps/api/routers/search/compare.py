@@ -248,7 +248,7 @@ async def compare_services(
 
     # Step 6 — Comparison matrix
     fastest_svc = min(services_out, key=lambda x: x["avg_response_ms"] or 9999)
-    cheapest_svc = min(services_out, key=lambda x: x["credits_per_call"] or 9999)
+    cheapest_svc = min(services_out, key=lambda x: x["_credits"] or 9999)
     signals_svc = max(services_out, key=lambda x: x["total_signals"] or 0)
     wri_svc = max(services_out, key=lambda x: x["wri_score"] or 0)
     x402_svcs = [s for s in services_out if s["x402_supported"]]
