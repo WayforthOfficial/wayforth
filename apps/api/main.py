@@ -2847,6 +2847,210 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     }
 
 
+# ── /compare — side-by-side service comparison ───────────────────────────────
+
+@app.get("/compare", tags=["Discovery"])
+@limiter.limit("20/minute")
+async def compare_services(
+    request: Request,
+    slugs: str = "",
+    query: str = "",
+    auth: dict = Depends(check_auth),
+    db=Depends(get_db),
+):
+    """Compare 2-5 services side by side: WRI, cost, signals, response time, recommendation."""
+    slug_list = [s.strip().lower() for s in slugs.split(",") if s.strip()]
+
+    if len(slug_list) < 2:
+        raise HTTPException(status_code=422, detail={
+            "error": "too_few_services",
+            "message": "Compare requires at least 2 services. Provide slugs=a,b",
+        })
+    if len(slug_list) > 5:
+        raise HTTPException(status_code=422, detail={
+            "error": "too_many_services",
+            "message": "Compare supports up to 5 services at a time.",
+        })
+
+    from datetime import datetime, timezone
+
+    # Build the catalog-slug lookup list: accept both managed and catalog slugs
+    catalog_lookup = []
+    managed_lookup = []
+    for s in slug_list:
+        cat = MANAGED_TO_CATALOG.get(s, s)  # if it's a managed slug, map it; else use as-is
+        catalog_lookup.append(cat)
+        managed_lookup.append(s)
+
+    slug_map_values = ", ".join(
+        f"('{cat}', '{mgd}')" for mgd, cat in MANAGED_TO_CATALOG.items()
+    )
+    all_managed = list(MANAGED_TO_CATALOG.keys())
+
+    rows = await db.fetch(
+        f"""
+        WITH slug_map(catalog_slug, managed_slug) AS (
+            VALUES {slug_map_values}
+        ),
+        sig AS (
+            SELECT clicked_slug, COUNT(*) AS total_signals
+            FROM search_analytics
+            WHERE clicked_slug = ANY($3::text[])
+            GROUP BY clicked_slug
+        ),
+        probe_agg AS (
+            SELECT sp.service_id::text,
+                   AVG(sp.response_time_ms)::float AS avg_ms,
+                   COUNT(*) AS total_probes,
+                   COUNT(*) FILTER (WHERE sp.reachable) AS success_probes
+            FROM service_probes sp
+            WHERE sp.probed_at > NOW() - INTERVAL '7 days'
+            GROUP BY sp.service_id
+        )
+        SELECT s.id::text, s.slug, s.name, s.category, s.wri_score,
+               s.x402_supported, s.consecutive_failures, s.last_tested_at,
+               s.pricing_usdc,
+               COALESCE(sm.managed_slug, s.slug) AS managed_slug,
+               COALESCE(sig.total_signals, 0) AS total_signals,
+               pa.avg_ms AS avg_response_ms,
+               pa.total_probes, pa.success_probes
+        FROM services s
+        LEFT JOIN slug_map sm ON sm.catalog_slug = s.slug
+        LEFT JOIN sig ON sig.clicked_slug = COALESCE(sm.managed_slug, s.slug)
+        LEFT JOIN probe_agg pa ON pa.service_id = s.id::text
+        WHERE s.slug = ANY($1::text[])
+           OR COALESCE(sm.managed_slug, s.slug) = ANY($2::text[])
+        """,
+        catalog_lookup, slug_list, all_managed,
+    )
+
+    found_managed = {r["managed_slug"] for r in rows}
+    not_found = [s for s in slug_list if s not in found_managed]
+
+    if not rows:
+        raise HTTPException(status_code=404, detail={
+            "error": "no_services_found",
+            "message": "None of the requested slugs were found in the catalog.",
+            "not_found": slug_list,
+        })
+
+    # Step 2 — Relevance scoring
+    relevance: dict[str, float] = {}
+    if query.strip() and rows:
+        try:
+            candidates = [dict(r) for r in rows]
+            ranked = await rank_services(query, candidates)
+            for i, svc in enumerate(ranked):
+                ms = svc.get("managed_slug") or _CATALOG_SLUG_TO_MANAGED.get(svc.get("slug", ""), svc.get("slug", ""))
+                relevance[ms] = float(svc.get("score", max(0, 80 - i * 10)))
+        except Exception:
+            pass
+
+    # Step 3 — Build service objects and rank
+    services_out = []
+    for row in rows:
+        ms = row["managed_slug"]
+        cfg = SERVICE_CONFIGS.get(ms, {})
+        credits = cfg.get("credits")
+        pricing_usdc = float(row["pricing_usdc"] or 0) if row["pricing_usdc"] else None
+        cost_usd = (credits * 0.001 / 6) if credits else (pricing_usdc if pricing_usdc else None)
+
+        total_probes = row["total_probes"] or 0
+        success_probes = row["success_probes"] or 0
+        if total_probes > 0:
+            uptime_pct = round(success_probes / total_probes * 100, 1)
+        else:
+            uptime_pct = 99.9 if (row["consecutive_failures"] or 0) == 0 else None
+
+        wri = row["wri_score"]
+        rel = relevance.get(ms, wri or 0.0)
+
+        services_out.append({
+            "slug": ms,
+            "name": SERVICE_DISPLAY_NAMES.get(ms, row["name"]),
+            "category": row["category"],
+            "wri_score": wri,
+            "total_signals": row["total_signals"],
+            "payment_rate": 100.0 if ms in SERVICE_CONFIGS else None,
+            "credits_per_call": credits,
+            "cost_per_call_usd": round(cost_usd, 6) if cost_usd else None,
+            "x402_price_usd": round(float(pricing_usdc), 6) if pricing_usdc else None,
+            "x402_supported": bool(row["x402_supported"]),
+            "managed": ms in SERVICE_CONFIGS,
+            "zero_setup": ms in SERVICE_CONFIGS,
+            "avg_response_ms": round(row["avg_response_ms"]) if row["avg_response_ms"] else None,
+            "uptime_7d_pct": uptime_pct,
+            "relevance_score": round(rel, 1),
+            "_sort_key": (rel, wri or 0.0),
+        })
+
+    services_out.sort(key=lambda x: x.pop("_sort_key"), reverse=True)
+
+    # Assign rank and verdict
+    best_wri_val = max((s["wri_score"] or 0) for s in services_out)
+    min_credits = min((s["credits_per_call"] or 9999) for s in services_out)
+    max_signals = max((s["total_signals"] or 0) for s in services_out)
+    min_ms = min((s["avg_response_ms"] or 9999) for s in services_out)
+
+    for i, svc in enumerate(services_out):
+        svc["rank"] = i + 1
+        if i == 0:
+            svc["verdict"] = "best_overall"
+        elif (svc["wri_score"] or 0) > 0 and (svc["wri_score"] or 0) == best_wri_val and i > 0:
+            svc["verdict"] = "best_wri"
+        elif svc["credits_per_call"] == min_credits and min_credits < 9999:
+            svc["verdict"] = "best_value"
+        elif svc["avg_response_ms"] and svc["avg_response_ms"] == min_ms and min_ms < 9999:
+            svc["verdict"] = "fastest"
+        elif svc["total_signals"] == max_signals and max_signals > 0:
+            svc["verdict"] = "most_proven"
+        else:
+            svc["verdict"] = None
+
+    # Step 5 — Recommendation
+    top = services_out[0]
+    reason_parts = [f"{top['name']} leads with WRI {top['wri_score']}"]
+    if top["total_signals"]:
+        reason_parts.append(f"{top['total_signals']} search signals")
+    if top["avg_response_ms"]:
+        reason_parts.append(f"{top['avg_response_ms']}ms avg response")
+    if top["payment_rate"] == 100.0:
+        reason_parts.append("100% payment conversion")
+    if top["zero_setup"]:
+        reason_parts.append("zero setup")
+    recommendation = {
+        "slug": top["slug"],
+        "reason": ". ".join(reason_parts) + ".",
+    }
+
+    # Step 6 — Comparison matrix
+    fastest_svc = min(services_out, key=lambda x: x["avg_response_ms"] or 9999)
+    cheapest_svc = min(services_out, key=lambda x: x["credits_per_call"] or 9999)
+    signals_svc = max(services_out, key=lambda x: x["total_signals"] or 0)
+    wri_svc = max(services_out, key=lambda x: x["wri_score"] or 0)
+    x402_svcs = [s for s in services_out if s["x402_supported"]]
+
+    comparison_matrix = {
+        "fastest": fastest_svc["slug"] if fastest_svc["avg_response_ms"] else None,
+        "cheapest": cheapest_svc["slug"] if (cheapest_svc["credits_per_call"] or 9999) < 9999 else None,
+        "most_signals": signals_svc["slug"] if signals_svc["total_signals"] else None,
+        "best_wri": wri_svc["slug"] if wri_svc["wri_score"] else None,
+        "x402_native": x402_svcs[0]["slug"] if x402_svcs else None,
+    }
+
+    result: dict = {
+        "query": query or None,
+        "compared_at": datetime.now(timezone.utc).isoformat(),
+        "services": services_out,
+        "recommendation": recommendation,
+        "comparison_matrix": comparison_matrix,
+    }
+    if not_found:
+        result["not_found"] = not_found
+
+    return result
+
+
 # ── /status/services — public service health ─────────────────────────────────
 
 _CATALOG_SLUGS = list(MANAGED_TO_CATALOG.values())
