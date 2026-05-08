@@ -32,7 +32,6 @@ MILESTONES: dict[str, int] = {
 
 MONTHLY_POINTS_CAP = 2000
 AIRDROP_POOL_WAYF = 50_000_000
-WAYF_CAP = 5000  # hard cap per account
 
 # ── Rate tiers — more users → more points required per $WAYF ─────────────────
 
@@ -159,8 +158,7 @@ async def award_points(
         return 0
 
     existing = await conn.fetchrow(
-        """SELECT points_earned_this_month, monthly_points_reset_at,
-                  COALESCE(wayf_balance, 0) AS wayf_balance
+        """SELECT points_earned_this_month, monthly_points_reset_at
            FROM wayf_points WHERE user_id = $1::uuid""",
         user_id,
     )
@@ -168,7 +166,6 @@ async def award_points(
     now = datetime.now(timezone.utc)
     current_month = existing["points_earned_this_month"] if existing else 0
     reset_at = existing["monthly_points_reset_at"] if existing else None
-    existing_wayf = float(existing["wayf_balance"]) if existing else 0.0
 
     if reset_at and now >= reset_at:
         await conn.execute(
@@ -189,8 +186,7 @@ async def award_points(
     rate_info = await get_current_rate(conn)
     current_rate = rate_info["points_per_wayf"]
 
-    wayf_earned_raw = actual / current_rate
-    wayf_earned = min(wayf_earned_raw, max(0.0, float(WAYF_CAP) - existing_wayf))
+    wayf_earned = actual / current_rate
 
     await conn.execute(
         """
@@ -211,13 +207,10 @@ async def award_points(
                 wayf_points.monthly_points_reset_at,
                 date_trunc('month', NOW()) + INTERVAL '1 month'
             ),
-            wayf_balance = LEAST(
-                wayf_points.wayf_balance + $4,
-                $5
-            ),
+            wayf_balance = wayf_points.wayf_balance + $4,
             updated_at = NOW()
         """,
-        user_id, api_key_id, actual, wayf_earned, float(WAYF_CAP),
+        user_id, api_key_id, actual, wayf_earned,
     )
 
     await conn.execute(
