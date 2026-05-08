@@ -2962,23 +2962,36 @@ async def leaderboard_managed():
     if not pool:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
+    # Build a VALUES mapping so the signals subquery joins on managed slug,
+    # not catalog slug — search_analytics.clicked_slug stores managed slugs.
+    slug_map_values = ", ".join(
+        f"('{cat}', '{mgd}')" for mgd, cat in MANAGED_TO_CATALOG.items()
+    )
+    managed_slugs = list(MANAGED_TO_CATALOG.keys())
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
+            f"""
+            WITH slug_map(catalog_slug, managed_slug) AS (
+                VALUES {slug_map_values}
+            ),
+            sig AS (
+                SELECT clicked_slug, COUNT(*) AS total_signals
+                FROM search_analytics
+                WHERE clicked_slug = ANY($2::text[])
+                GROUP BY clicked_slug
+            )
             SELECT s.slug, s.name, s.category, s.wri_score, s.x402_supported,
                    s.consecutive_failures,
                    COALESCE(sig.total_signals, 0) AS total_signals
             FROM services s
-            LEFT JOIN (
-                SELECT clicked_slug, COUNT(*) AS total_signals
-                FROM search_analytics
-                WHERE clicked_slug = ANY($1::text[])
-                GROUP BY clicked_slug
-            ) sig ON sig.clicked_slug = s.slug
+            JOIN slug_map sm ON sm.catalog_slug = s.slug
+            LEFT JOIN sig ON sig.clicked_slug = sm.managed_slug
             WHERE s.slug = ANY($1::text[])
             ORDER BY s.wri_score DESC NULLS LAST
             """,
             _CATALOG_SLUGS,
+            managed_slugs,
         )
 
     now = datetime.now(timezone.utc)
