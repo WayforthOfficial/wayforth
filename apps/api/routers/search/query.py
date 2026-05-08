@@ -7,6 +7,7 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from typing import Literal
 
 from core.auth import _resolve_user, check_auth, _ANON_DAILY_LIMIT
 from core.credits import CREDIT_COSTS, check_and_deduct_credits
@@ -30,7 +31,7 @@ class WayforthQLQuery(BaseModel):
     category: str | None = None
     protocol: str | None = None       # 'wayforth' | 'any'
     exclude_ids: list[str] | None = []  # service_id SHA256 hashes to exclude
-    sort_by: str | None = "wri"       # 'wri' | 'score' | 'price' | 'tier'
+    sort_by: Literal["wri", "score", "price", "tier"] | None = "wri"
     limit: int | None = 5
     with_similar: bool | None = False  # include similar services for top result
     x402_only: bool = False            # only x402-native services
@@ -172,7 +173,6 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
             "endpoint_url": s.get("endpoint_url"),
             "pricing": {
                 "per_call_usd": s.get("pricing_usdc"),
-                "credits_per_call": max(1, round((s.get("pricing_usdc") or 0.001) * 1000)),
             },
             "service_id": service_id,
             "wayforth_id": f"wayforth://{name_slug}/{service_id[2:10]}",
@@ -181,13 +181,11 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
                     "method": "card",
                     "processor": "Stripe Treasury",
                     "credits_needed": max(1, round((s.get("pricing_usdc") or 0.001) * 1000)),
-                    "fee_pct": 1.5,
                 },
                 "track_b": {
                     "method": "crypto",
                     "network": "base-sepolia",
                     "amount_usdc": s.get("pricing_usdc") or 0.001,
-                    "fee_pct": 1.5,
                     "calldata_via": "wayforth_pay(service_id, amount_usd, track='crypto')",
                 },
                 "x402_supported": bool(s.get("x402_supported", False)),
@@ -229,8 +227,9 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         except Exception as e:
             logger.warning(f"with_similar failed: {e}")
 
+    import html as _html
     response: dict = {
-        "query": body.query,
+        "query": _html.escape(body.query),
         "results": results,
         "total": len(results),
         "offset": offset,

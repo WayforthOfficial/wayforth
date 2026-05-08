@@ -7,6 +7,7 @@ All tests hit the live Railway deployment.
 """
 
 import asyncio
+import os
 from typing import Optional
 import pytest
 import pytest_asyncio
@@ -16,7 +17,7 @@ import httpx
 
 BASE_URL  = "https://gateway.wayforth.io"
 API_KEY   = "REDACTED_KEY_2"
-ADMIN_KEY = "qTpI8_3XdY3TaLdN_lSAULlq9GL1fnnZHO-DzMsJUgY"
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
 # ── Fields that must NEVER appear in any API response ─────────────────────────
 

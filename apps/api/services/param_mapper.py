@@ -206,3 +206,47 @@ def detect_category_hint(intent: str) -> str | None:
         if any(kw in intent_lower for kw in keywords):
             return category
     return None
+
+
+_LANGUAGE_CODES: dict[str, str] = {
+    "spanish": "ES", "french": "FR", "german": "DE", "italian": "IT",
+    "portuguese": "PT", "dutch": "NL", "polish": "PL", "russian": "RU",
+    "japanese": "JA", "chinese": "ZH", "korean": "KO", "arabic": "AR",
+    "turkish": "TR", "swedish": "SV", "danish": "DA", "norwegian": "NB",
+    "finnish": "FI", "czech": "CS", "romanian": "RO", "hungarian": "HU",
+    "greek": "EL", "bulgarian": "BG", "croatian": "HR", "slovak": "SK",
+    "slovenian": "SL", "estonian": "ET", "latvian": "LV", "lithuanian": "LT",
+    "ukrainian": "UK", "indonesian": "ID", "english": "EN",
+}
+
+
+def extract_params_from_intent(intent: str) -> dict:
+    """Best-effort extraction of structured params from a plain-English intent string.
+
+    Currently handles translation intents: "translate X to Y" → {text, target_lang}.
+    Returns an empty dict when nothing can be extracted.
+    """
+    import re
+    lower = intent.lower()
+
+    # Translation: "translate <text> to/into <language>" or "translate <text> in <language>"
+    m = re.search(
+        r"translat\w*\s+(.+?)\s+(?:to|into|in)\s+([a-z]+)",
+        lower,
+        re.IGNORECASE,
+    )
+    if m:
+        raw_text = m.group(1).strip()
+        lang_word = m.group(2).strip().lower()
+        lang_code = _LANGUAGE_CODES.get(lang_word)
+        if lang_code and raw_text:
+            # Preserve original casing for text by re-extracting from original intent
+            orig_m = re.search(
+                r"translat\w*\s+(.+?)\s+(?:to|into|in)\s+[a-z]+",
+                intent,
+                re.IGNORECASE,
+            )
+            text = orig_m.group(1).strip() if orig_m else raw_text
+            return {"text": text, "target_lang": lang_code}
+
+    return {}
