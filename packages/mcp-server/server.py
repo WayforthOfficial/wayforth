@@ -11,7 +11,7 @@ from pydantic import Field
 
 logger = logging.getLogger("wayforth-mcp")
 
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 
 load_dotenv()
 
