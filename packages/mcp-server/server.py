@@ -246,6 +246,10 @@ async def wayforth_run(
         default="managed",
         description="Payment rail. 'managed' uses Wayforth's keys (recommended, zero setup). 'byok' uses your stored key.",
     ),
+    agent_id: str = Field(
+        default="",
+        description="Optional: tag this call with your agent's name for per-agent analytics in your dashboard. Example: 'translation-agent', 'my-chatbot'. Max 64 chars, alphanumeric/hyphens/underscores.",
+    ),
 ) -> str:
     """The Wayforth runtime. One call does everything: searches for the best API,
     picks the top-ranked service by WayforthRank v2, maps your input to the
@@ -254,12 +258,17 @@ async def wayforth_run(
     Use this instead of wayforth_search + wayforth_execute when you just want the result.
     Supports: translation, weather, news, stock prices, web search, image generation,
     speech-to-text, text-to-speech, email, and 300+ more catalog services.
+
+    Optional: include agent_id='my-agent-name' to tag this call for per-agent analytics
+    in your dashboard at wayforth.io/dashboard/agents.
     """
     api_key = _get_api_key()
     if not api_key:
         return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
 
     body: dict = {"intent": intent, "input": input}
+    if agent_id:
+        body["agent_id"] = agent_id
     if category or rail != "managed":
         body["preferences"] = {}
         if category:
@@ -331,22 +340,29 @@ async def wayforth_execute(
     service_slug: str = Field(description="Service to call: groq, deepl, openweather, newsapi, serper, resend, assemblyai, stability, tavily, jina, alphavantage, elevenlabs — or any custom slug for BYOK"),
     params: dict = Field(description="Service-specific parameters as a JSON object (e.g. {'text': 'Hello', 'target_lang': 'ES'} for DeepL)"),
     key_source: str = Field(default="managed", description="Key source: 'managed' (use Wayforth's key, default) or 'byok' (use your stored key)"),
+    agent_id: str = Field(default="", description="Optional: tag this call with your agent's name for per-agent analytics. Example: 'translation-agent'. Max 64 chars, alphanumeric/hyphens/underscores."),
 ) -> str:
     """Execute any API service instantly.
-    12 managed services run with zero API keys —
+    15 managed services run with zero API keys —
     Wayforth holds the credentials.
     The fastest way to add any API capability
     to your agent.
+
+    Optional: include agent_id='my-agent-name' to tag this call for per-agent analytics
+    in your dashboard at wayforth.io/dashboard/agents.
     """
     api_key = _get_api_key()
     if not api_key:
         return "No API key provided. Get one free at wayforth.io — 100 credits, no card required."
+    req_body: dict = {"service_slug": service_slug, "params": params, "key_source": key_source}
+    if agent_id:
+        req_body["agent_id"] = agent_id
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.post(
                 f"{API_BASE}/execute",
                 headers={"X-Wayforth-API-Key": api_key, "Content-Type": "application/json"},
-                json={"service_slug": service_slug, "params": params, "key_source": key_source},
+                json=req_body,
             )
     except Exception as e:
         return f"Wayforth API not reachable: {e}"

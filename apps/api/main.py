@@ -486,6 +486,16 @@ async def lifespan(app: FastAPI):
                   category = EXCLUDED.category, coverage_tier = EXCLUDED.coverage_tier,
                   pricing_usdc = EXCLUDED.pricing_usdc, metadata = EXCLUDED.metadata
             """)
+            await _mconn.execute("""
+                ALTER TABLE credit_transactions
+                    ADD COLUMN IF NOT EXISTS agent_id TEXT,
+                    ADD COLUMN IF NOT EXISTS api_key_id UUID
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS credit_transactions_agent_id_idx
+                ON credit_transactions(user_id, agent_id)
+                WHERE agent_id IS NOT NULL
+            """)
     except Exception as e:
         logger.error(f"DB error: {e}")
         logger.warning(f"DB pool creation failed: {e} — /services will be unavailable")
@@ -840,7 +850,8 @@ def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0,
 
 
 async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
-                                   service_id: str = None, tx_type: str = "usage"):
+                                   service_id: str = None, tx_type: str = "usage",
+                                   agent_id: str = None, api_key_id: str = None):
     """Atomically check and deduct credits. Returns (success, balance_after)."""
     async with db.transaction():
         row = await db.fetchrow(
@@ -869,9 +880,10 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
         )
         await db.execute("""
             INSERT INTO credit_transactions
-            (user_id, amount, balance_after, type, description, api_endpoint, service_id)
-            VALUES ($1::uuid, $2, $3, $7, $4, $5, $6)
-        """, user_id, -cost, new_balance, f"API call: {endpoint}", endpoint, service_id, tx_type)
+            (user_id, amount, balance_after, type, description, api_endpoint, service_id, agent_id, api_key_id)
+            VALUES ($1::uuid, $2, $3, $7, $4, $5, $6, $8, $9::uuid)
+        """, user_id, -cost, new_balance, f"API call: {endpoint}", endpoint, service_id, tx_type,
+            agent_id, api_key_id)
 
         return True, new_balance
 
@@ -2162,14 +2174,30 @@ async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
 # ── BYOK KEY STORAGE ─────────────────────────────────────────────────────────
 
 async def _resolve_user(db, api_key: str):
-    """Return user_id for a valid active API key, or raise 401."""
+    """Return (user_id, api_key_id) for a valid active API key, or raise 401."""
     key_record = await db.fetchrow(
-        "SELECT user_id FROM api_keys WHERE key_hash=$1 AND active=true",
+        "SELECT id, user_id FROM api_keys WHERE key_hash=$1 AND active=true",
         hashlib.sha256(api_key.encode()).hexdigest(),
     )
     if not key_record:
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
-    return key_record["user_id"]
+    return key_record["user_id"], key_record["id"]
+
+
+_AGENT_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+
+
+def _validate_agent_id(agent_id) -> str | None:
+    """Validate and normalise agent_id. Returns cleaned string or raises 422."""
+    if not agent_id:
+        return None
+    agent_id = str(agent_id).strip()
+    if not _AGENT_ID_RE.match(agent_id):
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_agent_id",
+            "message": "agent_id must be 1-64 chars, alphanumeric, hyphens and underscores only.",
+        })
+    return agent_id
 
 
 @app.get("/call/keys")
@@ -2179,7 +2207,7 @@ async def list_service_keys(request: Request, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401)
-    user_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id = await _resolve_user(db, api_key)
 
     rows = await db.fetch("""
         SELECT service_slug, service_name, key_preview,
@@ -2199,7 +2227,7 @@ async def add_service_key(request: Request, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401)
-    user_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id = await _resolve_user(db, api_key)
 
     body = await request.json()
     service_slug = body.get("service_slug", "").strip().lower()
@@ -2259,7 +2287,7 @@ async def deactivate_service_key(request: Request, service_slug: str, db=Depends
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401)
-    user_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id = await _resolve_user(db, api_key)
 
     result = await db.execute("""
         UPDATE user_service_keys
@@ -2282,12 +2310,13 @@ async def execute_service(request: Request, db=Depends(get_db)):
     if not api_key_header:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
 
-    user_id = await _resolve_user(db, api_key_header)
+    user_id, _api_key_id = await _resolve_user(db, api_key_header)
 
     body = await request.json()
     service_slug = body.get("service_slug", "").strip().lower()
     params = body.get("params", {})
     key_source = body.get("key_source", "managed")
+    agent_id = _validate_agent_id(body.get("agent_id"))
 
     if key_source not in ("managed", "byok"):
         raise HTTPException(status_code=400, detail={"error": "key_source must be 'managed' or 'byok'"})
@@ -2370,6 +2399,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
         success, balance_after = await check_and_deduct_credits(
             db, str(user_id), total_credits, "/execute",
             service_id=service_slug, tx_type="cross_rail",
+            agent_id=agent_id, api_key_id=str(_api_key_id),
         )
         if not success:
             raise HTTPException(status_code=402, detail={
@@ -2432,6 +2462,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
         success, balance_after = await check_and_deduct_credits(
             db, str(user_id), 1, "/execute",
             service_id=service_slug, tx_type="execution",
+            agent_id=agent_id, api_key_id=str(_api_key_id),
         )
         if not success:
             raise HTTPException(status_code=402, detail={
@@ -2547,6 +2578,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
     success, balance_after = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/execute",
         service_id=service_slug, tx_type="execution",
+        agent_id=agent_id, api_key_id=str(_api_key_id),
     )
     if not success:
         raise HTTPException(status_code=402, detail={
@@ -2642,13 +2674,14 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     if not api_key_header:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
 
-    user_id = await _resolve_user(db, api_key_header)
+    user_id, _api_key_id = await _resolve_user(db, api_key_header)
     body = await request.json()
 
     intent = (body.get("intent") or "").strip()
     if not intent:
         raise HTTPException(status_code=400, detail={"error": "intent is required"})
 
+    agent_id = _validate_agent_id(body.get("agent_id"))
     input_dict = body.get("input") or {}
     prefs = body.get("preferences") or {}
     category_filter = prefs.get("category") or detect_category_hint(intent)
@@ -2755,6 +2788,7 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     success, balance_after = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/run",
         service_id=selected_slug, tx_type="execution",
+        agent_id=agent_id, api_key_id=str(_api_key_id),
     )
     if not success:
         raise HTTPException(status_code=402, detail={
@@ -5809,7 +5843,7 @@ async def register_webhook(request: Request, body: WebhookRegistration, db=Depen
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
-    user_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id = await _resolve_user(db, api_key)
 
     webhook_url = body.resolved_url
     if not webhook_url.startswith("https://"):
@@ -5850,7 +5884,7 @@ async def list_webhooks(request: Request, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
-    user_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id = await _resolve_user(db, api_key)
 
     owner = await db.fetchrow(
         "SELECT owner_email FROM api_keys WHERE user_id=$1::uuid AND active=true LIMIT 1", user_id
@@ -5886,7 +5920,7 @@ async def delete_webhook(request: Request, webhook_id: str, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    user_id = await _resolve_user(db, api_key)
+    user_id, _api_key_id = await _resolve_user(db, api_key)
 
     owner = await db.fetchrow(
         "SELECT owner_email FROM api_keys WHERE user_id = $1 AND active = true LIMIT 1", user_id
@@ -6719,6 +6753,178 @@ async def account_executions(request: Request, db=Depends(get_db)):
             for r in rows
         ],
         "total": total,
+    }
+
+
+# ── /account/agents — per-agent analytics ────────────────────────────────────
+
+@app.get("/account/agents", tags=["Account"])
+@limiter.limit("30/minute")
+async def account_agents(request: Request, db=Depends(get_db)):
+    """Per-agent usage breakdown for the authenticated user."""
+    from datetime import datetime, timezone
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not raw_key:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_record = await db.fetchrow(
+        "SELECT user_id FROM api_keys WHERE key_hash=$1 AND active=true", key_hash
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+    user_id = key_record["user_id"]
+
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    rows = await db.fetch("""
+        SELECT
+            agent_id,
+            COUNT(*) AS calls_total,
+            COUNT(*) FILTER (WHERE created_at >= $2) AS calls_this_month,
+            ABS(SUM(amount)) AS credits_used,
+            MIN(created_at) AS first_seen,
+            MAX(created_at) AS last_seen,
+            ARRAY_AGG(DISTINCT service_id ORDER BY service_id) FILTER (WHERE service_id IS NOT NULL) AS services
+        FROM credit_transactions
+        WHERE user_id = $1::uuid
+          AND agent_id IS NOT NULL
+          AND type IN ('execution', 'cross_rail')
+        GROUP BY agent_id
+        ORDER BY calls_total DESC
+    """, user_id, month_start)
+
+    untagged = await db.fetchval("""
+        SELECT COUNT(*) FROM credit_transactions
+        WHERE user_id = $1::uuid
+          AND agent_id IS NULL
+          AND type IN ('execution', 'cross_rail')
+          AND created_at >= $2
+    """, user_id, month_start) or 0
+
+    agents_out = []
+    for row in rows:
+        total_days = max(1, (row["last_seen"] - row["first_seen"]).days + 1) if row["first_seen"] and row["last_seen"] else 1
+        top_svcs = (row["services"] or [])[:3]
+        agents_out.append({
+            "agent_id": row["agent_id"],
+            "calls_total": row["calls_total"],
+            "calls_this_month": row["calls_this_month"],
+            "credits_used": int(row["credits_used"] or 0),
+            "top_services": top_svcs,
+            "first_seen": row["first_seen"].isoformat() if row["first_seen"] else None,
+            "last_seen": row["last_seen"].isoformat() if row["last_seen"] else None,
+            "avg_calls_per_day": round(row["calls_total"] / total_days, 1),
+        })
+
+    return {
+        "period": "month",
+        "from": month_start.isoformat(),
+        "to": now.replace(hour=23, minute=59, second=59).isoformat(),
+        "agents": agents_out,
+        "untagged_calls": int(untagged),
+        "total_agents": len(agents_out),
+    }
+
+
+@app.get("/account/agents/{agent_id}", tags=["Account"])
+@limiter.limit("30/minute")
+async def account_agent_detail(request: Request, agent_id: str, db=Depends(get_db)):
+    """Detailed usage breakdown for a single agent_id."""
+    from datetime import datetime, timezone, timedelta
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not raw_key:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_record = await db.fetchrow(
+        "SELECT user_id FROM api_keys WHERE key_hash=$1 AND active=true", key_hash
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+    user_id = key_record["user_id"]
+
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    thirty_days_ago = now - timedelta(days=30)
+
+    summary_row = await db.fetchrow("""
+        SELECT
+            COUNT(*) AS calls_total,
+            COUNT(*) FILTER (WHERE created_at >= $3) AS calls_this_month,
+            ABS(SUM(amount)) AS credits_used_total,
+            ABS(SUM(amount)) FILTER (WHERE created_at >= $3) AS credits_used_this_month,
+            MIN(created_at) AS first_seen,
+            MAX(created_at) AS last_seen
+        FROM credit_transactions
+        WHERE user_id = $1::uuid AND agent_id = $2
+          AND type IN ('execution', 'cross_rail')
+    """, user_id, agent_id, month_start)
+
+    if not summary_row or not summary_row["calls_total"]:
+        raise HTTPException(status_code=404, detail={
+            "error": "agent_not_found",
+            "agent_id": agent_id,
+            "message": "No calls recorded for this agent_id under your account.",
+        })
+
+    # Per-service breakdown
+    svc_rows = await db.fetch("""
+        SELECT
+            service_id AS service_slug,
+            COUNT(*) AS calls,
+            ABS(SUM(amount)) AS credits_used,
+            MAX(created_at) AS last_used
+        FROM credit_transactions
+        WHERE user_id = $1::uuid AND agent_id = $2
+          AND type IN ('execution', 'cross_rail')
+          AND service_id IS NOT NULL
+        GROUP BY service_id
+        ORDER BY calls DESC
+        LIMIT 10
+    """, user_id, agent_id)
+
+    # Daily usage — last 30 days
+    daily_rows = await db.fetch("""
+        SELECT
+            DATE(created_at) AS day,
+            COUNT(*) AS calls,
+            ABS(SUM(amount)) AS credits_used
+        FROM credit_transactions
+        WHERE user_id = $1::uuid AND agent_id = $2
+          AND type IN ('execution', 'cross_rail')
+          AND created_at >= $3
+        GROUP BY DATE(created_at)
+        ORDER BY day DESC
+    """, user_id, agent_id, thirty_days_ago)
+
+    return {
+        "agent_id": agent_id,
+        "summary": {
+            "calls_total": summary_row["calls_total"],
+            "calls_this_month": summary_row["calls_this_month"],
+            "credits_used_total": int(summary_row["credits_used_total"] or 0),
+            "credits_used_this_month": int(summary_row["credits_used_this_month"] or 0),
+            "first_seen": summary_row["first_seen"].isoformat() if summary_row["first_seen"] else None,
+            "last_seen": summary_row["last_seen"].isoformat() if summary_row["last_seen"] else None,
+        },
+        "services_breakdown": [
+            {
+                "service_slug": r["service_slug"],
+                "service_name": SERVICE_DISPLAY_NAMES.get(r["service_slug"], r["service_slug"]),
+                "calls": r["calls"],
+                "credits_used": int(r["credits_used"] or 0),
+                "last_used": r["last_used"].isoformat() if r["last_used"] else None,
+            }
+            for r in svc_rows
+        ],
+        "daily_usage": [
+            {
+                "date": str(r["day"]),
+                "calls": r["calls"],
+                "credits_used": int(r["credits_used"] or 0),
+            }
+            for r in daily_rows
+        ],
     }
 
 
