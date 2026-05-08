@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -366,6 +366,14 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS wayf_points_log_user_created_idx
                 ON wayf_points_log(user_id, created_at)
+            """)
+            await _mconn.execute("""
+                ALTER TABLE wayf_points
+                    ADD COLUMN IF NOT EXISTS wayf_balance DECIMAL(18,6) NOT NULL DEFAULT 0
+            """)
+            await _mconn.execute("""
+                ALTER TABLE wayf_points_log
+                    ADD COLUMN IF NOT EXISTS rate_at_award INTEGER
             """)
             await _mconn.execute("""
                 ALTER TABLE api_keys
