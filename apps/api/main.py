@@ -1114,8 +1114,8 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
         return True, new_balance
 
 
-async def get_calls_remaining(conn, api_key_id: str) -> int:
-    """Read exact calls_remaining from api_keys — never uses credit math."""
+async def compute_calls_remaining(conn, api_key_id: str) -> int:
+    """Single source of truth for calls_remaining. Reads monthly_calls_count directly — never uses credit math."""
     row = await conn.fetchrow(
         "SELECT monthly_calls_count, tier FROM api_keys WHERE id = $1::uuid",
         api_key_id,
@@ -3123,10 +3123,10 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
                     "WHERE id = $1::uuid",
                     str(_api_key_id),
                 )
-                _calls_remaining = await get_calls_remaining(_cnt_conn, str(_api_key_id))
-                logger.info("calls_remaining: %s (key=%s)", _calls_remaining, _api_key_id)
+                _calls_remaining = await compute_calls_remaining(_cnt_conn, str(_api_key_id))
+                logger.info("CALLS_INCREMENT_OK key=%s remaining=%s", _api_key_id, _calls_remaining)
         except Exception as _cnt_err:
-            logger.warning("calls_count update failed for key %s: %s", _api_key_id, _cnt_err)
+            logger.error("CALLS_INCREMENT_FAIL key=%s err=%s", _api_key_id, _cnt_err)
 
     adapter = ADAPTERS[selected_slug]
     result = None
@@ -4529,7 +4529,7 @@ async def get_billing_settings(request: Request, db=Depends(get_db)):
         "monthly_topup_spent_usd": round(spent, 2),
         "monthly_topup_remaining_usd": round(limit - spent, 2),
         "monthly_topup_reset_at": reset_at.date().isoformat() if reset_at else None,
-        "calls_remaining": min(balance // CREDITS_PER_CALL, PLANS.get(tier, PLANS["free"])["calls_included"]),
+        "calls_remaining": await compute_calls_remaining(db, str(key_record["id"])),
         "plan": tier,
         "payment_rail": payment_rail,
         "usdc_bonus_rate": 0.05,
@@ -7855,7 +7855,7 @@ async def get_balance(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="API key required")
 
     key_record = await db.fetchrow("""
-        SELECT k.user_id, k.tier, k.payment_rail,
+        SELECT k.id, k.user_id, k.tier, k.payment_rail,
                k.quota_reset_at, k.subscription_expires_at
         FROM api_keys k
         WHERE k.key_hash = $1 AND k.active = true
@@ -7878,7 +7878,7 @@ async def get_balance(request: Request, db=Depends(get_db)):
 
     return {
         "plan": tier,
-        "calls_remaining": min(balance // CREDITS_PER_CALL, plan_def["calls_included"]),
+        "calls_remaining": await compute_calls_remaining(db, str(key_record["id"])),
         "calls_included": plan_def["calls_included"],
         "resets_at": resets_at.isoformat() if resets_at else None,
         "payment_rail": payment_rail,
@@ -7916,7 +7916,7 @@ async def account_credits(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="API key required")
 
     key_record = await db.fetchrow("""
-        SELECT k.user_id, k.tier, u.email
+        SELECT k.id, k.user_id, k.tier, u.email
         FROM api_keys k JOIN users u ON u.id = k.user_id
         WHERE k.key_hash = $1 AND k.active = true
     """, hashlib.sha256(api_key.encode()).hexdigest())
@@ -7934,7 +7934,7 @@ async def account_credits(request: Request, db=Depends(get_db)):
 
     return {
         "plan": tier,
-        "calls_remaining": min(balance // CREDITS_PER_CALL, PLANS.get(tier, PLANS["free"])["calls_included"]),
+        "calls_remaining": await compute_calls_remaining(db, str(key_record["id"])),
         "calls_included": PLANS.get(tier, PLANS["free"])["calls_included"],
         # Dashboard-only credit detail (not shown in public docs)
         "credits_remaining": balance,
