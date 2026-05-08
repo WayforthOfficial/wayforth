@@ -1005,6 +1005,53 @@ async def wayforth_compare(
     return "\n".join(lines)
 
 
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+async def wayforth_check_agent_identity(
+    wallet_address: str = Field(
+        description="Base wallet address to look up (0x...). Returns tier, trust score, and activity history."
+    ),
+) -> str:
+    """
+    Look up an agent's identity and reputation on Wayforth.
+
+    Returns tier (unknown/emerging/established/trusted/elite), trust score (0-100),
+    call history, and cumulative spend.
+
+    Agents build reputation automatically through x402 pay-per-call usage. No signup required.
+    Tiers unlock higher rate limits:
+      unknown:     10 calls/min
+      emerging:    30 calls/min
+      established: 60 calls/min
+      trusted:     120 calls/min
+      elite:       unlimited
+    """
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            resp = client.get(f"{GATEWAY_URL}/agent/identity/{wallet_address}")
+        data = resp.json()
+        if "message" in data and data.get("total_calls", 0) == 0:
+            return (
+                f"Wallet: {wallet_address}\n"
+                f"Tier: unknown (⚪ New Agent)\n"
+                f"No activity recorded for this wallet on Wayforth yet.\n"
+                f"Make x402 calls to build reputation and unlock higher rate limits."
+            )
+        lines = [
+            f"Wallet:           {wallet_address}",
+            f"Badge:            {data.get('badge', '⚪ New Agent')}",
+            f"Tier:             {data.get('tier', 'unknown')}",
+            f"Trust Score:      {data.get('trust_score', 0)}/100",
+            f"Total Calls:      {data.get('total_calls', 0)}",
+            f"Total Spent:      ${data.get('total_spent_usdc', '0.000000')} USDC",
+            f"Network:          {data.get('network', 'base')}",
+            f"Member Since:     {data.get('member_since', 'N/A')}",
+            f"Last Active:      {data.get('last_active', 'N/A')}",
+        ]
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 async def wayforth_set_wri_alert(
     notify_url: str = Field(
@@ -1139,6 +1186,7 @@ All tools (in recommended order):
   wayforth_identity    — agent trust score and reputation
   wayforth_remember    — save a service to agent memory
   wayforth_recall      — retrieve saved services
+  wayforth_check_agent_identity — look up x402 wallet reputation and tier
   wayforth_set_wri_alert — register webhook for WRI threshold alerts
   wayforth_stats       — catalog statistics
   wayforth_status      — API health check

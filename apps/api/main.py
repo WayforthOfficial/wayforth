@@ -317,6 +317,103 @@ async def _update_identity_payment(pool, agent_id: str, amount_usdc: float):
         logger.warning(f"Identity payment update failed: {e}")
 
 
+# ── x402 agent identity helpers ───────────────────────────────────────────────
+
+_X402_TIER_BADGES = {
+    "unknown":     "⚪ New Agent",
+    "emerging":    "🟢 Emerging Agent",
+    "established": "🟡 Established Agent",
+    "trusted":     "🔵 Trusted Agent",
+    "elite":       "🏆 Elite Agent",
+}
+
+_X402_RPM = {
+    "unknown":     10,
+    "emerging":    30,
+    "established": 60,
+    "trusted":     120,
+    "elite":       None,   # unlimited
+}
+
+# wallet_address → {count, window_start}
+_x402_rate_state: dict = {}
+
+
+def _x402_tier(total_calls: int) -> str:
+    if total_calls >= 500:
+        return "elite"
+    if total_calls >= 100:
+        return "trusted"
+    if total_calls >= 25:
+        return "established"
+    if total_calls >= 5:
+        return "emerging"
+    return "unknown"
+
+
+def _x402_trust_score(total_calls: int, total_spent: float, first_seen) -> float:
+    import time as _t
+    call_score = min(40.0, total_calls * 0.08)
+    spend_score = min(30.0, total_spent * 3.0)
+    reliability_score = 20.0
+    if first_seen:
+        age_days = (datetime.now(timezone.utc) - first_seen.replace(tzinfo=timezone.utc)).days
+    else:
+        age_days = 0
+    age_score = min(10.0, age_days * 0.1)
+    return round(call_score + spend_score + reliability_score + age_score, 2)
+
+
+def _check_x402_rate_limit(wallet: str, tier: str) -> tuple[bool, int]:
+    """Returns (allowed, retry_after_seconds). Thread-safe for single-process deployment."""
+    import time as _t
+    limit = _X402_RPM.get(tier)
+    if limit is None:
+        return True, 0
+    now = _t.time()
+    state = _x402_rate_state.get(wallet)
+    if state is None or now - state["window_start"] >= 60:
+        _x402_rate_state[wallet] = {"count": 1, "window_start": now}
+        return True, 0
+    if state["count"] >= limit:
+        retry_after = max(1, int(60 - (now - state["window_start"])))
+        return False, retry_after
+    state["count"] += 1
+    return True, 0
+
+
+async def _upsert_x402_identity(pool, wallet_address: str, spend_usdc: float) -> dict:
+    """Upsert x402 agent identity. Returns the agent_identity dict for the response."""
+    if not pool or not wallet_address:
+        return {}
+    try:
+        wallet = wallet_address.lower()
+        async with pool.acquire() as db:
+            row = await db.fetchrow("""
+                INSERT INTO x402_agent_identities (wallet_address, total_calls, total_spent_usdc)
+                VALUES ($1, 1, $2)
+                ON CONFLICT (wallet_address) DO UPDATE
+                SET total_calls = x402_agent_identities.total_calls + 1,
+                    total_spent_usdc = x402_agent_identities.total_spent_usdc + $2,
+                    last_seen = NOW()
+                RETURNING total_calls, total_spent_usdc, first_seen
+            """, wallet, spend_usdc)
+            if not row:
+                return {}
+            total_calls = row["total_calls"]
+            total_spent = float(row["total_spent_usdc"])
+            tier = _x402_tier(total_calls)
+            trust_score = _x402_trust_score(total_calls, total_spent, row["first_seen"])
+            await db.execute(
+                "UPDATE x402_agent_identities SET tier=$1, trust_score=$2 WHERE wallet_address=$3",
+                tier, trust_score, wallet,
+            )
+        return {"wallet": wallet_address, "tier": tier, "trust_score": trust_score, "total_calls": total_calls}
+    except Exception as exc:
+        logger.warning("x402 identity upsert failed: %s", exc)
+        return {}
+
+
 async def _probe_new_service(service_id: str, endpoint_url: str):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -526,6 +623,26 @@ async def lifespan(app: FastAPI):
                     response_status INTEGER,
                     success BOOLEAN
                 )
+            """)
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS x402_agent_identities (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    wallet_address TEXT UNIQUE NOT NULL,
+                    network TEXT NOT NULL DEFAULT 'base',
+                    tier TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (tier IN ('unknown','emerging','established','trusted','elite')),
+                    trust_score DECIMAL(5,2) DEFAULT 0,
+                    total_calls INTEGER DEFAULT 0,
+                    total_spent_usdc DECIMAL(18,6) DEFAULT 0,
+                    first_seen TIMESTAMPTZ DEFAULT NOW(),
+                    last_seen TIMESTAMPTZ DEFAULT NOW(),
+                    flagged BOOLEAN DEFAULT false,
+                    flag_reason TEXT
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS x402_agent_identities_wallet_idx
+                ON x402_agent_identities(wallet_address)
             """)
     except Exception as e:
         logger.error(f"DB error: {e}")
@@ -786,7 +903,7 @@ async def system_status(db=Depends(get_db)):
         },
         "managed_services": len(SERVICE_CONFIGS),
         "searches_24h": searches,
-        "mcp_tools": 15,
+        "mcp_tools": 16,
         "pypi_version": VERSION,
         "api": "operational",
         "database": "operational",
@@ -1645,7 +1762,7 @@ async def get_stats(request: Request, db=Depends(get_db)):
         "tier3_services": row["tier3"],
         "categories": row["categories"],
         "searches_7d": searches_7d,
-        "mcp_tools": 15,
+        "mcp_tools": 16,
         "api_version": VERSION,
         "mcp_version": VERSION,
     }
@@ -3219,6 +3336,72 @@ async def status_services():
     )
 
 
+# ── /agent/identity — x402 wallet reputation ─────────────────────────────────
+
+@app.get("/agent/identity/{wallet_address}", tags=["Agent Identity"])
+async def agent_identity_lookup(wallet_address: str, db=Depends(get_db)):
+    """Look up an x402 agent's identity and reputation by Base wallet address. No auth required."""
+    wallet = wallet_address.lower()
+    row = await db.fetchrow(
+        "SELECT wallet_address, network, tier, trust_score, total_calls, "
+        "total_spent_usdc, first_seen, last_seen FROM x402_agent_identities "
+        "WHERE wallet_address = $1",
+        wallet,
+    )
+    if not row:
+        return {
+            "wallet": wallet_address,
+            "tier": "unknown",
+            "trust_score": 0,
+            "total_calls": 0,
+            "message": "No activity recorded for this wallet on Wayforth.",
+        }
+    tier = row["tier"]
+    return {
+        "wallet": wallet_address,
+        "network": row["network"],
+        "tier": tier,
+        "trust_score": float(row["trust_score"] or 0),
+        "total_calls": row["total_calls"],
+        "total_spent_usdc": f"{float(row['total_spent_usdc'] or 0):.6f}",
+        "member_since": row["first_seen"].isoformat() if row["first_seen"] else None,
+        "last_active": row["last_seen"].isoformat() if row["last_seen"] else None,
+        "badge": _X402_TIER_BADGES.get(tier, "⚪ New Agent"),
+    }
+
+
+@app.get("/agent/leaderboard", tags=["Agent Identity"])
+async def agent_leaderboard(limit: int = 20, db=Depends(get_db)):
+    """Public leaderboard of top x402 agents by spend and call volume. No auth required."""
+    limit = max(1, min(limit, 100))
+    rows = await db.fetch("""
+        SELECT wallet_address, tier, trust_score, total_calls, total_spent_usdc, first_seen
+        FROM x402_agent_identities
+        WHERE flagged = false
+        ORDER BY total_spent_usdc DESC, total_calls DESC
+        LIMIT $1
+    """, limit)
+
+    def _truncate_wallet(w: str) -> str:
+        return f"{w[:6]}...{w[-4:]}" if len(w) >= 10 else w
+
+    return {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "agents": [
+            {
+                "rank": i + 1,
+                "wallet": _truncate_wallet(r["wallet_address"]),
+                "tier": r["tier"],
+                "trust_score": float(r["trust_score"] or 0),
+                "total_calls": r["total_calls"],
+                "total_spent_usdc": f"{float(r['total_spent_usdc'] or 0):.6f}",
+                "member_since": r["first_seen"].isoformat() if r["first_seen"] else None,
+            }
+            for i, r in enumerate(rows)
+        ],
+    }
+
+
 # ── /leaderboard — public WRI rankings for managed services ──────────────────
 
 @app.get("/leaderboard", tags=["Public"])
@@ -3610,6 +3793,28 @@ async def x402_execute(request: Request):
         logger.warning("x402 verification timeout — accepting optimistically for service=%s", service_slug)
         asyncio.create_task(_verify_payment_async(payment_header, service_slug))
 
+    # Tier-based rate limiting (wallet identity lookup)
+    if payer_address:
+        wallet_lower = payer_address.lower()
+        try:
+            async with app.state.pool.acquire() as _id_db:
+                id_row = await _id_db.fetchrow(
+                    "SELECT tier FROM x402_agent_identities WHERE wallet_address=$1", wallet_lower
+                )
+            wallet_tier = id_row["tier"] if id_row else "unknown"
+        except Exception:
+            wallet_tier = "unknown"
+        allowed, retry_after = _check_x402_rate_limit(wallet_lower, wallet_tier)
+        if not allowed:
+            limit_val = _X402_RPM.get(wallet_tier, 10)
+            return JSONResponse(status_code=429, content={
+                "error": "rate_limit_exceeded",
+                "tier": wallet_tier,
+                "limit": f"{limit_val} calls/minute",
+                "retry_after": retry_after,
+                "message": "Make more calls to increase your agent tier and rate limits.",
+            })
+
     # Execute service
     adapter = ADAPTERS[service_slug]
     result = None
@@ -3651,12 +3856,22 @@ async def x402_execute(request: Request):
             "detail": error_msg,
         })
 
-    response = JSONResponse(content={
+    # Upsert wallet identity (async — don't block response)
+    price_usdc = float(price_str)
+    agent_identity: dict = {}
+    if payer_address and app.state.pool:
+        agent_identity = await _upsert_x402_identity(app.state.pool, payer_address, price_usdc)
+
+    resp_body: dict = {
         "result": result,
         "payment_confirmed": True,
         "credits_equivalent": SERVICE_CONFIGS[service_slug]["credits"],
         "execution_ms": execution_ms,
-    })
+    }
+    if agent_identity:
+        resp_body["agent_identity"] = agent_identity
+
+    response = JSONResponse(content=resp_body)
     response.headers["X-PAYMENT-RESPONSE"] = "confirmed"
     return response
 
