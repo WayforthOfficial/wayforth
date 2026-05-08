@@ -764,7 +764,7 @@ async def system_health(request: Request, db=Depends(get_db)):
     stripe_key = os.environ.get("STRIPE_SECRET_KEY", "")
     health["subsystems"]["stripe"] = {
         "status": "mock" if _STRIPE_MOCK else "configured",
-        "mode": "test" if stripe_key.startswith("sk_test_") else ("live" if stripe_key.startswith("sk_live_") else "not_set"),
+        "stripe_mode": "test" if stripe_key.startswith("sk_test_") else ("live" if stripe_key.startswith("sk_live_") else "not_set"),
     }
 
     # Payment tracks

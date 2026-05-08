@@ -35,6 +35,7 @@ from services.param_mapper import (
     MANAGED_TO_CATALOG,
     SERVICE_REQUIRED_PARAMS,
     detect_category_hint,
+    extract_params_from_intent,
     map_params,
     missing_param_hint,
 )
@@ -232,8 +233,8 @@ async def add_service_key(request: Request, db=Depends(get_db)):
 
     await db.execute("""
         INSERT INTO user_service_keys
-            (user_id, service_slug, service_name, encrypted_key, key_preview, endpoint_url, default_method)
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+            (user_id, service_slug, service_name, encrypted_key, key_preview, endpoint_url, default_method, active)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, true)
         ON CONFLICT (user_id, service_slug)
         DO UPDATE SET
             service_name=EXCLUDED.service_name,
@@ -967,6 +968,14 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     candidates = [dict(r) for r in rows]
     ranked = await rank_services(intent, candidates)
     top5 = ranked[:5]
+
+    # Enrich input_dict with any params extractable from the intent string itself
+    # (e.g. "translate Hello to Spanish" → {text: "Hello", target_lang: "ES"})
+    extracted = extract_params_from_intent(intent)
+    if extracted:
+        merged = dict(extracted)
+        merged.update(input_dict)  # explicit user-supplied values always win
+        input_dict = merged
 
     # Step 2 — Select: first managed service in ranked results with a configured key.
     # Scan all ranked results (not just top-5) so managed services ranked outside
