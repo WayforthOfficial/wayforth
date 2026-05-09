@@ -97,7 +97,7 @@ async def get_api_key(request: Request, db=Depends(get_db)):
     """, key_hash)
 
     if not key or not key["active"]:
-        raise HTTPException(status_code=401, detail="Invalid or inactive API key")
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
     if key["monthly_quota"] > 0 and key["usage_this_month"] >= key["monthly_quota"]:
         raise HTTPException(
@@ -145,7 +145,7 @@ async def create_api_key(request: Request, body: ApiKeyRequest, db=Depends(get_d
         SELECT COUNT(*) FROM api_keys WHERE owner_email = $1 AND active = TRUE
     """, body.email)
     if existing >= 3:
-        raise HTTPException(status_code=429, detail="Maximum 3 active keys per email")
+        raise HTTPException(status_code=429, detail="Unable to create key. Please contact support.")
 
     raw_key = f"wf_{'live' if body.tier != 'free' else 'free'}_{secrets.token_hex(24)}"
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()

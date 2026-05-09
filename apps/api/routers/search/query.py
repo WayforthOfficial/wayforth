@@ -13,7 +13,7 @@ from core.auth import _resolve_user, check_auth, _ANON_DAILY_LIMIT
 from core.credits import CREDIT_COSTS, check_and_deduct_credits
 from core.db import get_db
 from core.rate_limit import limiter
-from core.tier_gates import require_tier
+from core.tier_gates import require_tier, check_rate_limit
 from services.wayforthrank import compute_wri
 
 logger = logging.getLogger("wayforth")
@@ -60,7 +60,6 @@ class Tier3Application(BaseModel):
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/query")
-@limiter.limit("15/minute")
 async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depends(check_auth), db=Depends(get_db)):
     """WayforthQL — declarative query language for agent service discovery."""
     from ranker_client import rank_services
@@ -70,6 +69,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         raise HTTPException(status_code=400, detail={"error": "query_too_long", "max_length": 500})
 
     require_tier(auth.get("tier") or "free", "wayforthql")
+    check_rate_limit(auth["key_id"], auth["tier"])
     if auth.get("authenticated") and auth.get("user_id"):
         success, balance = await check_and_deduct_credits(
             db, auth["user_id"], CREDIT_COSTS["query"], "/query"

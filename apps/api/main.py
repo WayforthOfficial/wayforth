@@ -474,11 +474,11 @@ app.add_middleware(
     allow_origins=[
         "https://wayforth.io",
         "https://www.wayforth.io",
-        "http://localhost:3000",
-        "http://localhost:5173",
+        "https://gateway.wayforth.io",
+        "https://mcp.wayforth.io",
     ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS", "DELETE", "PUT"],
     allow_headers=["*"],
 )
 
