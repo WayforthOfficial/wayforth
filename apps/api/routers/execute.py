@@ -916,6 +916,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
 # ── /run — one-call runtime ───────────────────────────────────────────────────
 
 @router.post("/run")
+@limiter.limit("10/minute")
 async def run_endpoint(request: Request, db=Depends(get_db)):
     """Intent → search → rank → execute → result in one call."""
     import time as _time
