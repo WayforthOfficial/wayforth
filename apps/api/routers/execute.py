@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.auth import _resolve_user, _validate_agent_id, get_fernet
 from core.credits import (
@@ -90,7 +90,7 @@ async def _award_execution_points(pool, user_id: str, api_key_id: str, tier: str
 class PayRequest(BaseModel):
     service_id: str
     service_owner: str = ""
-    amount_usd: float = 0.0
+    amount_usd: float = Field(default=0.001, gt=0)
     query_id: str = ""
     agent_id: str = ""
 
