@@ -8,6 +8,26 @@ logger = logging.getLogger("wayforth")
 
 RANK_SERVICE_URL = os.getenv("RANK_SERVICE_URL", "")
 
+try:
+    from ranker import rank_services_local as _rank_services_local
+except ImportError:
+    _rank_services_local = None
+
+
+def _keyword_rank(query: str, services: list[dict]) -> list[dict]:
+    tokens = [w.lower() for w in query.split() if len(w) > 2]
+
+    def _score(s: dict) -> int:
+        haystack = f"{s.get('name', '')} {s.get('description', '')}".lower()
+        return sum(1 for t in tokens if t in haystack)
+
+    ranked = sorted(services, key=_score, reverse=True)
+    for s in ranked:
+        s["score"] = _score(s) * 10
+        s.setdefault("reason", "keyword match")
+    return ranked
+
+
 async def rank_services(query: str, candidates: list[dict], db=None) -> list[dict]:
     popularity_signals = {}
     payment_signals = {}
@@ -51,5 +71,7 @@ async def rank_services(query: str, candidates: list[dict], db=None) -> list[dic
         except Exception as e:
             logger.warning(f"WayforthRank service unavailable, using local: {e}")
 
-    from ranker import rank_services_local
-    return await rank_services_local(query, candidates, popularity_signals, payment_signals)
+    if _rank_services_local is not None:
+        return await _rank_services_local(query, candidates, popularity_signals, payment_signals)
+
+    return _keyword_rank(query, list(candidates))
