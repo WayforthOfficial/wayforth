@@ -630,12 +630,23 @@ except Exception:
 
 @app.get("/health")
 @limiter.limit("60/minute")
-async def health(request: Request, db=Depends(get_db)):
+async def health(request: Request):
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        return {
+            "status": "degraded",
+            "service": "wayforth-api",
+            "version": VERSION,
+            "db_status": "unavailable",
+            "catalog": {"total": 0, "tier2": 0},
+            "managed_services": len(SERVICE_CONFIGS),
+        }
     try:
-        await db.fetchval("SELECT 1")
-        db_status = "ok"
-        tier2 = await db.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3") or 0
-        total = await db.fetchval("SELECT COUNT(*) FROM services WHERE consecutive_failures < 3") or 0
+        async with pool.acquire(timeout=4.0) as conn:
+            await conn.fetchval("SELECT 1")
+            db_status = "ok"
+            tier2 = await conn.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3") or 0
+            total = await conn.fetchval("SELECT COUNT(*) FROM services WHERE consecutive_failures < 3") or 0
     except Exception:
         db_status = "error"
         tier2 = 0
