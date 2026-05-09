@@ -106,7 +106,6 @@ async def _update_identity_search(pool, agent_id: str):
         "Falls back to keyword scoring when ANTHROPIC_API_KEY is not set."
     ),
 )
-@limiter.limit("15/minute")
 async def search_services(
     request: Request,
     q: str = Query(min_length=1, max_length=500, description="Natural language query, e.g. 'fast cheap inference for coding'"),
