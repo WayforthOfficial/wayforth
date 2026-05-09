@@ -108,7 +108,7 @@ async def _update_identity_search(pool, agent_id: str):
 )
 async def search_services(
     request: Request,
-    q: str = Query(max_length=500, description="Natural language query, e.g. 'fast cheap inference for coding'"),
+    q: str = Query(min_length=1, max_length=500, description="Natural language query, e.g. 'fast cheap inference for coding'"),
     category: str | None = Query(default=None, description="Filter by category: inference, data, translation, …"),
     tier: int | None = Query(default=None, description="Filter by exact coverage tier (0=free, 1=basic, 2=standard, 3=premium)"),
     limit: int = Query(default=5, ge=1, le=20, description="Number of results to return (1–20)"),
