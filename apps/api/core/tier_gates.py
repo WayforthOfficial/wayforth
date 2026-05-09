@@ -26,7 +26,7 @@ TIER_FEATURES: dict[str, list[str]] = {
 }
 
 TIER_RATE_LIMITS: dict[str, dict] = {
-    "free":    {"calls_per_minute": 30,  "calls_per_hour": 100},
+    "free":    {"calls_per_minute": 15,  "calls_per_hour": 100},
     "builder": {"calls_per_minute": 120, "calls_per_hour": 500},
     "starter": {"calls_per_minute": 300, "calls_per_hour": 1500},
     "pro":     {"calls_per_minute": 600, "calls_per_hour": 5000},
@@ -37,7 +37,7 @@ FREE_TIER_MONTHLY_SEARCH_LIMIT = 50
 
 _rate_window: dict[str, list[float]] = {}
 _anon_rate_window: dict[str, list[float]] = {}
-_ANON_RPM = 30
+_ANON_RPM = 15
 
 
 def require_tier(tier: str, feature: str) -> None:

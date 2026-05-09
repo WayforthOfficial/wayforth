@@ -13,7 +13,7 @@ import sentry_sdk
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -627,6 +627,19 @@ except Exception:
     pass  # static dir may not exist in all environments
 
 # ── Core health / system routes ───────────────────────────────────────────────
+
+_ROBOTS_TXT = """\
+User-agent: *
+Disallow: /admin/
+Disallow: /admin-api/
+Disallow: /provider/
+Allow: /
+"""
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots_txt():
+    return PlainTextResponse(_ROBOTS_TXT)
+
 
 @app.get("/health")
 @limiter.limit("60/minute")
