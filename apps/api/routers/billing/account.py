@@ -821,7 +821,6 @@ async def system_health(request: Request, db=Depends(get_db)):
     # Managed services — derived from SERVICE_CONFIGS so this stays in sync automatically
     from services.managed import SERVICE_CONFIGS as _SERVICE_CONFIGS
     managed_key_vars = {slug: cfg["key_var"] for slug, cfg in _SERVICE_CONFIGS.items()}
-    logger.info("DEBUG managed key presence: %s", {v: bool(os.environ.get(v)) for v in managed_key_vars.values()})
     configured = [s for s, v in managed_key_vars.items() if os.environ.get(v)]
     missing = [s for s, v in managed_key_vars.items() if not os.environ.get(v)]
     health["subsystems"]["managed_services"] = {

@@ -1,8 +1,8 @@
 """
-apps/api/tests/test_suite_v040.py
-Wayforth v0.4.0 end-to-end test suite — T001–T142
+apps/api/tests/test_suite_v052.py
+Wayforth v0.5.2 end-to-end test suite — T001–T142
 
-Run: pytest apps/api/tests/test_suite_v040.py -v
+Run: pytest apps/api/tests/test_suite_v052.py -v
 All tests hit the live Railway deployment.
 """
 
@@ -630,7 +630,7 @@ _AGENT_ID = "wayforth-test-suite-agent-v040"
 async def test_T070_agent_register_or_exists(c):
     r = rec(await c.post("/identity/register", headers=_uh(), json={
         "agent_id":    _AGENT_ID,
-        "display_name": "Wayforth Test Suite v0.4.0",
+        "display_name": "Wayforth Test Suite v0.5.2",
     }))
     assert r.status_code in (200, 201, 409), \
         f"identity register: {r.status_code} — {r.text}"
