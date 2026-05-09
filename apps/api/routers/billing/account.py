@@ -818,15 +818,9 @@ async def system_health(request: Request, db=Depends(get_db)):
     except Exception as e:
         health["subsystems"]["encryption"] = {"status": "error", "detail": str(e)[:100]}
 
-    # Managed services
-    managed_key_vars = {
-        "groq": "GROQ_API_KEY", "deepl": "DEEPL_API_KEY",
-        "openweather": "OPENWEATHER_API_KEY", "newsapi": "NEWSAPI_API_KEY",
-        "resend": "RESEND_API_KEY", "serper": "SERPER_API_KEY",
-        "assemblyai": "ASSEMBLYAI_API_KEY", "stability": "STABILITY_API_KEY",
-        "tavily": "TAVILY_API_KEY", "jina": "JINA_API_KEY",
-        "alphavantage": "ALPHA_VANTAGE_API_KEY",
-    }
+    # Managed services — derived from SERVICE_CONFIGS so this stays in sync automatically
+    from services.managed import SERVICE_CONFIGS as _SERVICE_CONFIGS
+    managed_key_vars = {slug: cfg["key_var"] for slug, cfg in _SERVICE_CONFIGS.items()}
     configured = [s for s, v in managed_key_vars.items() if os.environ.get(v)]
     missing = [s for s, v in managed_key_vars.items() if not os.environ.get(v)]
     health["subsystems"]["managed_services"] = {

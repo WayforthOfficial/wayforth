@@ -135,13 +135,14 @@ INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
         "into english", "into spanish", "into french",
     ],
     "inference": [
-        "summarize", "summarise", "explain", "write", "generate text",
+        "inference", "summarize", "summarise", "explain", "write", "generate text",
         "rewrite", "paraphrase", "chat", "llm", "gpt", "ask",
         "answer", "complete", "draft",
     ],
     "search": [
         "search", "find", "look up", "google", "web search",
         "news", "browse", "latest", "articles",
+        "research", "what is", "find information",
     ],
     "data": [
         "weather", "temperature", "forecast", "climate",
@@ -160,6 +161,7 @@ INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
     "audio": [
         "transcribe", "transcription", "speech", "audio",
         "voice", "recording", "podcast", "mp3",
+        "text to speech", "tts", "say", "speak", "read aloud",
     ],
 }
 
