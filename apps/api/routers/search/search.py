@@ -122,6 +122,8 @@ async def search_services(
     import html as _html
 
     q = _html.escape(q.strip().lower())
+    if not q:
+        raise HTTPException(status_code=400, detail={"error": "query_required"})
     if auth.get("authenticated"):
         check_rate_limit(auth["key_id"], auth["tier"])
     else:
