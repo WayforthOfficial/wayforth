@@ -1,6 +1,9 @@
 import asyncio
 import base64
+import logging
 import httpx
+
+_httpx_log = logging.getLogger("httpx")
 
 SERVICE_CONFIGS = {
     # Inference
@@ -110,11 +113,15 @@ async def call_openweather(params: dict, api_key: str) -> dict:
         query_params["lon"] = params["lon"]
     else:
         raise Exception("params.city (or params.q) or params.lat+lon are required")
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(
-            "https://api.openweathermap.org/data/2.5/weather",
-            params=query_params,
-        )
+    _httpx_log.setLevel(logging.WARNING)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                "https://api.openweathermap.org/data/2.5/weather",
+                params=query_params,
+            )
+    finally:
+        _httpx_log.setLevel(logging.NOTSET)
     if r.status_code != 200:
         raise Exception(f"OpenWeather error {r.status_code}: {r.text[:200]}")
     data = r.json()
@@ -138,10 +145,13 @@ async def call_newsapi(params: dict, api_key: str) -> dict:
         "q": q,
         "language": params.get("language", "en"),
         "pageSize": page_size,
-        "apiKey": api_key,
     }
     async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get("https://newsapi.org/v2/everything", params=query_params)
+        r = await client.get(
+            "https://newsapi.org/v2/everything",
+            params=query_params,
+            headers={"X-Api-Key": api_key},
+        )
     if r.status_code != 200:
         raise Exception(f"NewsAPI error {r.status_code}: {r.text[:200]}")
     data = r.json()
@@ -352,15 +362,19 @@ async def call_alphavantage(params: dict, api_key: str) -> dict:
     symbol = params.get("symbol", "").upper()
     if not symbol:
         raise Exception("params.symbol is required (e.g. 'AAPL')")
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(
-            "https://www.alphavantage.co/query",
-            params={
-                "function": "TIME_SERIES_DAILY",
-                "symbol": symbol,
-                "apikey": api_key,
-            },
-        )
+    _httpx_log.setLevel(logging.WARNING)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                "https://www.alphavantage.co/query",
+                params={
+                    "function": "TIME_SERIES_DAILY",
+                    "symbol": symbol,
+                    "apikey": api_key,
+                },
+            )
+    finally:
+        _httpx_log.setLevel(logging.NOTSET)
     if r.status_code != 200:
         raise Exception(f"Alpha Vantage error {r.status_code}: {r.text[:200]}")
     data = r.json()

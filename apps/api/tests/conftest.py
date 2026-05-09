@@ -1,7 +1,7 @@
 """conftest.py — session-finish summary hook + availability guard."""
 import httpx
 import pytest
-from tests.test_suite_v040 import BASE_URL, _500_errors, _forbidden_hits, _warnings
+from tests.test_suite_v052 import BASE_URL, _500_errors, _forbidden_hits, _warnings
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -18,7 +18,7 @@ def service_up():
 def pytest_sessionfinish(session, exitstatus):
     print("\n")
     print("═" * 62)
-    print("  WAYFORTH v0.4.0  END-TO-END TEST SUITE  SUMMARY")
+    print("  WAYFORTH v0.5.2  END-TO-END TEST SUITE  SUMMARY")
     print("═" * 62)
 
     passed = session.testscollected - session.testsfailed - getattr(session, "testsskipped", 0)
