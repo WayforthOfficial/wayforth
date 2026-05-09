@@ -334,6 +334,15 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
     track = body.get("track", "auto")  # auto, card, crypto
     query_id = body.get("query_id", None)
 
+    if amount_usd <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_amount",
+                "message": "amount_usd must be greater than 0",
+            },
+        )
+
     if not service_id:
         raise HTTPException(
             status_code=400,
