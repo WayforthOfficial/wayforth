@@ -193,11 +193,14 @@ async def lifespan(app: FastAPI):
         logger.info("JWKS cache pre-warmed (%d keys)", len(_jwks_cache["keys"]))
     except Exception as _jwks_err:
         logger.warning("JWKS pre-warm failed (will retry on first request): %s", _jwks_err)
+    print("STARTUP: running check_db()", flush=True)
     ok = check_db()
     if not ok:
         logger.warning("DB connection check failed — starting anyway")
+        print(f"STARTUP: check_db failed, _DB_URL prefix={_DB_URL[:20]!r}", flush=True)
     app.state.db_ok = ok
     app.state.anon_searches = {}
+    print(f"STARTUP: creating asyncpg pool url_prefix={_ASYNCPG_URL[:20]!r}", flush=True)
     try:
         app.state.pool = await asyncpg.create_pool(
             _ASYNCPG_URL,
@@ -412,9 +415,14 @@ async def lifespan(app: FastAPI):
                   AND ak.calls_count = 0
             """)
     except Exception as e:
+        import traceback
+        print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
         logger.error(f"DB error: {e}")
         logger.warning(f"DB pool creation failed: {e} — /services will be unavailable")
         app.state.pool = None
+    else:
+        print("STARTUP: pool created and migrations complete", flush=True)
     cleanup_task = asyncio.create_task(_cleanup_anon_searches_loop(app))
     watcher_task = asyncio.create_task(_usdc_payment_watcher())
     renewal_task = asyncio.create_task(_usdc_renewal_reminder())
