@@ -44,3 +44,11 @@ apps/crawler/probe_*.py
 apps/labs/seed_*.py
 apps/api/static/admin.html
 hn_post.md
+
+# Proprietary ranking engine (lives in wayforth-rank private repo)
+apps/api/wayforth_rank_v2.py
+apps/api/ranker.py
+
+# Claude Code settings
+.claude/
+apps/**/.claude/

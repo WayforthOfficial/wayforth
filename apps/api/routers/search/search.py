@@ -16,7 +16,7 @@ from core.credits import (
 from core.db import get_db
 from core.auth import _TIER_RPM
 from core.rate_limit import limiter
-from core.tier_gates import FREE_TIER_MONTHLY_SEARCH_LIMIT
+from core.tier_gates import FREE_TIER_MONTHLY_SEARCH_LIMIT, check_rate_limit, check_anon_rate_limit
 from services.wayforthrank import compute_wri
 
 logger = logging.getLogger("wayforth")
@@ -106,7 +106,6 @@ async def _update_identity_search(pool, agent_id: str):
         "Falls back to keyword scoring when ANTHROPIC_API_KEY is not set."
     ),
 )
-@limiter.limit("15/minute")
 async def search_services(
     request: Request,
     q: str = Query(max_length=500, description="Natural language query, e.g. 'fast cheap inference for coding'"),
@@ -123,6 +122,10 @@ async def search_services(
     import html as _html
 
     q = _html.escape(q.strip().lower())
+    if auth.get("authenticated"):
+        check_rate_limit(auth["key_id"], auth["tier"])
+    else:
+        check_anon_rate_limit(auth["ip"])
     if auth.get("authenticated") and auth.get("user_id"):
         if auth.get("tier") == "free" and auth.get("user_id"):
             from datetime import datetime, timezone
@@ -372,7 +375,7 @@ async def pricing_json(request: Request):
             "price_monthly_usd": p["price_usd"],
             "calls_included": p["calls_included"],
             "usdc_bonus_calls": bonus_calls,
-            "rate_limit_per_minute": rpm,
+            "rate_limit_per_minute": "unlimited" if rpm == 0 else rpm,
             "features": p["features"],
         })
     return {"tiers": tiers}
