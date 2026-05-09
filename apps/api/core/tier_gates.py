@@ -26,16 +26,18 @@ TIER_FEATURES: dict[str, list[str]] = {
 }
 
 TIER_RATE_LIMITS: dict[str, dict] = {
-    "free":    {"calls_per_minute": 10,  "calls_per_hour": 50},
-    "builder": {"calls_per_minute": 30,  "calls_per_hour": 200},
-    "starter": {"calls_per_minute": 60,  "calls_per_hour": 500},
-    "pro":     {"calls_per_minute": 120, "calls_per_hour": 2000},
-    "growth":  {"calls_per_minute": 300, "calls_per_hour": 10000},
+    "free":    {"calls_per_minute": 30,  "calls_per_hour": 100},
+    "builder": {"calls_per_minute": 120, "calls_per_hour": 500},
+    "starter": {"calls_per_minute": 300, "calls_per_hour": 1500},
+    "pro":     {"calls_per_minute": 600, "calls_per_hour": 5000},
+    "growth":  {"calls_per_minute": 600, "calls_per_hour": 10000},
 }
 
 FREE_TIER_MONTHLY_SEARCH_LIMIT = 50
 
 _rate_window: dict[str, list[float]] = {}
+_anon_rate_window: dict[str, list[float]] = {}
+_ANON_RPM = 30
 
 
 def require_tier(tier: str, feature: str) -> None:
@@ -85,4 +87,20 @@ def check_rate_limit(api_key_id: str, tier: str) -> None:
             "upgrade_url": "https://wayforth.io/pricing",
         })
 
+    window.append(now)
+
+
+def check_anon_rate_limit(ip: str) -> None:
+    """Sliding-window 30 req/min rate limit for unauthenticated /search callers."""
+    now = time.time()
+    window = _anon_rate_window.setdefault(ip, [])
+    window[:] = [t for t in window if t > now - 60]
+    if len(window) >= _ANON_RPM:
+        raise HTTPException(status_code=429, detail={
+            "error": "rate_limit_exceeded",
+            "limit": _ANON_RPM,
+            "window": "per_minute",
+            "message": f"Anonymous search limit: {_ANON_RPM} requests/minute. Add an API key for higher limits.",
+            "get_key_url": "https://wayforth.io/dashboard",
+        })
     window.append(now)
