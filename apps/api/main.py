@@ -55,7 +55,7 @@ from core.rate_limit import get_real_ip
 from core.credits import (
     PLANS, CREDITS_PER_CALL, ROUTING_FEE, STRIPE_PACKAGES,
     check_and_deduct_credits, compute_calls_remaining, _dispatch_webhooks,
-    _monthly_topup_reset,
+    _monthly_topup_reset, _webhook_retry_loop,
 )
 from core.db import get_db
 from core.rate_limit import limiter
@@ -298,6 +298,28 @@ async def lifespan(app: FastAPI):
                 )
             """)
             await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    webhook_id UUID REFERENCES provider_webhooks(id),
+                    user_id UUID,
+                    event TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'delivered', 'dead')),
+                    next_retry_at TIMESTAMPTZ,
+                    last_attempted_at TIMESTAMPTZ,
+                    response_status INTEGER,
+                    error TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS webhook_deliveries_retry_idx
+                ON webhook_deliveries(next_retry_at, status)
+                WHERE status = 'pending'
+            """)
+            await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS x402_agent_identities (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     wallet_address TEXT UNIQUE NOT NULL,
@@ -451,12 +473,14 @@ async def lifespan(app: FastAPI):
     renewal_task = asyncio.create_task(_usdc_renewal_reminder())
     reset_task = asyncio.create_task(_monthly_topup_reset())
     probe_task = asyncio.create_task(_probe_managed_services_loop())
+    webhook_retry_task = asyncio.create_task(_webhook_retry_loop())
     yield
     cleanup_task.cancel()
     watcher_task.cancel()
     renewal_task.cancel()
     reset_task.cancel()
     probe_task.cancel()
+    webhook_retry_task.cancel()
     if app.state.pool:
         await app.state.pool.close()
 
