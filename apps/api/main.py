@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.5.4"
+VERSION = "0.6.0"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -213,7 +213,9 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 ALTER TABLE services
                     ADD COLUMN IF NOT EXISTS wri_score FLOAT,
-                    ADD COLUMN IF NOT EXISTS wri_version TEXT DEFAULT 'v1'
+                    ADD COLUMN IF NOT EXISTS wri_version TEXT DEFAULT 'v1',
+                    ADD COLUMN IF NOT EXISTS avg_latency_ms FLOAT,
+                    ADD COLUMN IF NOT EXISTS region TEXT
             """)
             await _mconn.execute("""
                 ALTER TABLE user_service_keys

@@ -148,7 +148,7 @@ async def _increment_calls(pool, api_key_id: str) -> int:
                 "    monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, "
                 "        date_trunc('month', NOW()) + INTERVAL '1 month') "
                 "WHERE id = $1::uuid "
-                "RETURNING calls_count, monthly_calls_count, tier",
+                "RETURNING calls_count, monthly_calls_count, tier, user_id",
                 api_key_id,
             )
         if row:
@@ -159,6 +159,20 @@ async def _increment_calls(pool, api_key_id: str) -> int:
                 api_key_id, row["calls_count"], row["monthly_calls_count"],
                 row["tier"], remaining,
             )
+            # Fire wayf.balance_low on exactly crossing the 10% threshold
+            monthly_limit = p["calls_included"]
+            if monthly_limit > 0:
+                threshold = monthly_limit * 0.10
+                if 0 < remaining < threshold and (remaining + 1) >= threshold:
+                    import asyncio as _asyncio
+                    _asyncio.create_task(_dispatch_webhooks(
+                        str(row["user_id"]), "wayf.balance_low", {
+                            "calls_remaining": remaining,
+                            "monthly_limit": monthly_limit,
+                            "threshold_percent": 10,
+                            "tier": row["tier"],
+                        }
+                    ))
             return remaining
         logger.error("CALLS_INCREMENT_NOMATCH key=%s — UPDATE matched 0 rows", api_key_id)
         return 0
@@ -338,6 +352,11 @@ async def _monthly_topup_reset():
                     WHERE monthly_topup_reset_at IS NOT NULL
                       AND monthly_topup_reset_at <= NOW()
                 """)
+                reset_keys = await db.fetch("""
+                    SELECT user_id, tier FROM api_keys
+                    WHERE monthly_calls_reset_at IS NOT NULL
+                      AND monthly_calls_reset_at <= NOW()
+                """)
                 calls_reset = await db.execute("""
                     UPDATE api_keys
                     SET monthly_calls_count = 0,
@@ -356,5 +375,15 @@ async def _monthly_topup_reset():
                 logger.info("Monthly topup spend reset: %s", updated)
             if calls_reset and calls_reset != "UPDATE 0":
                 logger.info("Monthly calls count reset: %s", calls_reset)
+                reset_at = datetime.now(timezone.utc).isoformat()
+                for _rk in reset_keys:
+                    p = PLANS.get(_rk["tier"], PLANS["free"])
+                    asyncio.create_task(_dispatch_webhooks(
+                        str(_rk["user_id"]), "wayf.calls_reset", {
+                            "tier": _rk["tier"],
+                            "calls_included": p["calls_included"],
+                            "reset_at": reset_at,
+                        }
+                    ))
         except Exception as _e:
             logger.error("_monthly_topup_reset error: %s", _e)
