@@ -173,6 +173,76 @@ async def _x402_settle_cdp(service_endpoint: str, amount_usd: float) -> dict:
         return {"settled": False, "reason": str(e)[:200]}
 
 
+# ── /run/intents — intent category catalogue ──────────────────────────────────
+
+_INTENT_CATALOGUE = [
+    {
+        "category": "translation",
+        "keywords": ["translate", "spanish", "french", "german", "language"],
+        "routes_to": "deepl",
+        "description": "Text translation between languages via DeepL",
+    },
+    {
+        "category": "inference",
+        "keywords": ["summarize", "explain", "write", "generate text", "chat"],
+        "routes_to": "groq",
+        "description": "LLM inference and text generation via Groq",
+    },
+    {
+        "category": "research",
+        "keywords": ["research", "deep dive", "fact check", "explain in detail"],
+        "routes_to": "perplexity",
+        "description": "In-depth research and comprehensive answers via Perplexity",
+    },
+    {
+        "category": "image",
+        "keywords": ["generate image", "draw", "picture", "illustration", "stable diffusion"],
+        "routes_to": "stability",
+        "description": "AI image generation via Stability AI",
+    },
+    {
+        "category": "tts",
+        "keywords": ["text to speech", "say this", "speak", "voice over", "narrate"],
+        "routes_to": "elevenlabs",
+        "description": "Text-to-speech synthesis via ElevenLabs",
+    },
+    {
+        "category": "weather",
+        "keywords": ["weather", "temperature", "forecast", "rain today", "humidity"],
+        "routes_to": "openweather",
+        "description": "Real-time weather data via OpenWeatherMap",
+    },
+    {
+        "category": "financial",
+        "keywords": ["stock price", "stock quote", "share price", "ticker symbol", "market data"],
+        "routes_to": "alphavantage",
+        "description": "Financial market data and stock quotes via Alpha Vantage",
+    },
+    {
+        "category": "search",
+        "keywords": ["search the web", "web search", "find articles", "look up", "latest news"],
+        "routes_to": "brave",
+        "description": "Web search and news retrieval via Brave Search",
+    },
+    {
+        "category": "audio",
+        "keywords": ["transcribe", "speech to text", "audio", "recording", "podcast"],
+        "routes_to": "assemblyai",
+        "description": "Audio transcription and speech recognition via AssemblyAI",
+    },
+]
+
+
+@router.get("/run/intents")
+async def list_run_intents():
+    """Return all supported /run intent categories and the managed service each routes to."""
+    return {
+        "intents": _INTENT_CATALOGUE,
+        "total": len(_INTENT_CATALOGUE),
+        "protocol": "WayforthQL/2.0",
+    }
+
+
 # ── BYOK key routes ───────────────────────────────────────────────────────────
 
 @router.get("/call/keys")
@@ -543,7 +613,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
 
     user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
-    check_rate_limit(str(_api_key_id), _tier)
+    await check_rate_limit(str(_api_key_id), _tier)
 
     body = await request.json()
     service_slug = body.get("service_slug", "").strip().lower()
@@ -925,7 +995,7 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
 
     user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
-    check_rate_limit(str(_api_key_id), _tier)
+    await check_rate_limit(str(_api_key_id), _tier)
     body = await request.json()
 
     intent = (body.get("intent") or "").strip()
