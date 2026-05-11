@@ -217,21 +217,26 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS avg_latency_ms FLOAT,
                     ADD COLUMN IF NOT EXISTS region TEXT
             """)
-            # Back-fill api_keys.tier from user_credits.package_tier where the
-            # credits row has a higher-than-free tier but api_keys still shows
-            # free — fixes users who upgraded via Stripe before the webhook was
-            # patched to update api_keys.tier.
-            _tier_order = "ARRAY['free','builder','starter','pro','growth']"
-            await _mconn.execute(f"""
-                UPDATE api_keys ak
-                SET tier = uc.package_tier
-                FROM user_credits uc
-                WHERE ak.user_id = uc.user_id
-                  AND ak.active = true
-                  AND uc.package_tier IS NOT NULL
-                  AND uc.package_tier != 'mock'
-                  AND array_position({_tier_order}::text[], uc.package_tier)
-                    > array_position({_tier_order}::text[], ak.tier)
+            # Sync api_keys.tier ↔ user_credits.package_tier so both fields
+            # always agree. api_keys.tier is authoritative (controls rate limits
+            # and feature gates); package_tier follows it. This self-heals any
+            # divergence caused by Stripe webhooks or admin operations before the
+            # two-field update was in place.
+            await _mconn.execute("""
+                UPDATE user_credits uc
+                SET package_tier = ak.tier,
+                    updated_at   = NOW()
+                FROM (
+                    SELECT DISTINCT ON (user_id) user_id, tier
+                    FROM api_keys
+                    WHERE active = true
+                    ORDER BY user_id,
+                             (encrypted_key IS NOT NULL) DESC,
+                             created_at DESC
+                ) ak
+                WHERE uc.user_id = ak.user_id
+                  AND uc.package_tier IS DISTINCT FROM ak.tier
+                  AND ak.tier IS NOT NULL
             """)
             await _mconn.execute("""
                 ALTER TABLE user_service_keys
