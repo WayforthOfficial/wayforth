@@ -1069,8 +1069,8 @@ async def test_T150_run_search_intent(c):
 async def test_T151_run_stream_llm_intent(c):
     """POST /run with stream=true and LLM intent returns 200 text/event-stream."""
     r = await c.post("/run", headers=_uh(), json={
-        "intent": "summarize in one sentence",
-        "input": {"messages": [{"role": "user", "content": "Summarize: AI is transforming software."}]},
+        "intent": "fast llm inference say the word hello",
+        "input": {"messages": [{"role": "user", "content": "Say the word hello."}]},
         "stream": True,
     })
     assert r.status_code == 200, f"stream LLM should be 200, got {r.status_code}: {r.text[:200]}"
