@@ -217,6 +217,22 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS avg_latency_ms FLOAT,
                     ADD COLUMN IF NOT EXISTS region TEXT
             """)
+            # Back-fill api_keys.tier from user_credits.package_tier where the
+            # credits row has a higher-than-free tier but api_keys still shows
+            # free — fixes users who upgraded via Stripe before the webhook was
+            # patched to update api_keys.tier.
+            _tier_order = "ARRAY['free','builder','starter','pro','growth']"
+            await _mconn.execute(f"""
+                UPDATE api_keys ak
+                SET tier = uc.package_tier
+                FROM user_credits uc
+                WHERE ak.user_id = uc.user_id
+                  AND ak.active = true
+                  AND uc.package_tier IS NOT NULL
+                  AND uc.package_tier != 'mock'
+                  AND array_position({_tier_order}::text[], uc.package_tier)
+                    > array_position({_tier_order}::text[], ak.tier)
+            """)
             await _mconn.execute("""
                 ALTER TABLE user_service_keys
                     ADD COLUMN IF NOT EXISTS endpoint_url TEXT,

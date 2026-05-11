@@ -358,21 +358,33 @@ async def admin_catalog(request: Request, db=Depends(get_db)):
 @router.get("/admin-api/users/{user_id}")
 async def admin_get_user(request: Request, user_id: str, db=Depends(get_db)):
     session = await get_admin_session(request, db)
+    # Use the same LATERAL join as the list endpoint so both views read
+    # the same canonical active api_key and agree on tier.
     user = await db.fetchrow("""
         SELECT u.id, u.email, u.created_at, u.stripe_customer_id,
                k.tier, k.key_prefix, k.usage_this_month, k.monthly_quota,
                k.subscription_status, k.stripe_subscription_id,
                k.created_at as key_created_at, k.last_used_at,
-               COUNT(sa.id) as total_searches,
-               MAX(sa.created_at) as last_search_at
+               uc.package_tier, uc.credits_balance,
+               COALESCE(sa.total_searches, 0) as total_searches,
+               sa.last_search_at
         FROM users u
-        LEFT JOIN api_keys k ON k.user_id = u.id
-        LEFT JOIN search_analytics sa ON sa.session_id ILIKE '%' || k.key_prefix || '%'
+        LEFT JOIN LATERAL (
+            SELECT tier, key_prefix, usage_this_month, monthly_quota,
+                   subscription_status, stripe_subscription_id,
+                   created_at, last_used_at
+            FROM api_keys
+            WHERE user_id = u.id AND active = true
+            ORDER BY (encrypted_key IS NOT NULL) DESC, created_at DESC
+            LIMIT 1
+        ) k ON true
+        LEFT JOIN user_credits uc ON uc.user_id = u.id
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) as total_searches, MAX(created_at) as last_search_at
+            FROM search_analytics
+            WHERE user_id = u.id
+        ) sa ON true
         WHERE u.id = $1::uuid
-        GROUP BY u.id, u.email, u.created_at, u.stripe_customer_id,
-                 k.tier, k.key_prefix, k.usage_this_month, k.monthly_quota,
-                 k.subscription_status, k.stripe_subscription_id,
-                 k.created_at, k.last_used_at
     """, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -402,30 +414,32 @@ async def admin_get_user(request: Request, user_id: str, db=Depends(get_db)):
 
 @router.patch("/admin-api/users/{user_id}/tier")
 async def admin_change_tier(request: Request, user_id: str, db=Depends(get_db)):
+    from core.credits import PLANS
     session = await get_admin_session(request, db)
     body = await request.json()
     new_tier = body.get("tier")
     reason = body.get("reason", "Admin manual change")
 
-    VALID_TIERS = ['free', 'starter', 'pro', 'growth', 'enterprise']
+    VALID_TIERS = list(PLANS.keys())  # ['free', 'builder', 'starter', 'pro', 'growth']
     if new_tier not in VALID_TIERS:
         raise HTTPException(status_code=400, detail=f"Invalid tier. Valid: {VALID_TIERS}")
 
-    QUOTAS   = {'free': 1000,  'starter': 10000,  'pro': 100000,   'growth': 500000,    'enterprise': -1}
-    CREDITS  = {'free': 100,   'starter': 50000,  'pro': 300000,   'growth': 1000000,   'enterprise': 5000000}
+    plan = PLANS[new_tier]
+    new_quota = plan["calls_included"]
+    new_credits = plan["monthly_credits"]
 
     old_key = await db.fetchrow(
-        "SELECT tier FROM api_keys WHERE user_id=$1::uuid AND active=true LIMIT 1", user_id
+        "SELECT tier FROM api_keys WHERE user_id=$1::uuid AND active=true "
+        "ORDER BY (encrypted_key IS NOT NULL) DESC, created_at DESC LIMIT 1",
+        user_id,
     )
     old_tier = old_key["tier"] if old_key else "free"
-
-    new_credits = CREDITS[new_tier]
 
     async with db.transaction():
         await db.execute("""
             UPDATE api_keys SET tier = $1, monthly_quota = $2
-            WHERE user_id = $3::uuid
-        """, new_tier, QUOTAS[new_tier], user_id)
+            WHERE user_id = $3::uuid AND active = true
+        """, new_tier, new_quota, user_id)
 
         existing = await db.fetchrow(
             "SELECT user_id FROM user_credits WHERE user_id = $1::uuid", user_id

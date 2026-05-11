@@ -473,6 +473,15 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
             """, user_id, credits, new_balance,
                 f"Stripe purchase: {package} pack — {credits:,} credits added")
 
+            # Keep api_keys.tier in sync — this is the authoritative tier field
+            # used by rate limiting and feature gating.
+            _new_tier = package.split("_")[0] if package else None
+            if _new_tier in ("builder", "starter", "pro", "growth"):
+                await db.execute(
+                    "UPDATE api_keys SET tier = $1 WHERE user_id = $2::uuid",
+                    _new_tier, user_id,
+                )
+
         # Store subscription_id on the api_key if this was a subscription checkout
         sub_id = session.get("subscription")
         api_key_id_row = None
@@ -578,10 +587,19 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
                 """, user_id, credits, new_balance,
                     f"Monthly renewal: {package} — {credits:,} credits")
 
-            await db.execute(
-                "UPDATE api_keys SET subscription_status = 'active' WHERE stripe_subscription_id = $1",
-                sub_id
-            )
+            _renewed_tier = package.split("_")[0] if package else None
+            if _renewed_tier in ("builder", "starter", "pro", "growth"):
+                await db.execute(
+                    "UPDATE api_keys SET tier = $1, subscription_status = 'active' "
+                    "WHERE stripe_subscription_id = $2",
+                    _renewed_tier, sub_id,
+                )
+            else:
+                await db.execute(
+                    "UPDATE api_keys SET subscription_status = 'active' "
+                    "WHERE stripe_subscription_id = $1",
+                    sub_id,
+                )
         return {"status": "renewed", "credits_added": credits}
 
     elif event["type"] == "customer.subscription.deleted":
