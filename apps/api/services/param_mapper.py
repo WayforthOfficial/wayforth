@@ -158,9 +158,9 @@ INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
         "generate speech", "audio from text", "convert to audio",
     ],
     "weather": [
-        "weather", "temperature", "forecast", "climate",
-        "rain", "sunny", "humidity", "wind", "meteorolog",
-        "weather in", "weather for", "what's the weather",
+        "weather", "temperature", "forecast",
+        "rain today", "is it raining", "sunny today", "humidity", "wind speed", "meteorolog",
+        "weather in", "weather for", "what's the weather", "how's the weather",
     ],
     "financial": [
         "stock price", "stock quote", "share price", "market cap",
@@ -251,13 +251,13 @@ _LANGUAGE_CODES: dict[str, str] = {
 def extract_params_from_intent(intent: str) -> dict:
     """Best-effort extraction of structured params from a plain-English intent string.
 
-    Currently handles translation intents: "translate X to Y" → {text, target_lang}.
+    Handles translation, weather, financial, web search, image, and TTS intents.
     Returns an empty dict when nothing can be extracted.
     """
     import re
     lower = intent.lower()
 
-    # Translation: "translate <text> to/into <language>" or "translate <text> in <language>"
+    # Translation: "translate <text> to/into <language>"
     m = re.search(
         r"translat\w*\s+(.+?)\s+(?:to|into|in)\s+([a-z]+)",
         lower,
@@ -268,7 +268,6 @@ def extract_params_from_intent(intent: str) -> dict:
         lang_word = m.group(2).strip().lower()
         lang_code = _LANGUAGE_CODES.get(lang_word)
         if lang_code and raw_text:
-            # Preserve original casing for text by re-extracting from original intent
             orig_m = re.search(
                 r"translat\w*\s+(.+?)\s+(?:to|into|in)\s+[a-z]+",
                 intent,
@@ -276,5 +275,62 @@ def extract_params_from_intent(intent: str) -> dict:
             )
             text = orig_m.group(1).strip() if orig_m else raw_text
             return {"text": text, "target_lang": lang_code}
+
+    # Weather: "weather in Tokyo" / "forecast for London" / "temperature in Paris"
+    m = re.search(
+        r"(?:weather|forecast|temperature|rain|humidity|climate|sunny|wind)\s+(?:in|for|at)\s+([A-Za-z][A-Za-z\s]{1,30}?)(?:\s*[?,.]|$)",
+        intent,
+        re.IGNORECASE,
+    )
+    if m:
+        city = m.group(1).strip()
+        if city:
+            return {"city": city}
+
+    # Financial: ticker must appear as truly uppercase letters (no re.IGNORECASE on the
+    # capture group) so common words like "QUOTE" or "PRICE" are never captured.
+    # Pattern 1: "stock price for AAPL" / "quote for MSFT"
+    m = re.search(
+        r"(?:stock|price|quote|ticker|shares?|equity)\s+(?:price\s+)?(?:for\s+)?([A-Z]{1,5})\b",
+        intent,
+    )
+    if not m:
+        # Pattern 2: "TSLA stock" / "AAPL quote"
+        m = re.search(r"\b([A-Z]{2,5})\s+(?:stock\s+)?(?:price|quote|ticker)", intent)
+    if m:
+        return {"symbol": m.group(1).upper()}
+
+    # Web search: "search the web for X" / "find articles about X" / "look up X"
+    m = re.search(
+        r"(?:search(?:\s+the\s+web)?|find\s+articles?|look\s+up|browse|web\s+search)\s+(?:for|about|on)?\s+(.+?)(?:\s*[?.]|$)",
+        intent,
+        re.IGNORECASE,
+    )
+    if m:
+        query = m.group(1).strip()
+        if query:
+            return {"query": query}
+
+    # Image generation: "generate an image of X" / "draw X" / "create a photo of X"
+    m = re.search(
+        r"(?:generate|create|draw|render|make|produce)\s+(?:an?\s+)?(?:image|photo|picture|illustration|artwork|painting)\s+(?:of|showing|depicting|with)?\s*(.+?)(?:\s*[?.]|$)",
+        intent,
+        re.IGNORECASE,
+    )
+    if m:
+        prompt = m.group(1).strip()
+        if prompt:
+            return {"prompt": prompt}
+
+    # TTS: "say this: X" / "speak this text: X" / "read aloud: X"
+    m = re.search(
+        r"(?:say|speak|read\s+aloud|narrate|voice\s+over)\s*(?:this\s*)?(?:text\s*)?[:—]\s*(.+)",
+        intent,
+        re.IGNORECASE,
+    )
+    if m:
+        text = m.group(1).strip()
+        if text:
+            return {"text": text}
 
     return {}

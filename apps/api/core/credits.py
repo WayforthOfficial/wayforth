@@ -60,6 +60,15 @@ PLANS = {
         "stripe_price_env":   "STRIPE_PRICE_GROWTH",
         "features":           ["pro_features", "custom_services", "no_limits"],
     },
+    "enterprise": {
+        "monthly_credits":    1_000_000,
+        "calls_included":     100_000,
+        "price_usd":          0,
+        "price_usdc":         0,
+        "usdc_bonus_credits": 0,
+        "stripe_price_env":   None,
+        "features":           ["growth_features", "custom_services", "no_rate_limits", "priority_support", "sla"],
+    },
 }
 
 STRIPE_PACKAGES = {

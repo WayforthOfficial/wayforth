@@ -3,34 +3,36 @@ import time
 from fastapi import HTTPException
 
 TIER_FEATURES: dict[str, list[str]] = {
-    "search":             ["free", "builder", "starter", "pro", "growth"],
-    "execute_managed":    ["free", "builder", "starter", "pro", "growth"],
-    "run":                ["free", "builder", "starter", "pro", "growth"],
-    "leaderboard":        ["free", "builder", "starter", "pro", "growth"],
-    "status":             ["free", "builder", "starter", "pro", "growth"],
-    "account_balance":    ["free", "builder", "starter", "pro", "growth"],
-    "byok":               ["builder", "starter", "pro", "growth"],
-    "webhooks":           ["builder", "starter", "pro", "growth"],
-    "agent_id_tagging":   ["builder", "starter", "pro", "growth"],
-    "account_agents":     ["builder", "starter", "pro", "growth"],
-    "wri_alerts":         ["builder", "starter", "pro", "growth"],
-    "topup_usdc":         ["builder", "starter", "pro", "growth"],
-    "compare":            ["starter", "pro", "growth"],
-    "analytics":          ["starter", "pro", "growth"],
-    "wayforthql":         ["starter", "pro", "growth"],
-    "wri_scores_visible": ["pro", "growth"],
-    "priority_execution": ["pro", "growth"],
-    "agent_identity":     ["pro", "growth"],
-    "custom_services":    ["growth"],
-    "no_rate_limits":     ["growth"],
+    "search":             ["free", "builder", "starter", "pro", "growth", "enterprise"],
+    "execute_managed":    ["free", "builder", "starter", "pro", "growth", "enterprise"],
+    "run":                ["free", "builder", "starter", "pro", "growth", "enterprise"],
+    "leaderboard":        ["free", "builder", "starter", "pro", "growth", "enterprise"],
+    "status":             ["free", "builder", "starter", "pro", "growth", "enterprise"],
+    "account_balance":    ["free", "builder", "starter", "pro", "growth", "enterprise"],
+    "byok":               ["builder", "starter", "pro", "growth", "enterprise"],
+    "webhooks":           ["builder", "starter", "pro", "growth", "enterprise"],
+    "agent_id_tagging":   ["builder", "starter", "pro", "growth", "enterprise"],
+    "account_agents":     ["builder", "starter", "pro", "growth", "enterprise"],
+    "wri_alerts":         ["builder", "starter", "pro", "growth", "enterprise"],
+    "topup_usdc":         ["builder", "starter", "pro", "growth", "enterprise"],
+    "compare":            ["starter", "pro", "growth", "enterprise"],
+    "analytics":          ["starter", "pro", "growth", "enterprise"],
+    "wayforthql":         ["starter", "pro", "growth", "enterprise"],
+    "wri_scores_visible": ["pro", "growth", "enterprise"],
+    "priority_execution": ["pro", "growth", "enterprise"],
+    "agent_identity":     ["pro", "growth", "enterprise"],
+    "custom_services":    ["growth", "enterprise"],
+    "no_rate_limits":     ["growth", "enterprise"],
+    "priority_support":   ["enterprise"],
 }
 
 TIER_RATE_LIMITS: dict[str, dict] = {
-    "free":    {"calls_per_minute": 15,  "calls_per_hour": 100},
-    "builder": {"calls_per_minute": 120, "calls_per_hour": 500},
-    "starter": {"calls_per_minute": 300, "calls_per_hour": 1500},
-    "pro":     {"calls_per_minute": 600, "calls_per_hour": 5000},
-    "growth":  {"calls_per_minute": 600, "calls_per_hour": 10000},
+    "free":       {"calls_per_minute": 15,  "calls_per_hour": 100},
+    "builder":    {"calls_per_minute": 120, "calls_per_hour": 500},
+    "starter":    {"calls_per_minute": 300, "calls_per_hour": 1500},
+    "pro":        {"calls_per_minute": 600, "calls_per_hour": 5000},
+    "growth":     {"calls_per_minute": 600, "calls_per_hour": 10000},
+    "enterprise": {"calls_per_minute": 600, "calls_per_hour": 10000},
 }
 
 FREE_TIER_MONTHLY_SEARCH_LIMIT = 50
@@ -57,7 +59,7 @@ def require_tier(tier: str, feature: str) -> None:
 
 def check_rate_limit(api_key_id: str, tier: str) -> None:
     """Sliding-window rate limiter per api_key_id. Raises 429 if over limit."""
-    if tier == "growth":
+    if tier in ("growth", "enterprise"):
         return
     limits = TIER_RATE_LIMITS.get(tier, TIER_RATE_LIMITS["free"])
     now = time.time()
