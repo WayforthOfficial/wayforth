@@ -939,13 +939,23 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     max_price = prefs.get("max_price_per_call")
     tier_min = int(prefs.get("tier_min", 2))
 
+    # Map intent category → actual DB service categories before building the query.
+    # Intent categories ("weather", "financial", "search") differ from DB categories
+    # ("data", "finance", "image") — using raw intent category in WHERE returns 0 rows.
+    _compatible_cats = INTENT_CATEGORY_MAP.get(category_filter) if category_filter else None
+
     run_start = _time.time()
 
     # Step 1 — Search: same DB query as GET /search
     conditions = [f"coverage_tier >= {tier_min}", "consecutive_failures < 3"]
     params_q: list = []
     idx = 1
-    if category_filter:
+    if _compatible_cats:
+        conditions.append(f"category = ANY(${idx}::text[])")
+        params_q.append(_compatible_cats)
+        idx += 1
+    elif category_filter:
+        # User passed prefs.category directly (already a DB category value)
         conditions.append(f"category = ${idx}")
         params_q.append(category_filter)
         idx += 1
@@ -997,8 +1007,6 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     selected_slug: str | None = None
     selected_svc: dict | None = None
     selected_rank: int | None = None
-
-    _compatible_cats = INTENT_CATEGORY_MAP.get(category_filter) if category_filter else None
 
     for i, svc in enumerate(ranked):
         catalog_slug = svc.get("slug") or ""
