@@ -478,6 +478,74 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     }
 
 
+@router.get("/account/wayf-points/history")
+@limiter.limit("30/minute")
+async def account_wayf_points_history(request: Request, db=Depends(get_db)):
+    """WAYF points earning history — last 50 daily buckets. All tiers."""
+    from wayf_points import get_current_rate
+    raw_key, key_hash = _account_auth_key(request)
+    key_record = await db.fetchrow(
+        "SELECT k.user_id, k.tier FROM api_keys k WHERE k.key_hash = $1 AND k.active = true",
+        key_hash,
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    user_id = key_record["user_id"]
+    tier = key_record["tier"] or "free"
+
+    rows = await db.fetch("""
+        SELECT
+            DATE(created_at AT TIME ZONE 'UTC') AS day,
+            SUM(points)                         AS points_earned,
+            MAX(rate_at_award)                  AS rate
+        FROM wayf_points_log
+        WHERE user_id = $1::uuid
+        GROUP BY DATE(created_at AT TIME ZONE 'UTC')
+        ORDER BY day DESC
+        LIMIT 50
+    """, user_id)
+
+    if rows:
+        oldest_day = min(r["day"] for r in rows)
+        call_rows = await db.fetch("""
+            SELECT
+                DATE(created_at AT TIME ZONE 'UTC') AS day,
+                COUNT(*) AS call_count
+            FROM credit_transactions
+            WHERE user_id = $1::uuid
+              AND type IN ('execution', 'cross_rail')
+              AND DATE(created_at AT TIME ZONE 'UTC') >= $2
+            GROUP BY DATE(created_at AT TIME ZONE 'UTC')
+        """, user_id, oldest_day)
+        calls_by_day = {r["day"]: r["call_count"] for r in call_rows}
+    else:
+        calls_by_day = {}
+
+    wp_row = await db.fetchrow(
+        "SELECT points_earned_total FROM wayf_points WHERE user_id = $1::uuid", user_id
+    )
+    total_points = int(wp_row["points_earned_total"]) if wp_row else 0
+
+    rate_info = await get_current_rate(db)
+    current_rate_val = rate_info["points_per_wayf"]
+    current_rate_str = f"{current_rate_val} pts = 1 WAYF"
+
+    return {
+        "history": [
+            {
+                "date": str(r["day"]),
+                "calls_made": calls_by_day.get(r["day"], 0),
+                "points_earned": int(r["points_earned"]),
+                "rate": f"{r['rate']} pts = 1 WAYF" if r["rate"] else current_rate_str,
+            }
+            for r in rows
+        ],
+        "total_points": total_points,
+        "current_rate": current_rate_str,
+        "tier": tier,
+    }
+
+
 @router.get("/account/usage/history")
 @limiter.limit("30/minute")
 async def account_usage_history(request: Request, db=Depends(get_db)):
