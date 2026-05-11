@@ -128,6 +128,8 @@ def missing_param_hint(missing: list[str]) -> str:
 
 
 INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
+    # Ordered from most-specific to most-general so detect_category_hint
+    # returns the tightest match first.
     "translation": [
         "translat", "spanish", "french", "german", "italian",
         "japanese", "portuguese", "chinese", "korean", "arabic",
@@ -137,31 +139,51 @@ INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
     "inference": [
         "inference", "summarize", "summarise", "explain", "write", "generate text",
         "rewrite", "paraphrase", "chat", "llm", "gpt", "ask",
-        "answer", "complete", "draft",
+        "complete", "draft",
+    ],
+    "research": [
+        "research", "perplexity", "deep dive", "in-depth",
+        "fact check", "comprehensive answer", "explain in detail",
+        "what does", "how does", "why does", "investigate",
+        "background on", "overview of", "question and answer", "q&a",
+    ],
+    "image": [
+        "image", "picture", "photo", "generate image", "generate an image",
+        "draw", "stable diffusion", "dalle", "illustration",
+        "stability ai", "midjourney", "render a", "create an image",
+    ],
+    "tts": [
+        "text to speech", "tts", "say this", "speak this", "read aloud",
+        "voice over", "narrate", "elevenlabs", "synthesize speech",
+        "generate speech", "audio from text", "convert to audio",
+    ],
+    "weather": [
+        "weather", "temperature", "forecast", "climate",
+        "rain", "sunny", "humidity", "wind", "meteorolog",
+        "weather in", "weather for", "what's the weather",
+    ],
+    "financial": [
+        "stock price", "stock quote", "share price", "market cap",
+        "financial data", "market data", "alpha vantage", "alphavantage",
+        "equity price", "ticker symbol", "trading price", "stock market",
+        "get stock", "look up stock",
     ],
     "search": [
-        "search", "find", "look up", "google", "web search",
-        "news", "browse", "latest", "articles",
-        "research", "what is", "find information",
+        "search the web", "web search", "find on the web", "google",
+        "brave", "serper", "tavily", "browse", "look up",
+        "find articles", "latest news", "news articles",
     ],
     "data": [
-        "weather", "temperature", "forecast", "climate",
-        "rain", "sunny", "humidity", "wind",
         "stock", "price", "market", "financial", "crypto",
-        "trading", "ticker", "shares", "equity",
-        "news", "latest", "headlines", "articles",
+        "trading", "ticker", "shares", "news", "latest", "headlines",
     ],
     "finance": [
         "alphavantage", "alpha vantage", "stock quote",
     ],
-    "image": [
-        "image", "picture", "photo", "generate image",
-        "draw", "stable diffusion", "dalle", "illustration",
-    ],
     "audio": [
-        "transcribe", "transcription", "speech", "audio",
-        "voice", "recording", "podcast", "mp3",
-        "text to speech", "tts", "say", "speak", "read aloud",
+        "transcribe", "transcription", "speech to text",
+        "audio", "recording", "podcast", "mp3", "wav",
+        "convert audio", "speech recognition",
     ],
 }
 
@@ -192,10 +214,14 @@ MANAGED_TO_CATALOG: dict[str, str] = {
 INTENT_CATEGORY_MAP: dict[str, list[str]] = {
     "translation": ["translation"],
     "inference":   ["inference", "llm", "ai"],
+    "research":    ["inference", "search", "data", "ai", "llm"],
+    "image":       ["image", "media"],
+    "tts":         ["audio", "media"],
+    "weather":     ["data"],
+    "financial":   ["finance", "data"],
     "search":      ["search", "data"],
     "data":        ["data", "search"],
     "finance":     ["finance", "data"],
-    "image":       ["image", "media"],
     "audio":       ["audio", "media"],
     "email":       ["email", "communication"],
 }

@@ -38,6 +38,10 @@ class WayforthQLQuery(BaseModel):
     provider: str | None = None        # filter by provider name substring
     verified_only: bool = False        # only tier-2+ verified services
     offset: int = 0                    # pagination offset
+    # v1.1 filter fields
+    latency_max: int | None = None                          # max avg response time in ms
+    region: Literal["us", "eu", "global"] | None = None    # service region
+    payment_rail: Literal["card", "usdc", "x402"] | None = None  # required payment rail
 
 
 class MemoryItem(BaseModel):
@@ -67,6 +71,12 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
 
     if len(body.query) > 500:
         raise HTTPException(status_code=400, detail={"error": "query_too_long", "max_length": 500})
+
+    if body.latency_max is not None and not (1 <= body.latency_max <= 60000):
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_latency_max",
+            "message": "latency_max must be between 1 and 60000 ms.",
+        })
 
     require_tier(auth.get("tier") or "free", "wayforthql")
     check_rate_limit(auth["key_id"], auth["tier"])
@@ -116,6 +126,20 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         conditions.append(f"LOWER(name) LIKE ${idx}")
         params.append(f"%{body.provider.lower()}%")
         idx += 1
+
+    if body.latency_max is not None:
+        conditions.append(f"(avg_latency_ms IS NULL OR avg_latency_ms <= ${idx})")
+        params.append(float(body.latency_max))
+        idx += 1
+
+    if body.region is not None:
+        conditions.append(f"region = ${idx}")
+        params.append(body.region)
+        idx += 1
+
+    if body.payment_rail == "x402":
+        conditions.append("x402_supported = true")
+    # card and usdc are supported for all services via Wayforth routing layers
 
     where = " AND ".join(conditions)
     limit = min(body.limit or 5, 50)
@@ -250,6 +274,9 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
             "x402_only": body.x402_only,
             "verified_only": body.verified_only,
             "provider": body.provider,
+            "latency_max": body.latency_max,
+            "region": body.region,
+            "payment_rail": body.payment_rail,
         },
     }
     if not auth["authenticated"]:
