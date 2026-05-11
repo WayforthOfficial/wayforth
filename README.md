@@ -152,7 +152,7 @@ Real API result + WayforthRank signal update
 - **Docs:** [wayforth.io/docs](https://wayforth.io/docs)
 - **Whitepaper:** [wayforth.io/Wayforth_Whitepaper_v6.1.pdf](https://wayforth.io/Wayforth_Whitepaper_v6.1.pdf)
 - **PyPI:** [pypi.org/project/wayforth-mcp](https://pypi.org/project/wayforth-mcp/)
-- **Contact:** dor@wayforth.io
+- **Contact:** [wayforth.io/contact](https://wayforth.io/contact)
 
 ## License
 
