@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from core.credits import _dispatch_webhooks
+from core.credits import PLANS, _dispatch_webhooks
 from core.db import get_db
 from core.rate_limit import limiter
 
@@ -288,13 +288,14 @@ async def admin_users_list(
     users = await db.fetch("""
         SELECT u.id, u.email, u.created_at,
                k.tier, k.owner_email, k.key_prefix,
-               k.usage_this_month, k.monthly_quota,
+               k.usage_this_month, k.monthly_quota, k.monthly_calls_count,
                k.subscription_status,
                uc.package_tier, uc.credits_balance, uc.lifetime_credits,
                GREATEST(MAX(s.created_at), MAX(ct.created_at)) as last_active
         FROM users u
         LEFT JOIN LATERAL (
-            SELECT tier, owner_email, key_prefix, usage_this_month, monthly_quota, subscription_status
+            SELECT tier, owner_email, key_prefix, usage_this_month, monthly_quota,
+                   monthly_calls_count, subscription_status
             FROM api_keys
             WHERE user_id = u.id AND active = true
             ORDER BY (encrypted_key IS NOT NULL) DESC, created_at DESC
@@ -307,7 +308,8 @@ async def admin_users_list(
           AND u.email NOT LIKE 'probe-%'
         GROUP BY u.id, u.email, u.created_at,
                  k.tier, k.owner_email, k.key_prefix,
-                 k.usage_this_month, k.monthly_quota, k.subscription_status,
+                 k.usage_this_month, k.monthly_quota, k.monthly_calls_count,
+                 k.subscription_status,
                  uc.package_tier, uc.credits_balance, uc.lifetime_credits
         ORDER BY last_active DESC NULLS LAST
         LIMIT $1 OFFSET $2
@@ -319,8 +321,16 @@ async def admin_users_list(
           AND email NOT LIKE 'probe-%'
     """)
 
+    def _fix_usage(u: dict) -> dict:
+        tier = u.get("tier") or "free"
+        plan = PLANS.get(tier)
+        if plan:
+            u["monthly_quota"] = plan["calls_included"]
+        u["monthly_calls_count"] = u.get("monthly_calls_count") or 0
+        return u
+
     return {
-        "users": [dict(u) for u in users],
+        "users": [_fix_usage(dict(u)) for u in users],
         "total": total,
         "limit": limit,
         "offset": offset
@@ -362,7 +372,7 @@ async def admin_get_user(request: Request, user_id: str, db=Depends(get_db)):
     # the same canonical active api_key and agree on tier.
     user = await db.fetchrow("""
         SELECT u.id, u.email, u.created_at, u.stripe_customer_id,
-               k.tier, k.key_prefix, k.usage_this_month, k.monthly_quota,
+               k.tier, k.key_prefix, k.usage_this_month, k.monthly_quota, k.monthly_calls_count,
                k.subscription_status, k.stripe_subscription_id,
                k.created_at as key_created_at, k.last_used_at,
                uc.package_tier, uc.credits_balance,
@@ -370,7 +380,7 @@ async def admin_get_user(request: Request, user_id: str, db=Depends(get_db)):
                sa.last_search_at
         FROM users u
         LEFT JOIN LATERAL (
-            SELECT tier, key_prefix, usage_this_month, monthly_quota,
+            SELECT tier, key_prefix, usage_this_month, monthly_quota, monthly_calls_count,
                    subscription_status, stripe_subscription_id,
                    created_at, last_used_at
             FROM api_keys
@@ -404,8 +414,15 @@ async def admin_get_user(request: Request, user_id: str, db=Depends(get_db)):
         ORDER BY created_at DESC
     """, user_id)
 
+    user_dict = dict(user)
+    tier = user_dict.get("tier") or "free"
+    plan = PLANS.get(tier)
+    if plan:
+        user_dict["monthly_quota"] = plan["calls_included"]
+    user_dict["monthly_calls_count"] = user_dict.get("monthly_calls_count") or 0
+
     result = {
-        "user": dict(user),
+        "user": user_dict,
         "recent_searches": [dict(s) for s in searches],
         "service_keys": [dict(k) for k in service_keys],
     }
@@ -548,9 +565,18 @@ async def admin_regenerate_key(request: Request, user_id: str, db=Depends(get_db
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     key_prefix = raw_key[:12]
 
+    # Deactivate all existing keys, then reactivate only the most recent one with new credentials.
+    # Without this, if all keys were already inactive (e.g. after suspend), the regenerated key
+    # would remain inactive and the user could never authenticate.
+    await db.execute(
+        "UPDATE api_keys SET active = false WHERE user_id = $1::uuid",
+        user_id,
+    )
     await db.execute("""
-        UPDATE api_keys SET key_hash = $1, key_prefix = $2, last_used_at = NULL
+        UPDATE api_keys
+        SET key_hash = $1, key_prefix = $2, last_used_at = NULL, active = true
         WHERE user_id = $3::uuid
+          AND created_at = (SELECT MAX(created_at) FROM api_keys WHERE user_id = $3::uuid)
     """, key_hash, key_prefix, user_id)
 
     return {

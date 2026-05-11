@@ -173,17 +173,27 @@ async def get_service(request: Request, service_id: str):
 
 @router.get("/billing/packages")
 async def get_packages(request: Request):
+    from core.credits import PLANS
     result = []
     for key, pkg in PACKAGES.items():
+        plan = PLANS.get(key, {})
         if pkg['price_usd'] is None:
-            continue
-        result.append({
-            "id": key,
-            "label": pkg['label'],
-            "credits": pkg['credits'],
-            "price_usd": pkg['price_usd'],
-            "price_per_credit": round(pkg['price_usd'] / pkg['credits'], 8),
-        })
+            # Custom-priced plans: include with descriptive fields instead of numeric price
+            result.append({
+                "plan": key,
+                "label": pkg['label'],
+                "price": "custom",
+                "calls_included": plan.get("calls_included", 0),
+                "description": "Custom pricing, priority support, SLA",
+            })
+        else:
+            result.append({
+                "plan": key,
+                "label": pkg['label'],
+                "price_usd": pkg['price_usd'],
+                "calls_included": plan.get("calls_included", pkg['credits']),
+                "price_per_credit": round(pkg['price_usd'] / pkg['credits'], 8),
+            })
     return {"packages": result}
 
 
