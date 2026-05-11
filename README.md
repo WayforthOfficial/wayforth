@@ -3,9 +3,9 @@
 [![PyPI](https://img.shields.io/pypi/v/wayforth-mcp)](https://pypi.org/project/wayforth-mcp/)
 [![smithery badge](https://smithery.ai/badge/support-9ef4/Wayforth)](https://smithery.ai/servers/support-9ef4/Wayforth)
 
-**Search engine and payment rail for AI agents.**
+**v0.6.0 — Intelligence** · Search engine and payment rail for AI agents.
 
-300 verified APIs. Pay via card or crypto. One MCP install.
+2,629 indexed APIs. Pay via card or crypto. One MCP install.
 
 ```bash
 uvx wayforth-mcp
@@ -20,13 +20,17 @@ uvx wayforth-mcp
 wayforth_search("translate text to Spanish")
 → DeepL  WRI:82  Tier 2 ✓  $0.00003/call  [card|crypto]
 
-# Structured discovery (WayforthQL v1)
-POST /query {"query": "translate text", "tier_min": 2, "sort_by": "wri"}
-→ protocol: WayforthQL/1.0
+# Intent-based routing (9 categories, streaming LLM support)
+POST /run {"intent": "summarize this article", "input": {...}}
+POST /run {"intent": "fast llm inference", "input": {...}, "stream": true}
 
-# Pay — card or crypto
-wayforth_pay("deepl", 0.001)               # card default
-wayforth_pay("deepl", 0.001, track="crypto") # non-custodial Base
+# Structured discovery (WayforthQL v1.1)
+POST /query {"query": "translate text", "tier_min": 2, "sort_by": "wri",
+             "latency_max": 500, "region": "eu", "payment_rail": "x402"}
+→ protocol: WayforthQL/1.1
+
+# Parallel batch execution
+POST /execute/batch {"slugs": ["groq", "deepl"], "params": {...}}
 
 # Execute — managed services, no API keys needed
 POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
@@ -35,14 +39,15 @@ POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 
 ## Live Now
 
-- **300 APIs** indexed across 18 categories
-- **256 Tier 2 verified** — probed every 6h, auto-demoted after failures
+- **2,629 APIs** indexed across 18 categories
+- **254 Tier 2 verified** — probed every 6h, auto-demoted after failures
 - **42 x402 native services** — sourced from x402.org/ecosystem
-- **12 managed services** — Groq, DeepL, OpenWeather, NewsAPI, Serper, Resend, AssemblyAI, Stability AI, Tavily, Jina AI, Alpha Vantage, ElevenLabs
+- **13 managed services** — Groq, Together AI, DeepL, OpenWeatherMap, NewsAPI, Serper, Resend, AssemblyAI, Stability AI, Tavily, Jina AI, Alpha Vantage, ElevenLabs
 - **WayforthRank v2** — payment-signal weighted scoring (payment rate × 35%, base WRI × 40%, volume × 15%, recency × 10%)
-- **WayforthQL v1** — structured discovery with tier/price/protocol filters
+- **WayforthQL v1.1** — structured discovery with tier/price/protocol/latency/region filters and pagination
 - **Dual-track payments** — Stripe Treasury (card) + Base blockchain (non-custodial)
-- **BYOK** — bring your own key for any of 300 services, encrypted at rest (Fernet AES-128)
+- **BYOK** — bring your own key for any of 2,629 services, encrypted at rest (Fernet AES-128)
+- **Live service health** — rolling avg_response_ms and error_rate per service, WRI-adjusted
 - **3 provisional patents** filed (WF-2026-001, WF-2026-002, WF-2026-003)
 
 ## Install
@@ -60,16 +65,16 @@ export WAYFORTH_API_KEY=wf_live_...
 
 Get your API key: [wayforth.io/signup](https://wayforth.io/signup)
 
-## Credit Packages
+## Plans
 
-| Plan | Price | Credits |
-|------|-------|---------|
-| Free | $0/mo | 100/month |
-| Starter | $19 | 50,000 |
-| Pro | $99 | 300,000 |
-| Growth | $299 | 1,000,000 |
-
-1 credit = $0.001. Credits never expire.
+| Plan | Calls/month | Price |
+|------|-------------|-------|
+| Free | 100 | $0/mo |
+| Builder | 1,000 | $12/mo |
+| Starter | 3,500 | $29/mo |
+| Pro | 12,000 | $99/mo |
+| Growth | 40,000 | $299/mo |
+| Enterprise | 100,000 | custom |
 
 ## Payment Tracks
 
@@ -81,11 +86,12 @@ Get your API key: [wayforth.io/signup](https://wayforth.io/signup)
 
 All tracks earn Wayforth the same 1.5% routing fee.
 
-## Execution — 12 Managed Services
+## Execution — 13 Managed Services
 
 | Service | Category | Credits/Call |
 |---------|----------|-------------|
 | Groq | LLM inference | 3 |
+| Together AI | LLM inference | 3 |
 | DeepL | Translation | 1 |
 | OpenWeatherMap | Weather data | 1 |
 | NewsAPI | News search | 1 |
@@ -98,13 +104,42 @@ All tracks earn Wayforth the same 1.5% routing fee.
 | Alpha Vantage | Stock data | 2 |
 | ElevenLabs | Text-to-speech | 5 |
 
+## Key Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /run` | Intent-based routing across 9 categories; `"stream": true` for LLM SSE |
+| `POST /execute` | Direct managed-service execution by slug |
+| `POST /execute/batch` | Parallel execution, up to 5 slugs |
+| `POST /query` | WayforthQL v1.1 — latency_max, region, payment_rail filters + pagination |
+| `GET /run/intents` | Intent catalog (9 entries) |
+| `GET /openapi.json` | Full OpenAPI 3.1.0 spec |
+| `GET /services/{slug}/health` | Live avg_response_ms, error_rate, WRI penalty |
+| `GET /account/usage/history` | 30-day call breakdown |
+| `GET /account/wayf-points/history` | Points timeline |
+| `GET /health` | System health (DB, Redis, managed services) |
+
+## Rate Limits
+
+Every response includes rate-limit headers:
+
+```
+X-RateLimit-Tier: free
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 73
+X-RateLimit-Reset: 1748736000
+```
+
 ## Architecture
 
 ```
-wayforth_search() / POST /query (WayforthQL v1)
+wayforth_search() / POST /query (WayforthQL v1.1)
 ↓
 WayforthRank v2 (payment-signal weighted scoring, patent pending)
   base_wri×0.40 + payment_rate×0.35 + volume×0.15 + recency×0.10
+  ± live health overlay (−10 if error_rate > 30%, −5 if p50 > 5s)
+↓
+POST /run — intent routing (9 categories) | stream: true for LLM SSE
 ↓
 wayforth_pay() — Track A (card) | Track B (crypto) | Track C (x402)
 ↓
@@ -117,7 +152,7 @@ Real API result + WayforthRank signal update
 
 - **Dashboard:** [wayforth.io/dashboard](https://wayforth.io/dashboard)
 - **Docs:** [wayforth.io/docs](https://wayforth.io/docs)
-- **Whitepaper:** [wayforth.io/wayforth-whitepaper-v5.pdf](https://wayforth.io/wayforth-whitepaper-v5.pdf)
+- **Whitepaper:** [wayforth.io/Wayforth_Whitepaper_v6.1.pdf](https://wayforth.io/Wayforth_Whitepaper_v6.1.pdf)
 - **PyPI:** [pypi.org/project/wayforth-mcp](https://pypi.org/project/wayforth-mcp/)
 - **Contact:** dor@wayforth.io
 
