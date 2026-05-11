@@ -234,16 +234,16 @@ async def create_checkout(request: Request, db=Depends(get_db)):
                 await db.execute("""
                     UPDATE user_credits
                     SET credits_balance=$1, lifetime_credits=lifetime_credits+$2,
-                        package_tier=$3, payment_method='mock_card', updated_at=NOW()
-                    WHERE user_id=$4::uuid
-                """, new_balance, pkg["credits"], package, key_record['user_id'])
+                        payment_method='mock_card', updated_at=NOW()
+                    WHERE user_id=$3::uuid
+                """, new_balance, pkg["credits"], key_record['user_id'])
             else:
                 new_balance = pkg["credits"]
                 await db.execute("""
                     INSERT INTO user_credits
                     (user_id, credits_balance, lifetime_credits, package_tier, payment_method)
-                    VALUES ($1::uuid, $2, $2, $3, 'mock_card')
-                """, key_record['user_id'], new_balance, package)
+                    VALUES ($1::uuid, $2, $2, 'free', 'mock_card')
+                """, key_record['user_id'], new_balance)
 
             await db.execute("""
                 INSERT INTO credit_transactions
@@ -408,7 +408,7 @@ async def mock_topup(request: Request, db=Depends(get_db)):
         else:
             new_balance = credits
             await db.execute(
-                "INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier, payment_method) VALUES ($1::uuid, $2, $2, 'mock', 'mock')",
+                "INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier, payment_method) VALUES ($1::uuid, $2, $2, 'free', 'mock')",
                 key_record['user_id'], new_balance
             )
 
