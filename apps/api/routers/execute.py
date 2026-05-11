@@ -6,10 +6,11 @@ import logging
 import math
 import os
 import secrets
+import time as _time_mod
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from core.auth import _resolve_user, _validate_agent_id, get_fernet
@@ -43,6 +44,34 @@ from services.param_mapper import (
 logger = logging.getLogger("wayforth")
 
 router = APIRouter()
+
+# ── /run result cache — 10s TTL, max 1000 entries ────────────────────────────
+
+_RUN_CACHE: dict[tuple, tuple[float, dict]] = {}
+_RUN_CACHE_TTL = 10.0
+_RUN_CACHE_MAX = 1000
+
+
+def _run_cache_get(key: tuple) -> dict | None:
+    entry = _RUN_CACHE.get(key)
+    if entry and _time_mod.monotonic() < entry[0]:
+        return entry[1]
+    _RUN_CACHE.pop(key, None)
+    return None
+
+
+def _run_cache_set(key: tuple, value: dict) -> None:
+    if len(_RUN_CACHE) >= _RUN_CACHE_MAX:
+        now = _time_mod.monotonic()
+        expired = [k for k, (exp, _) in list(_RUN_CACHE.items()) if exp <= now]
+        for k in expired:
+            del _RUN_CACHE[k]
+        while len(_RUN_CACHE) >= _RUN_CACHE_MAX:
+            try:
+                _RUN_CACHE.pop(next(iter(_RUN_CACHE)))
+            except StopIteration:
+                break
+    _RUN_CACHE[key] = (_time_mod.monotonic() + _RUN_CACHE_TTL, value)
 
 
 async def _award_execution_points(pool, user_id: str, api_key_id: str, tier: str) -> None:
@@ -986,7 +1015,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
 # ── /run — one-call runtime ───────────────────────────────────────────────────
 
 @router.post("/run")
-async def run_endpoint(request: Request, db=Depends(get_db)):
+async def run_endpoint(request: Request, response: Response, db=Depends(get_db)):
     """Intent → search → rank → execute → result in one call."""
     import time as _time
 
@@ -1001,6 +1030,12 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     intent = (body.get("intent") or "").strip()
     if not intent:
         raise HTTPException(status_code=400, detail={"error": "intent is required"})
+
+    _cache_key = (hashlib.sha256(api_key_header.encode()).hexdigest()[:16], intent)
+    _cached = _run_cache_get(_cache_key)
+    if _cached is not None:
+        response.headers["X-Wayforth-Cache"] = "hit"
+        return _cached
 
     agent_id = _validate_agent_id(body.get("agent_id"))
     input_dict = body.get("input") or {}
@@ -1277,7 +1312,8 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
     )
 
     wri = selected_svc.get("wri_score")
-    return {
+    response.headers["X-Wayforth-Cache"] = "miss"
+    _run_result = {
         "result": result,
         "service_used": {
             "slug": selected_slug,
@@ -1295,3 +1331,5 @@ async def run_endpoint(request: Request, db=Depends(get_db)):
         "execution_ms": execution_ms,
         "priority": _tier in ("pro", "growth"),
     }
+    _run_cache_set(_cache_key, _run_result)
+    return _run_result
