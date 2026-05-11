@@ -517,14 +517,19 @@ app.add_middleware(
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
     request_id = str(uuid_lib.uuid4())
+    request.state.request_id = request_id
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
     if raw_key:
         request.state.api_key = raw_key
+    logger.info("req_start id=%s method=%s path=%s", request_id, request.method, request.url.path)
     response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
     response.headers["X-Wayforth-Request-ID"] = request_id
     response.headers["X-Wayforth-Version"] = VERSION
     response.headers["X-RateLimit-Tier"] = str(getattr(request.state, "rate_limit_tier", "free"))
     response.headers["X-RateLimit-Limit"] = str(getattr(request.state, "rate_limit_rpm", "10"))
+    response.headers["X-RateLimit-Remaining"] = str(getattr(request.state, "ratelimit_remaining", -1))
+    response.headers["X-RateLimit-Reset"] = str(getattr(request.state, "ratelimit_reset", 0))
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -586,14 +591,27 @@ async def check_auth(request: Request) -> dict:
             """, key["id"])
 
         rpm = _TIER_RPM.get(key["tier"], 10)
-        request.state.rate_limit_tier = key["tier"]
+        tier = key["tier"] or "free"
+        calls_included = PLANS.get(tier, {}).get("calls_included", 100)
+        usage = key["usage_this_month"] + 1
+        request.state.rate_limit_tier = tier
         request.state.rate_limit_rpm = rpm
+        request.state.ratelimit_remaining = max(0, calls_included - usage)
+        if key.get("quota_reset_at"):
+            request.state.ratelimit_reset = int(key["quota_reset_at"].timestamp())
+        else:
+            from datetime import timedelta
+            _now = datetime.now(timezone.utc)
+            _next = (_now.replace(day=28) + timedelta(days=4)).replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0
+            )
+            request.state.ratelimit_reset = int(_next.timestamp())
         return {
             "authenticated": True,
-            "tier": key["tier"],
+            "tier": tier,
             "key_id": str(key["id"]),
             "user_id": str(key["user_id"]) if key["user_id"] else None,
-            "usage_this_month": key["usage_this_month"] + 1,
+            "usage_this_month": usage,
             "monthly_quota": key["monthly_quota"],
             "anonymous_count": None,
             "ip": ip,
@@ -616,6 +634,11 @@ async def check_auth(request: Request) -> dict:
     anon_dict[anon_key] = count + 1
     request.state.rate_limit_tier = "anonymous"
     request.state.rate_limit_rpm = 10
+    request.state.ratelimit_remaining = max(0, _ANON_DAILY_LIMIT - (count + 1))
+    from datetime import timedelta
+    _now = datetime.now(timezone.utc)
+    _end_of_day = _now.replace(hour=23, minute=59, second=59, microsecond=0)
+    request.state.ratelimit_reset = int(_end_of_day.timestamp())
     return {
         "authenticated": False,
         "tier": None,
@@ -641,6 +664,47 @@ app.include_router(x402.router)
 app.include_router(auth.router)
 app.include_router(agent.router)
 app.include_router(wayf.router)
+
+
+# ── OpenAPI customisation (security scheme + description) ─────────────────────
+
+def _custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+    schema = get_openapi(
+        title="Wayforth API",
+        version=VERSION,
+        description=(
+            "Wayforth is the agent-native service discovery and routing layer for AI. "
+            "Discover, compare, and call 300+ API services through a single endpoint.\n\n"
+            "**Authentication**: All endpoints (except `/status`, `/health`, `/search`) "
+            "require the `X-Wayforth-API-Key` header. "
+            "Get your key at [wayforth.io/dashboard](https://wayforth.io/dashboard).\n\n"
+            "**Rate-limit headers** returned on every authenticated response:\n"
+            "- `X-RateLimit-Tier` — your tier (free / builder / starter / pro / growth / enterprise)\n"
+            "- `X-RateLimit-Limit` — calls per minute allowed for your tier\n"
+            "- `X-RateLimit-Remaining` — calls remaining this month\n"
+            "- `X-RateLimit-Reset` — Unix timestamp when your monthly quota resets\n"
+            "- `X-Request-ID` — unique UUID for every request, traceable in logs"
+        ),
+        routes=app.routes,
+    )
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "ApiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Wayforth-API-Key",
+            "description": "Wayforth API key — get yours at https://wayforth.io/dashboard",
+        }
+    }
+    schema["security"] = [{"ApiKeyAuth": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _custom_openapi
+
 
 # ── Static files ──────────────────────────────────────────────────────────────
 
