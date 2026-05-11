@@ -5,7 +5,7 @@
 
 **v0.6.0 — Intelligence** · Search engine and payment rail for AI agents.
 
-2,629 indexed APIs. Pay via card or crypto. One MCP install.
+298+ verified API endpoints across 18 categories. Pay via card or crypto. One MCP install.
 
 ```bash
 uvx wayforth-mcp
@@ -39,16 +39,15 @@ POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 
 ## Live Now
 
-- **2,629 APIs** indexed across 18 categories
-- **254 Tier 2 verified** — probed every 6h, auto-demoted after failures
-- **42 x402 native services** — sourced from x402.org/ecosystem
-- **13 managed services** — Groq, Together AI, DeepL, OpenWeatherMap, NewsAPI, Serper, Resend, AssemblyAI, Stability AI, Tavily, Jina AI, Alpha Vantage, ElevenLabs
-- **WayforthRank v2** — payment-signal weighted scoring (payment rate × 35%, base WRI × 40%, volume × 15%, recency × 10%)
-- **WayforthQL v1.1** — structured discovery with tier/price/protocol/latency/region filters and pagination
-- **Dual-track payments** — Stripe Treasury (card) + Base blockchain (non-custodial)
-- **BYOK** — bring your own key for any of 2,629 services, encrypted at rest (Fernet AES-128)
-- **Live service health** — rolling avg_response_ms and error_rate per service, WRI-adjusted
-- **3 provisional patents** filed (WF-2026-001, WF-2026-002, WF-2026-003)
+- **298+ verified API endpoints** across 18 categories
+- **13 managed services** — Groq, Together AI, DeepL, Brave Search, OpenWeatherMap, NewsAPI, Serper, Tavily, Jina AI, Alpha Vantage, AssemblyAI, Stability AI, Resend
+- **WayforthQL v1.1** — filter by latency, region, payment rail, price, tier, and protocol with pagination
+- **WayforthRank** — payment-signal weighted service scoring
+- **Live service health** — response time and reliability tracked per service, affects ranking
+- **BYOK** — bring your own API key for any service, AES-128 encrypted
+- **Triple-track payments** — card, USDC on Base, x402 protocol
+- **3 provisional patents** filed
+- **120/120 end-to-end tests** passing
 
 ## Install
 
@@ -69,19 +68,19 @@ Get your API key: [wayforth.io/signup](https://wayforth.io/signup)
 
 | Plan | Calls/month | Price |
 |------|-------------|-------|
-| Free | 100 | $0/mo |
+| Free | 100 | $0 |
 | Builder | 1,000 | $12/mo |
 | Starter | 3,500 | $29/mo |
 | Pro | 12,000 | $99/mo |
 | Growth | 40,000 | $299/mo |
-| Enterprise | 100,000 | custom |
+| Enterprise | 100,000 | Custom |
 
 ## Payment Tracks
 
 | Track | Method | How |
 |-------|--------|-----|
 | A — Card | Stripe Treasury (fiat) | Buy credits, no crypto |
-| B — Crypto | Base blockchain (USDC) | Non-custodial calldata |
+| B — Crypto | Base blockchain (USDC) | USDC on Base |
 | C — x402 | Native HTTP 402 | Auto-detected, Coinbase CDP |
 
 All tracks earn Wayforth the same 1.5% routing fee.
@@ -114,7 +113,7 @@ All tracks earn Wayforth the same 1.5% routing fee.
 | `POST /query` | WayforthQL v1.1 — latency_max, region, payment_rail filters + pagination |
 | `GET /run/intents` | Intent catalog (9 entries) |
 | `GET /openapi.json` | Full OpenAPI 3.1.0 spec |
-| `GET /services/{slug}/health` | Live avg_response_ms, error_rate, WRI penalty |
+| `GET /services/{slug}/health` | Live response time, reliability, ranking impact |
 | `GET /account/usage/history` | 30-day call breakdown |
 | `GET /account/wayf-points/history` | Points timeline |
 | `GET /health` | System health (DB, Redis, managed services) |
@@ -135,15 +134,14 @@ X-RateLimit-Reset: 1748736000
 ```
 wayforth_search() / POST /query (WayforthQL v1.1)
 ↓
-WayforthRank v2 (payment-signal weighted scoring, patent pending)
-  base_wri×0.40 + payment_rate×0.35 + volume×0.15 + recency×0.10
-  ± live health overlay (−10 if error_rate > 30%, −5 if p50 > 5s)
+WayforthRank (payment-signal weighted scoring, patent pending)
+  ± live health overlay
 ↓
 POST /run — intent routing (9 categories) | stream: true for LLM SSE
 ↓
 wayforth_pay() — Track A (card) | Track B (crypto) | Track C (x402)
 ↓
-POST /execute — managed keys | BYOK (encrypted)
+POST /execute — managed keys | BYOK (AES-128 encrypted)
 ↓
 Real API result + WayforthRank signal update
 ```
@@ -160,6 +158,6 @@ Real API result + WayforthRank signal update
 
 Business Source License 1.1 (BSL 1.1)
 Converts to Apache 2.0 on April 25, 2030
-Licensor: Wayforth LTD
+Licensor: Wayforth Inc.
 
 Smart contracts: [WayforthEscrow on Base Sepolia](https://sepolia.basescan.org/address/0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809)
