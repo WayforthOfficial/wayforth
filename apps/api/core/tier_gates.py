@@ -60,6 +60,7 @@ def _get_redis():
     _redis_init_done = True
     url = os.environ.get("REDIS_URL", "")
     if not url:
+        logger.info("rate limiter: in-memory (no REDIS_URL)")
         return None
     try:
         import redis.asyncio as aioredis
@@ -69,9 +70,10 @@ def _get_redis():
             socket_connect_timeout=1,
             socket_timeout=1,
         )
-        logger.info("Redis rate limiter initialised: %s…", url[:30])
+        logger.info("rate limiter: redis (connected)")
     except Exception as exc:
-        logger.warning("Redis init failed, using in-memory rate limiter: %s", exc)
+        logger.info("rate limiter: in-memory (redis failed)")
+        logger.debug("Redis init error: %s", exc)
         _redis_client = None
     return _redis_client
 

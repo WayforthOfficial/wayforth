@@ -59,7 +59,7 @@ from core.credits import (
 )
 from core.db import get_db
 from core.rate_limit import limiter
-from core.tier_gates import require_tier
+from core.tier_gates import require_tier, _get_redis
 from services.managed import SERVICE_CONFIGS
 from services.param_mapper import MANAGED_TO_CATALOG
 from services.wayforthrank import compute_wri
@@ -173,6 +173,30 @@ async def _probe_managed_services_loop():
                     await conn2.execute(
                         "DELETE FROM service_probes WHERE probed_at < NOW() - INTERVAL '7 days'"
                     )
+                    # Rolling service_health from last 10 probes
+                    if service_id:
+                        recent = await conn2.fetch(
+                            """SELECT reachable, response_time_ms FROM service_probes
+                               WHERE service_id = $1::uuid
+                               ORDER BY probed_at DESC LIMIT 10""",
+                            service_id,
+                        )
+                        if recent:
+                            total_p = len(recent)
+                            err_count = sum(1 for r in recent if not r["reachable"])
+                            avg_ms = sum((r["response_time_ms"] or 0) for r in recent) / total_p
+                            err_rate = err_count / total_p
+                            await conn2.execute(
+                                """INSERT INTO service_health
+                                   (slug, avg_response_ms, error_rate, last_probe_at, probe_count)
+                                   VALUES ($1, $2, $3, NOW(), $4)
+                                   ON CONFLICT (slug) DO UPDATE SET
+                                       avg_response_ms = EXCLUDED.avg_response_ms,
+                                       error_rate = EXCLUDED.error_rate,
+                                       last_probe_at = EXCLUDED.last_probe_at,
+                                       probe_count = EXCLUDED.probe_count""",
+                                catalog_slug, avg_ms, err_rate, total_p,
+                            )
             except Exception as db_err:
                 logger.warning("probe db write failed for %s: %s", managed_slug, db_err)
 
@@ -436,6 +460,15 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS monthly_searches INTEGER NOT NULL DEFAULT 0
             """)
             await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS service_health (
+                    slug            TEXT PRIMARY KEY,
+                    avg_response_ms FLOAT,
+                    error_rate      FLOAT,
+                    last_probe_at   TIMESTAMPTZ,
+                    probe_count     INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            await _mconn.execute("""
                 UPDATE services
                 SET consecutive_failures = 0
                 WHERE slug = ANY($1::text[])
@@ -474,6 +507,7 @@ async def lifespan(app: FastAPI):
     reset_task = asyncio.create_task(_monthly_topup_reset())
     probe_task = asyncio.create_task(_probe_managed_services_loop())
     webhook_retry_task = asyncio.create_task(_webhook_retry_loop())
+    _get_redis()  # eagerly init so the rate-limiter log line appears at startup
     yield
     cleanup_task.cancel()
     watcher_task.cancel()

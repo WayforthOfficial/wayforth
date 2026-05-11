@@ -108,6 +108,40 @@ def send_tier3_application_notification(to_email: str, service_name: str, compan
         return False
 
 
+def send_credits_low_email(to_email: str, calls_remaining: int, percent: int, plan: str, reset_date: str) -> bool:
+    if not resend.api_key or not to_email:
+        return False
+    try:
+        resend.Emails.send({
+            "from": FROM_EMAIL,
+            "to": to_email,
+            "subject": "Your Wayforth calls are running low",
+            "html": f"""
+            <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0F172A;color:#E2E8F0;padding:40px;border-radius:12px;">
+                <h1 style="color:#4F46E5;margin:0 0 8px">Wayforth</h1>
+                <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0;border-left:4px solid #F59E0B;">
+                    <p style="color:#F59E0B;font-weight:bold;margin:0 0 8px">⚠ Calls running low</p>
+                    <p style="color:#E2E8F0;font-size:18px;font-weight:bold;margin:0">
+                        {calls_remaining} calls left this month
+                    </p>
+                    <p style="color:#94A3B8;font-size:13px;margin:8px 0 0">
+                        {percent}% of your {plan.title()} plan · Resets {reset_date}
+                    </p>
+                </div>
+                <p style="margin-top:24px">
+                    <a href="https://wayforth.io/billing" style="background:#4F46E5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Top up at wayforth.io/billing →</a>
+                </p>
+                <p style="margin-top:32px;color:#64748B;font-size:13px">Wayforth · <a href="https://wayforth.io" style="color:#4F46E5">wayforth.io</a></p>
+            </div>
+            """,
+        })
+        logger.info("credits_low email sent to %s (%d calls remaining)", to_email, calls_remaining)
+        return True
+    except Exception as e:
+        logger.warning("credits_low email failed: %s", e)
+        return False
+
+
 _TIER_CREDITS = {
     "free":     100,
     "starter":  50_000,

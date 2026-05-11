@@ -24,6 +24,18 @@ logger = logging.getLogger("wayforth")
 router = APIRouter()
 
 
+def _apply_health_wri(wri, health_row) -> float:
+    """Reduce WRI score based on live service health data."""
+    if wri is None or not health_row:
+        return wri
+    adj = 0
+    if (health_row.get("error_rate") or 0) > 0.3:
+        adj -= 10
+    if (health_row.get("avg_response_ms") or 0) > 5000:
+        adj -= 5
+    return max(0.0, float(wri) + adj) if adj else wri
+
+
 # ── Analytics helpers (pool-parameter pattern) ────────────────────────────────
 
 async def log_query(pool, service_id: str, query_text: str, score: int):
@@ -247,6 +259,19 @@ async def search_services(
     except Exception:
         pass
 
+    # Load service health for WRI adjustment
+    _health_map: dict = {}
+    try:
+        _top_slugs = [s.get("slug") for s in top if s.get("slug")]
+        if _top_slugs:
+            _health_rows = await db.fetch(
+                "SELECT slug, avg_response_ms, error_rate FROM service_health WHERE slug = ANY($1::text[])",
+                _top_slugs,
+            )
+            _health_map = {r["slug"]: r for r in _health_rows}
+    except Exception:
+        pass
+
     logger.info(f"search q={q!r} results={len(top)} fallback={fallback_used}")
     results = [
         {
@@ -254,7 +279,10 @@ async def search_services(
             "slug": s.get("slug"),
             "description": s.get("description"),
             "score": s.get("score", 0),
-            "wri": s["wri_score"] if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
+            "wri": _apply_health_wri(
+                s["wri_score"] if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
+                _health_map.get(s.get("slug")),
+            ),
             "ranking_version": "v2" if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else "v1",
             "reason": s.get("reason", ""),
             "coverage_tier": s.get("coverage_tier"),

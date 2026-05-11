@@ -1061,3 +1061,117 @@ async def test_T150_run_search_intent(c):
     result = d.get("result", {})
     assert "results" in result or "organic" in result or "web" in result, \
         f"search result missing results/organic/web: keys={list(result.keys())}"
+
+
+# SECTION 18 — v0.6.0 NEW FEATURES (T151–T160)
+
+@pytest.mark.asyncio
+async def test_T151_run_stream_llm_intent(c):
+    """POST /run with stream=true and LLM intent returns 200 text/event-stream."""
+    r = await c.post("/run", headers=_uh(), json={
+        "intent": "summarize in one sentence",
+        "input": {"messages": [{"role": "user", "content": "Summarize: AI is transforming software."}]},
+        "stream": True,
+    })
+    assert r.status_code == 200, f"stream LLM should be 200, got {r.status_code}: {r.text[:200]}"
+    ct = r.headers.get("content-type", "")
+    assert "text/event-stream" in ct, f"expected text/event-stream, got {ct!r}"
+    assert "data:" in r.text, f"no SSE data in response: {r.text[:200]}"
+
+
+@pytest.mark.asyncio
+async def test_T152_run_stream_non_llm_returns_400(c):
+    """POST /run with stream=true and non-LLM intent returns 400 streaming_not_supported."""
+    r = await c.post("/run", headers=_uh(), json={
+        "intent": "weather in Paris",
+        "input": {"city": "Paris"},
+        "stream": True,
+    })
+    assert r.status_code == 400, f"non-LLM stream should be 400, got {r.status_code}: {r.text[:200]}"
+    d = r.json()
+    assert d.get("error") == "streaming_not_supported", f"unexpected error: {d}"
+
+
+@pytest.mark.asyncio
+async def test_T153_execute_batch_two_slugs(c):
+    """POST /execute/batch with 2 valid slugs returns 200 with results array."""
+    r = rec(await c.post("/execute/batch", headers=_uh(), json={
+        "calls": [
+            {"slug": "openweather", "params": {"city": "Berlin"}},
+            {"slug": "openweather", "params": {"city": "Tokyo"}},
+        ]
+    }))
+    assert r.status_code == 200, f"batch should be 200, got {r.status_code}: {r.text[:300]}"
+    d = r.json()
+    assert "results" in d, f"missing results: {d.keys()}"
+    assert len(d["results"]) == 2, f"expected 2 results, got {len(d['results'])}"
+
+
+@pytest.mark.asyncio
+async def test_T154_execute_batch_six_slugs_returns_422(c):
+    """POST /execute/batch with 6 slugs returns 422 too_many_calls."""
+    r = rec(await c.post("/execute/batch", headers=_uh(), json={
+        "calls": [{"slug": "openweather", "params": {"city": "x"}}] * 6
+    }))
+    assert r.status_code == 422, f"6-slug batch should be 422, got {r.status_code}: {r.text[:200]}"
+    d = r.json()
+    detail = d.get("detail", d)
+    assert detail.get("error") == "too_many_calls", f"unexpected detail: {detail}"
+
+
+@pytest.mark.asyncio
+async def test_T155_account_usage_history(c):
+    """GET /account/usage/history returns 200 with history array."""
+    r = rec(await c.get("/account/usage/history", headers=_uh()))
+    assert r.status_code == 200, f"usage history should be 200, got {r.status_code}: {r.text[:200]}"
+    d = r.json()
+    assert "history" in d, f"missing history: {d.keys()}"
+    assert isinstance(d["history"], list), "history should be a list"
+
+
+@pytest.mark.asyncio
+async def test_T156_account_wayf_points_history(c):
+    """GET /account/wayf-points/history returns 200 with total_points field."""
+    r = rec(await c.get("/account/wayf-points/history", headers=_uh()))
+    assert r.status_code == 200, f"wayf-points history should be 200, got {r.status_code}: {r.text[:200]}"
+    d = r.json()
+    assert "total_points" in d, f"missing total_points: {d.keys()}"
+
+
+@pytest.mark.asyncio
+async def test_T157_run_intents_returns_nine(c):
+    """GET /run/intents returns 200 with intents array of 9 entries."""
+    r = rec(await c.get("/run/intents"))
+    assert r.status_code == 200, f"run/intents should be 200, got {r.status_code}: {r.text[:200]}"
+    d = r.json()
+    assert "intents" in d, f"missing intents: {d.keys()}"
+    assert len(d["intents"]) == 9, f"expected 9 intents, got {len(d['intents'])}"
+
+
+@pytest.mark.asyncio
+async def test_T158_openapi_json(c):
+    """GET /openapi.json returns 200 with openapi version field."""
+    r = await c.get("/openapi.json")
+    assert r.status_code == 200, f"openapi.json should be 200, got {r.status_code}"
+    d = r.json()
+    assert "openapi" in d, f"missing openapi field: {list(d.keys())[:10]}"
+
+
+@pytest.mark.asyncio
+async def test_T159_services_slug_health(c):
+    """GET /services/groq/health returns 200 with slug field."""
+    r = rec(await c.get("/services/groq/health"))
+    assert r.status_code == 200, f"services/groq/health should be 200, got {r.status_code}: {r.text[:200]}"
+    d = r.json()
+    assert "slug" in d, f"missing slug: {d.keys()}"
+    assert d["slug"] == "groq", f"unexpected slug: {d['slug']}"
+
+
+@pytest.mark.asyncio
+async def test_T160_sitemap_xml(c):
+    """GET /sitemap.xml returns 200 with application/xml content-type."""
+    r = await c.get("/sitemap.xml")
+    assert r.status_code == 200, f"sitemap.xml should be 200, got {r.status_code}: {r.text[:200]}"
+    ct = r.headers.get("content-type", "")
+    assert "xml" in ct, f"expected xml content-type, got {ct!r}"
+    assert "wayforth.io" in r.text, f"sitemap missing wayforth.io URLs"
