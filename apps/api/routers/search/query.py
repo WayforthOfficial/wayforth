@@ -133,7 +133,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         idx += 1
 
     if body.region is not None:
-        conditions.append(f"region = ${idx}")
+        conditions.append(f"(region IS NULL OR region = ${idx})")
         params.append(body.region)
         idx += 1
 
