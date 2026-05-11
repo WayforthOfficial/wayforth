@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json as _json
 import logging
 import httpx
 
@@ -78,6 +79,70 @@ async def call_groq(params: dict, api_key: str) -> dict:
         "model": data.get("model", model),
         "tokens_used": usage.get("total_tokens", 0),
     }
+
+
+async def stream_groq(params: dict, api_key: str):
+    """Async generator yielding text tokens from Groq streaming API."""
+    model = params.get("model", "llama-3.3-70b-versatile")
+    messages = params.get("messages", [])
+    if not messages:
+        raise Exception("params.messages is required")
+    max_tokens = params.get("max_tokens", 1024)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        async with client.stream(
+            "POST",
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "max_tokens": max_tokens, "stream": True},
+        ) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                raise Exception(f"Groq error {resp.status_code}: {body[:200]!r}")
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload == "[DONE]":
+                    return
+                try:
+                    chunk = _json.loads(payload)
+                    content = chunk["choices"][0]["delta"].get("content", "")
+                    if content:
+                        yield content
+                except Exception:
+                    pass
+
+
+async def stream_together(params: dict, api_key: str):
+    """Async generator yielding text tokens from Together AI streaming API."""
+    messages = params.get("messages", [])
+    if not messages:
+        raise Exception("params.messages is required")
+    model = params.get("model", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
+    max_tokens = params.get("max_tokens", 1024)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        async with client.stream(
+            "POST",
+            "https://api.together.xyz/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "max_tokens": max_tokens, "stream": True},
+        ) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                raise Exception(f"Together AI error {resp.status_code}: {body[:200]!r}")
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload == "[DONE]":
+                    return
+                try:
+                    chunk = _json.loads(payload)
+                    content = chunk["choices"][0]["delta"].get("content", "")
+                    if content:
+                        yield content
+                except Exception:
+                    pass
 
 
 async def call_deepl(params: dict, api_key: str) -> dict:

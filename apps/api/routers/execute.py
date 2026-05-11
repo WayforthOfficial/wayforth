@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json as _json
 import logging
 import math
 import os
@@ -11,6 +12,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from core.auth import _resolve_user, _validate_agent_id, get_fernet
@@ -113,6 +115,31 @@ async def _award_execution_points(pool, user_id: str, api_key_id: str, tier: str
             await check_milestones(conn, user_id, api_key_id, tier, calls_count)
     except Exception as _e:
         logger.warning("_award_execution_points error: %s", _e)
+
+
+_STREAMING_SLUGS = {"groq", "together"}
+
+
+async def _run_sse_stream(slug, params, svc_key, user_id, credit_cost, pool, service_used, calls_remaining):
+    """Async generator producing SSE events for a streaming LLM /run call."""
+    from services.managed import stream_groq, stream_together
+    stream_fn = stream_groq if slug == "groq" else stream_together
+    try:
+        async for token in stream_fn(params, svc_key):
+            yield f"data: {_json.dumps({'token': token, 'done': False})}\n\n"
+    except Exception as exc:
+        yield f"data: {_json.dumps({'error': str(exc)[:200], 'done': True})}\n\n"
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
+                    "WHERE user_id = $2::uuid",
+                    credit_cost, user_id,
+                )
+        except Exception:
+            pass
+        return
+    yield f"data: {_json.dumps({'token': '', 'done': True, 'service_used': service_used, 'calls_remaining': calls_remaining})}\n\n"
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -1152,11 +1179,14 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
     if not intent:
         raise HTTPException(status_code=400, detail={"error": "intent is required"})
 
+    stream = bool(body.get("stream", False))
+
     _cache_key = (hashlib.sha256(api_key_header.encode()).hexdigest()[:16], intent)
-    _cached = _run_cache_get(_cache_key)
-    if _cached is not None:
-        response.headers["X-Wayforth-Cache"] = "hit"
-        return _cached
+    if not stream:
+        _cached = _run_cache_get(_cache_key)
+        if _cached is not None:
+            response.headers["X-Wayforth-Cache"] = "hit"
+            return _cached
 
     agent_id = _validate_agent_id(body.get("agent_id"))
     input_dict = body.get("input") or {}
@@ -1309,6 +1339,29 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
                 top = dict(_best) if _best else {}
             except Exception:
                 top = {}
+        # Build suggested_intents from categories that have configured managed keys
+        _CATEGORY_EXAMPLES = {
+            "inference":   "try: summarize this article",
+            "translation": "try: translate to French",
+            "weather":     "try: weather in London",
+            "financial":   "try: stock price of AAPL",
+            "search":      "try: search the web for latest AI news",
+            "image":       "try: generate image of a sunset",
+            "tts":         "try: text to speech hello world",
+            "research":    "try: research quantum computing",
+            "audio":       "try: transcribe this audio file",
+        }
+        _suggested: list[str] = []
+        for _entry in _INTENT_CATALOGUE:
+            if len(_suggested) >= 3:
+                break
+            _routes_to = _entry.get("routes_to", "")
+            _cfg = SERVICE_CONFIGS.get(_routes_to)
+            if _cfg and os.environ.get(_cfg["key_var"], ""):
+                _example = _CATEGORY_EXAMPLES.get(_entry["category"])
+                if _example:
+                    _suggested.append(_example)
+
         raise HTTPException(status_code=422, detail={
             "error": "no_managed_service",
             "intent": intent,
@@ -1322,6 +1375,8 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
                 "name": top.get("name"),
                 "wri_score": top.get("wri_score"),
             } if top else None,
+            "suggested_intents": _suggested,
+            "supported_categories": len(_INTENT_CATALOGUE),
             "action": "POST /call/keys/add",
         })
 
@@ -1372,6 +1427,36 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
         asyncio.create_task(_award_execution_points(
             app.state.pool, str(user_id), str(_api_key_id), _tier
         ))
+
+    # ── Streaming path (inference LLM intents only) ───────────────────────────
+    if stream:
+        if selected_slug not in _STREAMING_SLUGS:
+            async with db.transaction():
+                await db.fetchrow(
+                    "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
+                    "WHERE user_id = $2::uuid RETURNING credits_balance",
+                    credit_cost, user_id,
+                )
+            return JSONResponse(status_code=400, content={
+                "error": "streaming_not_supported",
+                "intent_category": selected_svc.get("category", "unknown"),
+            })
+        wri = selected_svc.get("wri_score")
+        _service_used_sse = {
+            "slug": selected_slug,
+            "name": SERVICE_DISPLAY_NAMES.get(selected_slug, selected_slug),
+            "wri_score": round(float(wri), 1) if wri else None,
+            "category": selected_svc.get("category"),
+            "credits_used": credit_cost,
+        }
+        gen = _run_sse_stream(
+            selected_slug, mapped_params, svc_key, str(user_id),
+            credit_cost, app.state.pool, _service_used_sse, _calls_remaining,
+        )
+        return StreamingResponse(gen, media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
 
     adapter = ADAPTERS[selected_slug]
     result = None
@@ -1433,6 +1518,23 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
     )
 
     wri = selected_svc.get("wri_score")
+    # Apply service health WRI adjustment
+    try:
+        _health = await db.fetchrow(
+            "SELECT avg_response_ms, error_rate FROM service_health WHERE slug = $1",
+            selected_slug,
+        )
+        if _health and wri is not None:
+            _adj = 0
+            if (_health["error_rate"] or 0) > 0.3:
+                _adj -= 10
+            if (_health["avg_response_ms"] or 0) > 5000:
+                _adj -= 5
+            if _adj:
+                wri = max(0.0, float(wri) + _adj)
+    except Exception:
+        pass
+
     response.headers["X-Wayforth-Cache"] = "miss"
     _run_result = {
         "result": result,

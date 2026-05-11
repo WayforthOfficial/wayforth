@@ -402,7 +402,7 @@ async def _maybe_dispatch_credits_low(pool, user_id: str, api_key_str: str, bala
         async with pool.acquire() as db:
             key = await db.fetchrow("""
                 SELECT billing_permission, topup_trigger_calls, topup_amount_usd,
-                       monthly_topup_limit_usd, monthly_topup_spent_usd
+                       monthly_topup_limit_usd, monthly_topup_spent_usd, tier
                 FROM api_keys WHERE key_hash = $1 AND active = true
             """, hashlib.sha256(api_key_str.encode()).hexdigest())
 
@@ -449,6 +449,30 @@ async def _maybe_dispatch_credits_low(pool, user_id: str, api_key_str: str, bala
             payload["message"] = "Top up at wayforth.io/billing"
 
         await _dispatch_webhooks(user_id, "credits.low", payload)
+
+        # Transactional email alert
+        try:
+            async with pool.acquire() as _email_db:
+                user_row = await _email_db.fetchrow(
+                    """SELECT u.email, ak.monthly_calls_reset_at
+                       FROM users u
+                       JOIN api_keys ak ON ak.user_id = u.id
+                       WHERE u.id = $1::uuid AND ak.active = true LIMIT 1""",
+                    user_id,
+                )
+            if user_row and user_row["email"]:
+                from notifications import send_credits_low_email
+                tier = key["tier"] or "free"
+                plan_calls = PLANS.get(tier, PLANS["free"])["calls_included"]
+                percent = round(calls_remaining / plan_calls * 100) if plan_calls > 0 else 0
+                reset_dt = user_row["monthly_calls_reset_at"]
+                reset_date = reset_dt.strftime("%B %d") if reset_dt else "next month"
+                await asyncio.to_thread(
+                    send_credits_low_email,
+                    user_row["email"], calls_remaining, percent, tier, reset_date,
+                )
+        except Exception as _email_err:
+            logger.warning("credits_low email dispatch error: %s", _email_err)
     except Exception as _e:
         logger.error("_maybe_dispatch_credits_low error: %s", _e)
 

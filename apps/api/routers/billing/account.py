@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from core.credits import PLANS, CREDITS_PER_CALL, ROUTING_FEE, compute_calls_remaining
 from core.db import get_db
 from core.rate_limit import limiter
-from core.tier_gates import require_tier
+from core.tier_gates import require_tier, _get_redis
 from services.managed import SERVICE_DISPLAY_NAMES
 
 logger = logging.getLogger("wayforth")
@@ -958,6 +958,21 @@ async def system_health(request: Request, db=Depends(get_db)):
         "cdp_credentials": "set" if cdp_configured else "missing",
         "services_supported": x402_count,
     }
+
+    # Redis
+    redis_url = os.environ.get("REDIS_URL", "")
+    if not redis_url:
+        health["subsystems"]["redis"] = {"status": "not_configured", "mode": "memory"}
+    else:
+        try:
+            _rc = _get_redis()
+            if _rc is None:
+                health["subsystems"]["redis"] = {"status": "degraded", "mode": "fallback_memory"}
+            else:
+                await _rc.ping()
+                health["subsystems"]["redis"] = {"status": "ok", "mode": "redis"}
+        except Exception:
+            health["subsystems"]["redis"] = {"status": "degraded", "mode": "fallback_memory"}
 
     health["latency_ms"] = round((_time.time() - start) * 1000)
     return health
