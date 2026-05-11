@@ -478,6 +478,53 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     }
 
 
+@router.get("/account/usage/history")
+@limiter.limit("30/minute")
+async def account_usage_history(request: Request, db=Depends(get_db)):
+    """30-day call history grouped by day and service. All tiers."""
+    raw_key, key_hash = _account_auth_key(request)
+    key_record = await db.fetchrow(
+        "SELECT k.user_id FROM api_keys k WHERE k.key_hash = $1 AND k.active = true", key_hash
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    user_id = key_record["user_id"]
+
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+
+    rows = await db.fetch("""
+        SELECT
+            DATE(created_at AT TIME ZONE 'UTC') AS day,
+            service_id                          AS service_slug,
+            COUNT(*)                            AS call_count,
+            ABS(SUM(amount))                    AS credits_used
+        FROM credit_transactions
+        WHERE user_id = $1::uuid
+          AND type IN ('execution', 'cross_rail')
+          AND created_at >= $2
+        GROUP BY DATE(created_at AT TIME ZONE 'UTC'), service_id
+        ORDER BY day DESC, call_count DESC
+    """, user_id, thirty_days_ago)
+
+    total_calls = sum(r["call_count"] for r in rows)
+    total_credits = sum(int(r["credits_used"] or 0) for r in rows)
+
+    return {
+        "history": [
+            {
+                "date": str(r["day"]),
+                "service_slug": r["service_slug"],
+                "call_count": r["call_count"],
+                "credits_used": int(r["credits_used"] or 0),
+            }
+            for r in rows
+        ],
+        "total_calls": total_calls,
+        "total_credits": total_credits,
+        "period": "30d",
+    }
+
+
 @router.get("/account/searches")
 @limiter.limit("30/minute")
 async def account_searches(request: Request, db=Depends(get_db)):

@@ -3,7 +3,7 @@ import hashlib
 import logging
 import math
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -190,8 +190,15 @@ async def _increment_calls(pool, api_key_id: str) -> int:
         return 0
 
 
+_RETRY_DELAYS_SEC = [60, 300, 1800, 7200]  # 1m, 5m, 30m, 2h after each failed attempt
+
+
 async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
-    """Find all active webhooks for this user subscribed to `event`, sign and POST each."""
+    """Find all active webhooks for this user subscribed to `event`, sign and POST each.
+
+    Attempts are recorded in webhook_deliveries. Failures schedule retries via
+    _webhook_retry_loop at 1m, 5m, 30m, 2h intervals; dead after 5 total attempts.
+    """
     import hmac as _hmac
     import json as json_lib
     import time as _time
@@ -228,6 +235,25 @@ async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
                 f"{timestamp}.{body}".encode(),
                 hashlib.sha256,
             ).hexdigest()
+
+            # Create delivery record before attempt
+            delivery_id: str | None = None
+            try:
+                async with pool.acquire() as dconn:
+                    dr = await dconn.fetchrow(
+                        """INSERT INTO webhook_deliveries
+                           (webhook_id, user_id, event, payload, attempt, status, last_attempted_at)
+                           VALUES ($1::uuid, $2::uuid, $3, $4, 1, 'pending', NOW())
+                           RETURNING id""",
+                        str(row["id"]), user_id, event, body,
+                    )
+                    delivery_id = str(dr["id"]) if dr else None
+            except Exception as ins_err:
+                logger.warning("webhook delivery insert failed: %s", ins_err)
+
+            success = False
+            status_code: int | None = None
+            error: str | None = None
             try:
                 resp = await client.post(
                     row["webhook_url"],
@@ -239,19 +265,135 @@ async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
                         "X-Wayforth-Signature": f"sha256={sig}",
                     },
                 )
+                status_code = resp.status_code
+                success = resp.status_code < 300
                 logger.info("webhook %s → %s %d", event, row["webhook_url"], resp.status_code)
             except Exception as e:
+                error = str(e)[:200]
                 logger.warning("webhook delivery failed %s → %s: %s", event, row["webhook_url"], e)
-                continue
+
+            # Update delivery record with result
+            if delivery_id:
+                try:
+                    async with pool.acquire() as upd:
+                        if success:
+                            await upd.execute(
+                                "UPDATE webhook_deliveries SET status='delivered', "
+                                "response_status=$1 WHERE id=$2::uuid",
+                                status_code, delivery_id,
+                            )
+                            await upd.execute(
+                                "UPDATE provider_webhooks SET last_fired_at=NOW() WHERE id=$1::uuid",
+                                str(row["id"]),
+                            )
+                        else:
+                            next_retry = datetime.now(timezone.utc) + timedelta(seconds=_RETRY_DELAYS_SEC[0])
+                            await upd.execute(
+                                "UPDATE webhook_deliveries SET response_status=$1, error=$2, "
+                                "next_retry_at=$3 WHERE id=$4::uuid",
+                                status_code, error, next_retry, delivery_id,
+                            )
+                except Exception as upd_err:
+                    logger.warning("webhook delivery update failed: %s", upd_err)
+            elif success:
+                try:
+                    async with pool.acquire() as upd:
+                        await upd.execute(
+                            "UPDATE provider_webhooks SET last_fired_at=NOW() WHERE id=$1::uuid",
+                            str(row["id"]),
+                        )
+                except Exception:
+                    pass
+
+
+async def _webhook_retry_loop() -> None:
+    """Background task: retry pending webhook deliveries with exponential backoff.
+
+    Picks up deliveries where next_retry_at <= now, retries up to 5 total attempts,
+    then marks the delivery dead.
+    """
+    import hmac as _hmac
+    import time as _time
+    from main import app
+    await asyncio.sleep(30)
+    while True:
+        pool = getattr(app.state, "pool", None)
+        if pool:
             try:
-                from main import app as _app
-                async with _app.state.pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE provider_webhooks SET last_fired_at=NOW() WHERE id=$1::uuid",
-                        row["id"],
-                    )
-            except Exception:
-                pass
+                async with pool.acquire() as conn:
+                    due = await conn.fetch("""
+                        SELECT wd.id, wd.webhook_id, wd.event, wd.payload,
+                               wd.attempt, pw.webhook_url, pw.secret_token
+                        FROM webhook_deliveries wd
+                        JOIN provider_webhooks pw ON pw.id = wd.webhook_id AND pw.active = true
+                        WHERE wd.status = 'pending'
+                          AND wd.next_retry_at IS NOT NULL
+                          AND wd.next_retry_at <= NOW()
+                        LIMIT 50
+                    """)
+
+                if due:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        for row in due:
+                            ts = str(int(_time.time()))
+                            body = row["payload"]
+                            sig = _hmac.new(
+                                row["secret_token"].encode(),
+                                f"{ts}.{body}".encode(),
+                                hashlib.sha256,
+                            ).hexdigest()
+                            success = False
+                            status_code: int | None = None
+                            error: str | None = None
+                            try:
+                                resp = await client.post(
+                                    row["webhook_url"],
+                                    content=body,
+                                    headers={
+                                        "Content-Type": "application/json",
+                                        "X-Wayforth-Event": row["event"],
+                                        "X-Wayforth-Timestamp": ts,
+                                        "X-Wayforth-Signature": f"sha256={sig}",
+                                    },
+                                )
+                                status_code = resp.status_code
+                                success = resp.status_code < 300
+                            except Exception as e:
+                                error = str(e)[:200]
+
+                            new_attempt = row["attempt"] + 1
+                            async with pool.acquire() as upd:
+                                if success:
+                                    await upd.execute(
+                                        "UPDATE webhook_deliveries SET status='delivered', "
+                                        "last_attempted_at=NOW(), attempt=$1, response_status=$2 "
+                                        "WHERE id=$3::uuid",
+                                        new_attempt, status_code, str(row["id"]),
+                                    )
+                                    await upd.execute(
+                                        "UPDATE provider_webhooks SET last_fired_at=NOW() "
+                                        "WHERE id=$1::uuid",
+                                        str(row["webhook_id"]),
+                                    )
+                                elif new_attempt > 5:
+                                    await upd.execute(
+                                        "UPDATE webhook_deliveries SET status='dead', "
+                                        "last_attempted_at=NOW(), attempt=$1, "
+                                        "response_status=$2, error=$3 WHERE id=$4::uuid",
+                                        new_attempt, status_code, error, str(row["id"]),
+                                    )
+                                else:
+                                    delay = _RETRY_DELAYS_SEC[min(new_attempt - 2, len(_RETRY_DELAYS_SEC) - 1)]
+                                    next_retry = datetime.now(timezone.utc) + timedelta(seconds=delay)
+                                    await upd.execute(
+                                        "UPDATE webhook_deliveries SET attempt=$1, "
+                                        "last_attempted_at=NOW(), next_retry_at=$2, "
+                                        "response_status=$3, error=$4 WHERE id=$5::uuid",
+                                        new_attempt, next_retry, status_code, error, str(row["id"]),
+                                    )
+            except Exception as e:
+                logger.warning("webhook retry loop error: %s", e)
+        await asyncio.sleep(60)
 
 
 async def _maybe_dispatch_credits_low(pool, user_id: str, api_key_str: str, balance_after: int):
