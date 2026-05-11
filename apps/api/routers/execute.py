@@ -19,6 +19,7 @@ from core.credits import (
     _increment_calls,
     _maybe_dispatch_credits_low,
     check_and_deduct_credits,
+    compute_calls_remaining,
     ROUTING_FEE,
 )
 from core.db import get_db
@@ -1009,6 +1010,126 @@ async def execute_service(request: Request, db=Depends(get_db)):
         "execution_ms": execution_ms,
         "managed_services_available": len(SERVICE_CONFIGS),
         "priority": _tier in ("pro", "growth"),
+    }
+
+
+# ── /execute/batch — parallel multi-service execution ────────────────────────
+
+async def _execute_one(call: dict, pool, user_id: str, api_key_id: str) -> dict:
+    """Execute a single managed service call; used by /execute/batch via asyncio.gather."""
+    slug = (call.get("slug") or "").strip().lower()
+    params = call.get("params") or {}
+    config = SERVICE_CONFIGS[slug]
+    svc_key = os.environ.get(config["key_var"], "")
+
+    if slug == "stability":
+        credit_cost = 100 if params.get("quality") == "ultra" else 45
+    else:
+        credit_cost = config["credits"]
+
+    t0 = _time_mod.time()
+
+    if not svc_key:
+        return {"slug": slug, "status": "error",
+                "error": f"'{slug}' is not configured on this server.",
+                "result": None, "execution_ms": 0}
+
+    async with pool.acquire() as call_db:
+        success, balance_after = await check_and_deduct_credits(
+            call_db, user_id, credit_cost, "/execute/batch",
+            service_id=slug, tx_type="execution", api_key_id=api_key_id,
+        )
+
+    if not success:
+        return {"slug": slug, "status": "error",
+                "error": "insufficient_credits",
+                "result": None, "execution_ms": 0}
+
+    result = None
+    error_msg = None
+    adapter = ADAPTERS[slug]
+    timeout = 35.0 if slug == "assemblyai" else 10.0
+    try:
+        result = await asyncio.wait_for(adapter(params, svc_key), timeout=timeout)
+    except asyncio.TimeoutError:
+        error_msg = "Service timeout"
+    except Exception as e:
+        error_msg = str(e)[:300]
+
+    execution_ms = round((_time_mod.time() - t0) * 1000)
+
+    if error_msg:
+        async with pool.acquire() as refund_db:
+            async with refund_db.transaction():
+                refund_row = await refund_db.fetchrow(
+                    "UPDATE user_credits SET credits_balance = credits_balance + $1, "
+                    "updated_at = NOW() WHERE user_id = $2::uuid RETURNING credits_balance",
+                    credit_cost, user_id,
+                )
+                refunded_bal = refund_row["credits_balance"] if refund_row else balance_after
+                await refund_db.execute("""
+                    INSERT INTO credit_transactions
+                    (user_id, amount, balance_after, type, description, api_endpoint, service_id)
+                    VALUES ($1::uuid, $2, $3, 'execution_refund', $4, '/execute/batch', $5)
+                """, user_id, credit_cost, refunded_bal,
+                    f"Refund: {slug} failed — {error_msg[:100]}", slug)
+        return {"slug": slug, "status": "error", "error": error_msg,
+                "result": None, "execution_ms": execution_ms}
+
+    return {"slug": slug, "status": "ok", "result": result, "execution_ms": execution_ms}
+
+
+@router.post("/execute/batch")
+@limiter.limit("10/minute")
+async def execute_batch(request: Request, db=Depends(get_db)):
+    """Execute up to 5 managed service calls in parallel. Each call deducts credits independently."""
+    from main import app
+
+    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key_header:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
+
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
+    await check_rate_limit(str(_api_key_id), _tier)
+
+    body = await request.json()
+    calls = body.get("calls", [])
+
+    if not calls:
+        raise HTTPException(status_code=400, detail={"error": "calls array is required and must not be empty"})
+
+    if len(calls) > 5:
+        raise HTTPException(status_code=422, detail={
+            "error": "too_many_calls",
+            "message": "Maximum 5 calls per batch request.",
+            "received": len(calls),
+            "limit": 5,
+        })
+
+    for call in calls:
+        slug = (call.get("slug") or "").strip().lower()
+        if not slug or slug not in SERVICE_CONFIGS:
+            raise HTTPException(status_code=400, detail={
+                "error": "unknown_service",
+                "slug": slug or "(empty)",
+                "message": f"Unknown managed service slug '{slug}'. "
+                           "Use GET /services to browse available services.",
+            })
+
+    pool = app.state.pool
+    batch_start = _time_mod.time()
+
+    results = await asyncio.gather(
+        *[_execute_one(c, pool, str(user_id), str(_api_key_id)) for c in calls]
+    )
+
+    total_ms = round((_time_mod.time() - batch_start) * 1000)
+    calls_remaining = await compute_calls_remaining(db, str(_api_key_id))
+
+    return {
+        "results": list(results),
+        "total_execution_ms": total_ms,
+        "calls_remaining": calls_remaining,
     }
 
 
