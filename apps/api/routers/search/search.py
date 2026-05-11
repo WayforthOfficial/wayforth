@@ -125,9 +125,9 @@ async def search_services(
     if not q:
         raise HTTPException(status_code=400, detail={"error": "query_required"})
     if auth.get("authenticated"):
-        check_rate_limit(auth["key_id"], auth["tier"])
+        await check_rate_limit(auth["key_id"], auth["tier"])
     else:
-        check_anon_rate_limit(auth["ip"])
+        await check_anon_rate_limit(auth["ip"])
     if auth.get("authenticated") and auth.get("user_id"):
         if auth.get("tier") == "free" and auth.get("user_id"):
             from datetime import datetime, timezone

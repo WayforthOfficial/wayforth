@@ -78,8 +78,22 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
             "message": "latency_max must be between 1 and 60000 ms.",
         })
 
+    effective_limit = body.limit if body.limit is not None else 5
+    if not (1 <= effective_limit <= 50):
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_limit",
+            "message": "limit must be between 1 and 50.",
+        })
+
+    effective_offset = body.offset if body.offset is not None else 0
+    if effective_offset < 0:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_offset",
+            "message": "offset must be >= 0.",
+        })
+
     require_tier(auth.get("tier") or "free", "wayforthql")
-    check_rate_limit(auth["key_id"], auth["tier"])
+    await check_rate_limit(auth["key_id"], auth["tier"])
     if auth.get("authenticated") and auth.get("user_id"):
         success, balance = await check_and_deduct_credits(
             db, auth["user_id"], CREDIT_COSTS["query"], "/query"
@@ -142,11 +156,14 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
     # card and usdc are supported for all services via Wayforth routing layers
 
     where = " AND ".join(conditions)
-    limit = min(body.limit or 5, 50)
-    offset = max(body.offset or 0, 0)
+    limit = effective_limit
+    offset = effective_offset
 
     fetch_n = (offset + limit) * 4
     try:
+        total_results = await db.fetchval(
+            f"SELECT COUNT(*) FROM services WHERE {where}", *params
+        ) or 0
         rows = await db.fetch(
             f"""
             SELECT id, name, slug, description, endpoint_url, category,
@@ -164,7 +181,10 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     if not rows:
-        return {"query": body.query, "results": [], "total": 0, "protocol": "WayforthQL/2.0"}
+        return {
+            "query": body.query, "results": [], "total": 0,
+            "total_results": 0, "offset": offset, "protocol": "WayforthQL/2.0",
+        }
 
     candidates = [dict(r) for r in rows]
     try:
@@ -262,6 +282,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
         "query": _html.escape(body.query),
         "results": results,
         "total": len(results),
+        "total_results": total_results,
         "offset": offset,
         "protocol": "WayforthQL/2.0",
         "filters_applied": {
