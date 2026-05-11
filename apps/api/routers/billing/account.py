@@ -962,17 +962,17 @@ async def system_health(request: Request, db=Depends(get_db)):
     # Redis
     redis_url = os.environ.get("REDIS_URL", "")
     if not redis_url:
-        health["subsystems"]["redis"] = {"status": "not_configured", "mode": "memory"}
+        health["subsystems"]["redis"] = {"status": "not_configured", "limiter": "memory"}
     else:
         try:
             _rc = _get_redis()
             if _rc is None:
-                health["subsystems"]["redis"] = {"status": "degraded", "mode": "fallback_memory"}
+                health["subsystems"]["redis"] = {"status": "degraded", "limiter": "fallback_memory"}
             else:
                 await _rc.ping()
-                health["subsystems"]["redis"] = {"status": "ok", "mode": "redis"}
+                health["subsystems"]["redis"] = {"status": "ok", "limiter": "redis"}
         except Exception:
-            health["subsystems"]["redis"] = {"status": "degraded", "mode": "fallback_memory"}
+            health["subsystems"]["redis"] = {"status": "degraded", "limiter": "fallback_memory"}
 
     health["latency_ms"] = round((_time.time() - start) * 1000)
     return health
