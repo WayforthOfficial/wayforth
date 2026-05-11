@@ -127,6 +127,15 @@ def missing_param_hint(missing: list[str]) -> str:
     return " ".join(_PARAM_HINTS.get(p, f"Add '{p}' to your input.") for p in missing)
 
 
+# Keywords that unambiguously signal LLM inference intent.
+# When ANY of these appear in the intent string, "inference" is returned
+# immediately — before scanning other categories — so weak TTS/audio
+# signals like "say" can never override an explicit LLM request.
+_STRONG_INFERENCE_SIGNALS: frozenset[str] = frozenset([
+    "inference", "fast inference", "llm", "groq", "together",
+    "together ai", "generate text", "language model", "prompt",
+])
+
 INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
     # Ordered from most-specific to most-general so detect_category_hint
     # returns the tightest match first.
@@ -137,9 +146,9 @@ INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
         "into english", "into spanish", "into french",
     ],
     "inference": [
-        "inference", "summarize", "summarise", "explain", "write", "generate text",
-        "rewrite", "paraphrase", "chat", "llm", "gpt", "ask",
-        "complete", "draft",
+        "inference", "fast inference", "summarize", "summarise", "explain",
+        "write", "generate text", "rewrite", "paraphrase", "chat",
+        "llm", "gpt", "ask", "complete", "draft", "language model",
     ],
     "research": [
         "research", "perplexity", "deep dive", "in-depth",
@@ -230,6 +239,8 @@ INTENT_CATEGORY_MAP: dict[str, list[str]] = {
 def detect_category_hint(intent: str) -> str | None:
     """Return a category name if intent strongly signals one, else None."""
     intent_lower = intent.lower()
+    if any(sig in intent_lower for sig in _STRONG_INFERENCE_SIGNALS):
+        return "inference"
     for category, keywords in INTENT_CATEGORY_HINTS.items():
         if any(kw in intent_lower for kw in keywords):
             return category
