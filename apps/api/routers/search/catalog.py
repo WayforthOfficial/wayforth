@@ -4,7 +4,7 @@ import hashlib
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from core.db import get_db
 from core.rate_limit import limiter
@@ -214,6 +214,69 @@ async def service_count(request: Request, db=Depends(get_db)):
             "total": f"{row['real_apis']:,}+",
             "tier2": f"{row['tier2']}+",
         },
+    }
+
+
+@router.get("/sitemap.xml", include_in_schema=False)
+async def sitemap_xml(request: Request):
+    """Public sitemap for wayforth.io — no auth required."""
+    content = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        "  <url><loc>https://wayforth.io/</loc></url>\n"
+        "  <url><loc>https://wayforth.io/pricing</loc></url>\n"
+        "  <url><loc>https://wayforth.io/docs</loc></url>\n"
+        "  <url><loc>https://wayforth.io/changelog</loc></url>\n"
+        "  <url><loc>https://wayforth.io/token</loc></url>\n"
+        "  <url><loc>https://wayforth.io/whitepaper</loc></url>\n"
+        "</urlset>"
+    )
+    return Response(content=content, media_type="application/xml")
+
+
+@router.get("/services/{slug}/health")
+@limiter.limit("30/minute")
+async def service_slug_health(request: Request, slug: str, db=Depends(get_db)):
+    """Public — live health snapshot for a single managed service slug."""
+    row = await db.fetchrow(
+        "SELECT avg_response_ms, error_rate, last_probe_at, probe_count FROM service_health WHERE slug = $1",
+        slug,
+    )
+    svc = await db.fetchrow(
+        "SELECT name, consecutive_failures, last_tested_at FROM services WHERE slug = $1",
+        slug,
+    )
+    if not row and not svc:
+        raise HTTPException(status_code=404, detail={"error": "service_not_found", "slug": slug})
+
+    error_rate = float(row["error_rate"]) if row and row["error_rate"] is not None else None
+    avg_ms = float(row["avg_response_ms"]) if row and row["avg_response_ms"] is not None else None
+
+    if error_rate is not None and error_rate > 0.3:
+        health_status = "degraded"
+    elif (svc["consecutive_failures"] or 0) >= 3:
+        health_status = "outage"
+    else:
+        health_status = "ok"
+
+    wri_penalty = 0
+    if error_rate is not None and error_rate > 0.3:
+        wri_penalty -= 10
+    if avg_ms is not None and avg_ms > 5000:
+        wri_penalty -= 5
+
+    return {
+        "slug": slug,
+        "name": svc["name"] if svc else slug,
+        "status": health_status,
+        "avg_response_ms": round(avg_ms) if avg_ms is not None else None,
+        "error_rate": round(error_rate, 3) if error_rate is not None else None,
+        "probe_count": row["probe_count"] if row else 0,
+        "last_probe_at": row["last_probe_at"].isoformat() if row and row["last_probe_at"] else (
+            svc["last_tested_at"].isoformat() if svc and svc["last_tested_at"] else None
+        ),
+        "consecutive_failures": svc["consecutive_failures"] if svc else 0,
+        "wri_penalty": wri_penalty,
     }
 
 
