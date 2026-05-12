@@ -658,3 +658,312 @@ async def admin_get_user_service_keys(request: Request, user_id: str, db=Depends
         ORDER BY created_at DESC
     """, user_id)
     return {"service_keys": [dict(k) for k in keys], "total": len(keys)}
+
+
+# ── Provider Management ────────────────────────────────────────────────────────
+
+@router.get("/admin-api/providers")
+async def admin_providers_list(
+    request: Request,
+    q: str = "",
+    sort: str = "newest",
+    limit: int = 50,
+    offset: int = 0,
+    db=Depends(get_db),
+):
+    await get_admin_session(request, db)
+
+    where = "WHERE 1=1"
+    params: list = []
+    idx = 1
+
+    if q:
+        where += f" AND p.email ILIKE ${idx}"
+        params.append(f"%{q}%")
+        idx += 1
+
+    order = {
+        "newest":        "p.created_at DESC",
+        "most_services": "service_count DESC",
+        "most_calls":    "total_calls DESC",
+    }.get(sort, "p.created_at DESC")
+
+    rows = await db.fetch(f"""
+        SELECT
+            p.id, p.email, p.company_name, p.created_at,
+            p.tier, p.verified,
+            COALESCE(p.suspended, false) AS suspended,
+            COUNT(DISTINCT ps.id)        AS service_count,
+            COALESCE(calls.total_calls, 0) AS total_calls
+        FROM providers p
+        LEFT JOIN provider_services ps ON ps.provider_id = p.id
+        LEFT JOIN (
+            SELECT ps2.provider_id, COUNT(ct.*) AS total_calls
+            FROM provider_services ps2
+            LEFT JOIN credit_transactions ct
+                ON ct.service_id = ps2.service_slug AND ct.type = 'execution'
+            GROUP BY ps2.provider_id
+        ) calls ON calls.provider_id = p.id
+        {where}
+        GROUP BY p.id, p.email, p.company_name, p.created_at,
+                 p.tier, p.verified, p.suspended, calls.total_calls
+        ORDER BY {order}
+        LIMIT ${idx} OFFSET ${idx + 1}
+    """, *params, limit, offset)
+
+    total = await db.fetchval(
+        f"SELECT COUNT(*) FROM providers p {where}", *params
+    )
+
+    return {
+        "providers": [dict(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.get("/admin-api/providers/{provider_id}")
+async def admin_provider_detail(
+    request: Request, provider_id: str, db=Depends(get_db)
+):
+    await get_admin_session(request, db)
+
+    provider = await db.fetchrow("""
+        SELECT id, email, company_name, created_at, tier, verified,
+               COALESCE(suspended, false) AS suspended, last_login_at
+        FROM providers WHERE id = $1::uuid
+    """, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+
+    services = await db.fetch("""
+        SELECT
+            ps.service_slug AS slug,
+            ps.service_name AS name,
+            ps.verified,
+            ps.created_at AS registered_at,
+            COALESCE(s.category, '') AS category,
+            COALESCE(s.coverage_tier, 1) AS tier,
+            COALESCE(s.pricing_usdc, 0) AS price,
+            COALESCE(calls.cnt, 0) AS calls
+        FROM provider_services ps
+        LEFT JOIN services s ON s.slug = ps.service_slug
+        LEFT JOIN (
+            SELECT service_id, COUNT(*) AS cnt
+            FROM credit_transactions
+            WHERE type = 'execution'
+            GROUP BY service_id
+        ) calls ON calls.service_id = ps.service_slug
+        WHERE ps.provider_id = $1::uuid
+        ORDER BY calls DESC
+    """, provider_id)
+
+    return {
+        "provider": dict(provider),
+        "services": [dict(s) for s in services],
+    }
+
+
+@router.post("/admin-api/providers/{provider_id}/suspend")
+async def admin_suspend_provider(
+    request: Request, provider_id: str, db=Depends(get_db)
+):
+    session = await get_admin_session(request, db)
+    result = await db.execute(
+        "UPDATE providers SET suspended = true WHERE id = $1::uuid",
+        provider_id,
+    )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Provider not found")
+    return {"status": "suspended", "changed_by": session["email"]}
+
+
+@router.post("/admin-api/providers/{provider_id}/reinstate")
+async def admin_reinstate_provider(
+    request: Request, provider_id: str, db=Depends(get_db)
+):
+    session = await get_admin_session(request, db)
+    result = await db.execute(
+        "UPDATE providers SET suspended = false WHERE id = $1::uuid",
+        provider_id,
+    )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Provider not found")
+    return {"status": "reinstated", "changed_by": session["email"]}
+
+
+# ── Catalog / Services Management ─────────────────────────────────────────────
+
+@router.get("/admin-api/catalog/services")
+async def admin_catalog_services_list(
+    request: Request,
+    q: str = "",
+    category: str = "",
+    tier: str = "",
+    verified: str = "",
+    x402: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    db=Depends(get_db),
+):
+    await get_admin_session(request, db)
+
+    where_parts = ["1=1"]
+    params: list = []
+    idx = 1
+
+    if q:
+        where_parts.append(f"(s.slug ILIKE ${idx} OR s.name ILIKE ${idx})")
+        params.append(f"%{q}%")
+        idx += 1
+    if category:
+        where_parts.append(f"s.category = ${idx}")
+        params.append(category)
+        idx += 1
+    if tier:
+        try:
+            where_parts.append(f"s.coverage_tier = ${idx}")
+            params.append(int(tier))
+            idx += 1
+        except ValueError:
+            pass
+    if verified == "true":
+        where_parts.append("s.coverage_tier >= 2")
+    elif verified == "false":
+        where_parts.append("s.coverage_tier < 2")
+    if x402 == "true":
+        where_parts.append("s.x402_supported = true")
+    elif x402 == "false":
+        where_parts.append("(s.x402_supported IS NULL OR s.x402_supported = false)")
+
+    where = "WHERE " + " AND ".join(where_parts)
+
+    rows = await db.fetch(f"""
+        SELECT
+            s.id, s.slug, s.name, s.description, s.category,
+            s.coverage_tier AS tier, s.x402_supported,
+            COALESCE(s.pricing_usdc, 0) AS price,
+            s.wri_score, s.created_at,
+            COALESCE(calls.cnt, 0) AS calls,
+            COALESCE(prov.provider_email, '') AS provider
+        FROM services s
+        LEFT JOIN (
+            SELECT service_id, COUNT(*) AS cnt
+            FROM credit_transactions WHERE type = 'execution'
+            GROUP BY service_id
+        ) calls ON calls.service_id = s.slug
+        LEFT JOIN (
+            SELECT ps.service_slug, p.email AS provider_email
+            FROM provider_services ps
+            JOIN providers p ON p.id = ps.provider_id
+        ) prov ON prov.service_slug = s.slug
+        {where}
+        ORDER BY calls DESC, s.created_at DESC
+        LIMIT ${idx} OFFSET ${idx + 1}
+    """, *params, limit, offset)
+
+    total = await db.fetchval(
+        f"SELECT COUNT(*) FROM services s {where}", *params
+    )
+
+    categories = await db.fetch(
+        "SELECT DISTINCT category FROM services WHERE category IS NOT NULL ORDER BY category"
+    )
+
+    return {
+        "services": [dict(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "categories": [r["category"] for r in categories],
+    }
+
+
+@router.post("/admin-api/catalog/services/{slug}/verify")
+async def admin_catalog_verify_service(
+    request: Request, slug: str, db=Depends(get_db)
+):
+    session = await get_admin_session(request, db)
+    result = await db.execute(
+        "UPDATE services SET coverage_tier = 2, consecutive_failures = 0 WHERE slug = $1",
+        slug,
+    )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Service not found")
+    return {"status": "verified", "slug": slug, "changed_by": session["email"]}
+
+
+@router.post("/admin-api/catalog/services/{slug}/demote")
+async def admin_catalog_demote_service(
+    request: Request, slug: str, db=Depends(get_db)
+):
+    session = await get_admin_session(request, db)
+    result = await db.execute(
+        "UPDATE services SET coverage_tier = 1 WHERE slug = $1", slug
+    )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Service not found")
+    return {"status": "demoted", "slug": slug, "changed_by": session["email"]}
+
+
+@router.patch("/admin-api/catalog/services/{slug}")
+async def admin_catalog_edit_service(
+    request: Request, slug: str, db=Depends(get_db)
+):
+    await get_admin_session(request, db)
+    body = await request.json()
+
+    allowed = {"name", "description", "category", "coverage_tier", "pricing_usdc", "x402_supported"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    set_parts = []
+    params: list = []
+    for i, (col, val) in enumerate(updates.items(), start=1):
+        set_parts.append(f"{col} = ${i}")
+        params.append(val)
+    params.append(slug)
+
+    result = await db.execute(
+        f"UPDATE services SET {', '.join(set_parts)}, updated_at = NOW() WHERE slug = ${len(params)}",
+        *params,
+    )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Service not found")
+    return {"status": "updated", "slug": slug}
+
+
+@router.delete("/admin-api/catalog/services/{slug}")
+async def admin_catalog_delete_service(
+    request: Request, slug: str, db=Depends(get_db)
+):
+    session = await get_admin_session(request, db)
+    result = await db.execute("DELETE FROM services WHERE slug = $1", slug)
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Service not found")
+    return {"status": "deleted", "slug": slug, "changed_by": session["email"]}
+
+
+@router.post("/admin-api/catalog/services/bulk")
+async def admin_catalog_bulk_services(
+    request: Request, db=Depends(get_db)
+):
+    session = await get_admin_session(request, db)
+    body = await request.json()
+    slugs = body.get("slugs", [])
+    action = body.get("action", "")
+
+    if not slugs or action not in ("verify", "delete"):
+        raise HTTPException(status_code=400, detail="slugs and action ('verify'|'delete') required")
+
+    if action == "verify":
+        await db.execute(
+            "UPDATE services SET coverage_tier = 2, consecutive_failures = 0 WHERE slug = ANY($1)",
+            slugs,
+        )
+    elif action == "delete":
+        await db.execute("DELETE FROM services WHERE slug = ANY($1)", slugs)
+
+    return {"status": action + "d", "count": len(slugs), "changed_by": session["email"]}

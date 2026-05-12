@@ -541,6 +541,9 @@ async def lifespan(app: FastAPI):
                     PRIMARY KEY (org_id, user_id)
                 )
             """)
+            await _mconn.execute(
+                "ALTER TABLE providers ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT FALSE"
+            )
     except Exception as e:
         import traceback
         print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
