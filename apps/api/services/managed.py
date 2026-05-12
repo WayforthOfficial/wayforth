@@ -118,7 +118,7 @@ async def stream_together(params: dict, api_key: str):
     messages = params.get("messages", [])
     if not messages:
         raise Exception("params.messages is required")
-    model = params.get("model", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
+    model = params.get("model", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
     max_tokens = params.get("max_tokens", 1024)
     async with httpx.AsyncClient(timeout=30.0) as client:
         async with client.stream(
@@ -526,7 +526,7 @@ async def call_together(params: dict, api_key: str) -> dict:
     messages = params.get("messages", [])
     if not messages:
         raise Exception("params.messages is required")
-    model = params.get("model", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
+    model = params.get("model", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
     max_tokens = params.get("max_tokens", 1024)
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.post(
