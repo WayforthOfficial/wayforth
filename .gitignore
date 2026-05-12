@@ -42,7 +42,6 @@ scripts/normalize_queries.py
 apps/crawler/seed_*.py
 apps/crawler/probe_*.py
 apps/labs/seed_*.py
-apps/api/static/admin.html
 hn_post.md
 
 # Proprietary ranking engine (lives in wayforth-rank private repo)
