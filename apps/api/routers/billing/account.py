@@ -1,9 +1,12 @@
-"""routers/billing/account.py — /account/* endpoints, /dashboard, /billing/balance, /billing/settings, /billing/permissions, /system/health."""
+"""routers/billing/account.py — /account/* endpoints, /dashboard, /billing/balance, /billing/settings, /billing/permissions, /system/health, /billing/invoice."""
 
 import hashlib
 import logging
 import math
 import os
+import random
+import string
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -240,7 +243,8 @@ async def get_balance(request: Request, db=Depends(get_db)):
 
     key_record = await db.fetchrow("""
         SELECT k.id, k.user_id, k.tier, k.payment_rail,
-               k.quota_reset_at, k.subscription_expires_at
+               k.quota_reset_at, k.subscription_expires_at,
+               k.monthly_calls_count, k.monthly_calls_reset_at
         FROM api_keys k
         WHERE k.key_hash = $1 AND k.active = true
     """, hashlib.sha256(api_key.encode()).hexdigest())
@@ -259,15 +263,41 @@ async def get_balance(request: Request, db=Depends(get_db)):
 
     plan_def = PLANS.get(tier, PLANS["free"])
     resets_at = key_record.get("subscription_expires_at") or key_record.get("quota_reset_at")
+    monthly_reset_at = key_record.get("monthly_calls_reset_at")
     payment_rail = key_record.get("payment_rail") or "card"
 
     base_calls = plan_def["calls_included"]
     multiplier = PAYMENT_MULTIPLIERS.get(payment_method, 1.00)
     bonus_calls = math.floor(base_calls * (multiplier - 1.0))
+    calls_remaining = await compute_calls_remaining(db, str(key_record["id"]))
+
+    # Forecast — uses month-to-date average; returns null if < 3 days of history
+    forecast = None
+    monthly_count = key_record.get("monthly_calls_count") or 0
+    if monthly_reset_at:
+        now_utc = datetime.now(timezone.utc)
+        period_start = monthly_reset_at.replace(tzinfo=timezone.utc) - timedelta(days=30)
+        days_elapsed = max(0, (now_utc - period_start).days)
+        days_until_reset = max(0, (monthly_reset_at.replace(tzinfo=timezone.utc) - now_utc).days)
+        if days_elapsed >= 3 and monthly_count > 0:
+            daily_avg = round(monthly_count / days_elapsed, 2)
+            if daily_avg > 0:
+                days_remaining = int(calls_remaining / daily_avg)
+                will_exhaust = days_remaining < days_until_reset
+            else:
+                days_remaining = "unlimited"
+                will_exhaust = False
+            projected = max(0, calls_remaining - int((daily_avg or 0) * days_until_reset))
+            forecast = {
+                "daily_avg_calls": daily_avg,
+                "days_remaining_at_current_rate": days_remaining,
+                "projected_reset_balance": projected,
+                "will_exhaust_before_reset": will_exhaust,
+            }
 
     return {
         "plan": tier,
-        "calls_remaining": await compute_calls_remaining(db, str(key_record["id"])),
+        "calls_remaining": calls_remaining,
         "calls_included": base_calls + bonus_calls,
         "base_calls": base_calls,
         "bonus_calls": bonus_calls,
@@ -275,6 +305,7 @@ async def get_balance(request: Request, db=Depends(get_db)):
         "payment_multiplier": multiplier,
         "resets_at": resets_at.isoformat() if resets_at else None,
         "payment_rail": payment_rail,
+        "forecast": forecast,
     }
 
 
@@ -986,3 +1017,75 @@ async def system_health(request: Request, db=Depends(get_db)):
 
     health["latency_ms"] = round((_time.time() - start) * 1000)
     return health
+
+
+# ── Feature 6: Invoice generation ────────────────────────────────────────────
+
+_MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+@router.get("/billing/invoice/{year}/{month}")
+@limiter.limit("10/minute")
+async def get_invoice(year: int, month: int, request: Request, db=Depends(get_db)):
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+    if not (1 <= month <= 12):
+        raise HTTPException(status_code=400, detail="invalid_month")
+
+    key_record = await db.fetchrow("""
+        SELECT k.id, k.user_id, k.tier, u.email
+        FROM api_keys k JOIN users u ON u.id = k.user_id
+        WHERE k.key_hash = $1 AND k.active = true
+    """, hashlib.sha256(api_key.encode()).hexdigest())
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    period_start = datetime(year, month, 1, tzinfo=timezone.utc)
+    if month == 12:
+        period_end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        period_end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+
+    # Check for credit transactions in the period (proxy for activity)
+    row = await db.fetchrow("""
+        SELECT COUNT(*) AS tx_count, ABS(SUM(amount)) AS total_spent
+        FROM credit_transactions
+        WHERE user_id = $1 AND type IN ('deduct', 'call')
+          AND created_at >= $2 AND created_at < $3
+    """, key_record["user_id"], period_start, period_end)
+
+    if not row or not row["tx_count"]:
+        raise HTTPException(status_code=404, detail="no_activity_in_period")
+
+    tier = key_record["tier"] or "free"
+    plan_def = PLANS.get(tier, PLANS["free"])
+    credits_row = await db.fetchrow(
+        "SELECT payment_method FROM user_credits WHERE user_id = $1", key_record["user_id"]
+    )
+    payment_method = (credits_row["payment_method"] if credits_row else None) or "card"
+    month_name = _MONTH_NAMES[month - 1]
+    user_prefix = str(key_record["user_id"])[:6].upper()
+    calls_used = int((row["total_spent"] or 0) // max(1, CREDITS_PER_CALL))
+
+    return {
+        "invoice_id": f"WF-{year}-{month:02d}-{user_prefix}",
+        "period": f"{month_name} {year}",
+        "issued_to": key_record["email"],
+        "plan": tier.capitalize(),
+        "calls_included": plan_def["calls_included"],
+        "calls_used": calls_used,
+        "amount_usd": plan_def.get("price_usd", 0),
+        "payment_method": payment_method,
+        "status": "paid" if plan_def.get("price_usd", 0) > 0 else "unpaid",
+        "line_items": [
+            {
+                "description": f"{tier.capitalize()} plan — {month_name} {year}",
+                "amount": plan_def.get("price_usd", 0),
+            }
+        ],
+        "issued_at": datetime.now(timezone.utc).isoformat(),
+    }
