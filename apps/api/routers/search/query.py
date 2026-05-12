@@ -428,7 +428,7 @@ async def tier3_status(request: Request, email: str):
     }
 
 
-@router.get("/tier3/admin")
+@router.get("/tier3/admin", include_in_schema=False)
 @limiter.limit("10/minute")
 async def tier3_admin(request: Request, key: str = ""):
     """Admin view of Tier 3 applications filtered by KYB status."""
