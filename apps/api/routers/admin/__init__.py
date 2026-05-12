@@ -38,9 +38,11 @@ async def admin_stats(request: Request, key: str = ""):
                     WHERE email LIKE '%@wayforth.test' OR email LIKE 'probe-%'
                 )
             """
-            total_accounts = await conn.fetchval(
-                f"SELECT COUNT(*) FROM api_keys WHERE active=true {_probe_filter}"
-            ) or 0
+            total_accounts = await conn.fetchval("""
+                SELECT COUNT(*) FROM users
+                WHERE email NOT LIKE '%@wayforth.test'
+                  AND email NOT LIKE 'probe-%'
+            """) or 0
             accounts_with_searches = await conn.fetchval(
                 f"SELECT COUNT(DISTINCT user_id) FROM credit_transactions WHERE api_endpoint='/search' {_probe_user_ids}"
             ) or 0
@@ -112,12 +114,12 @@ async def admin_stats(request: Request, key: str = ""):
             ) or 0
 
             # --- catalog ---
-            total_services = await conn.fetchval("SELECT COUNT(*) FROM services WHERE consecutive_failures < 3") or 0
+            total_services = await conn.fetchval("SELECT COUNT(*) FROM services") or 0
             tier2_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3"
+                "SELECT COUNT(*) FROM services WHERE coverage_tier >= 2"
             ) or 0
             x402_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM services WHERE x402_supported=true AND consecutive_failures < 3"
+                "SELECT COUNT(*) FROM services WHERE x402_supported=true"
             ) or 0
 
     except Exception as e:
