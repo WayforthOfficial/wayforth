@@ -1269,7 +1269,8 @@ async def test_T175_add_favorite_duplicate_returns_422(c):
     """POST /account/favorites for an already-saved slug returns 422 already_favorited."""
     slug = "wf-test-t175"
     await c.delete(f"/account/favorites/{slug}", headers=_uh())  # pre-clean
-    await c.post("/account/favorites", json={"slug": slug}, headers=_uh())
+    first = rec(await c.post("/account/favorites", json={"slug": slug}, headers=_uh()))
+    assert first.status_code == 201, f"T175 setup: first add must be 201, got {first.status_code}: {first.text[:200]}"
     r = rec(await c.post("/account/favorites", json={"slug": slug}, headers=_uh()))
     assert r.status_code == 422, f"duplicate favorite must be 422, got {r.status_code}: {r.text[:200]}"
     await c.delete(f"/account/favorites/{slug}", headers=_uh())
