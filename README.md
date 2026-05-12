@@ -5,7 +5,7 @@
 
 **v0.6.1 — Intelligence** · Search engine and payment rail for AI agents.
 
-3,268+ verified API endpoints across 19 categories. Pay via card or crypto. One MCP install.
+3,000+ verified API endpoints across 19 categories. Pay via card or crypto. One MCP install.
 
 ```bash
 uvx wayforth-mcp
@@ -39,9 +39,9 @@ POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 
 ## Live Now
 
-- **3,268+ verified API endpoints** across 19 categories
-- **254+ Tier 2 verified** — probed and confirmed reachable (grows as probe cycle runs)
-- **293 x402-native endpoints** — pay-per-call via HTTP 402 protocol
+- **3,000+ verified API endpoints** across 19 categories
+- **800+ Tier 2 verified endpoints** — probed and confirmed reachable
+- **250+ x402-native services** — pay-per-call via HTTP 402 protocol
 - **13 managed services** — Groq, Together AI, DeepL, Brave Search, OpenWeatherMap, NewsAPI, Serper, Tavily, Jina AI, Alpha Vantage, AssemblyAI, Stability AI, Resend
 - **WayforthQL v1.1** — filter by latency, region, payment rail, price, tier, and protocol with pagination
 - **WayforthRank** — payment-signal weighted service scoring
