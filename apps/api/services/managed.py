@@ -430,10 +430,11 @@ async def call_alphavantage(params: dict, api_key: str) -> dict:
     _httpx_log.setLevel(logging.WARNING)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
+            # GLOBAL_QUOTE: no daily call-count cap on free tier (vs TIME_SERIES_DAILY's 25/day limit)
             r = await client.get(
                 "https://www.alphavantage.co/query",
                 params={
-                    "function": "TIME_SERIES_DAILY",
+                    "function": "GLOBAL_QUOTE",
                     "symbol": symbol,
                     "apikey": api_key,
                 },
@@ -446,22 +447,21 @@ async def call_alphavantage(params: dict, api_key: str) -> dict:
     if "Error Message" in data:
         raise Exception(f"Alpha Vantage: {data['Error Message'][:200]}")
     if "Note" in data or "Information" in data:
-        raise Exception("Alpha Vantage: rate limit reached — free tier allows 25 requests/day")
-    ts_key = "Time Series (Daily)"
-    if ts_key not in data:
+        raise Exception("Alpha Vantage: rate limit reached — try again shortly")
+    quote = data.get("Global Quote", {})
+    if not quote or not quote.get("05. price"):
         raise Exception(f"Alpha Vantage: unexpected response — {list(data.keys())}")
-    latest_ts = sorted(data[ts_key].keys())[-1]
-    bar = data[ts_key][latest_ts]
-    meta = data.get("Meta Data", {})
     return {
-        "symbol": symbol,
-        "date": latest_ts,
-        "open": float(bar["1. open"]),
-        "high": float(bar["2. high"]),
-        "low": float(bar["3. low"]),
-        "close": float(bar["4. close"]),
-        "volume": int(bar["5. volume"]),
-        "timezone": meta.get("5. Time Zone", "US/Eastern"),
+        "symbol": quote.get("01. symbol", symbol),
+        "price": float(quote["05. price"]),
+        "open": float(quote.get("02. open", 0)),
+        "high": float(quote.get("03. high", 0)),
+        "low": float(quote.get("04. low", 0)),
+        "previous_close": float(quote.get("08. previous close", 0)),
+        "change": float(quote.get("09. change", 0)),
+        "change_pct": quote.get("10. change percent", "0%"),
+        "volume": int(quote.get("06. volume", 0)),
+        "latest_trading_day": quote.get("07. latest trading day", ""),
     }
 
 
