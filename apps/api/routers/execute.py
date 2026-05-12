@@ -119,27 +119,36 @@ async def _award_execution_points(pool, user_id: str, api_key_id: str, tier: str
 
 _STREAMING_SLUGS = {"groq", "together"}
 
+# Per-key concurrent SSE stream cap. SSE connections hold a worker open for the
+# full upstream response duration; an unbounded number per key would let one
+# caller exhaust connection capacity for everyone else.
+_MAX_CONCURRENT_STREAMS_PER_KEY = 5
+_active_streams: dict[str, int] = {}
 
-async def _run_sse_stream(slug, params, svc_key, user_id, credit_cost, pool, service_used, calls_remaining):
+
+async def _run_sse_stream(slug, params, svc_key, user_id, credit_cost, pool, service_used, calls_remaining, stream_owner_key):
     """Async generator producing SSE events for a streaming LLM /run call."""
     from services.managed import stream_groq, stream_together
     stream_fn = stream_groq if slug == "groq" else stream_together
     try:
-        async for token in stream_fn(params, svc_key):
-            yield f"data: {_json.dumps({'token': token, 'done': False})}\n\n"
-    except Exception as exc:
-        yield f"data: {_json.dumps({'error': str(exc)[:200], 'done': True})}\n\n"
         try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
-                    "WHERE user_id = $2::uuid",
-                    credit_cost, user_id,
-                )
-        except Exception:
-            pass
-        return
-    yield f"data: {_json.dumps({'token': '', 'done': True, 'service_used': service_used, 'calls_remaining': calls_remaining})}\n\n"
+            async for token in stream_fn(params, svc_key):
+                yield f"data: {_json.dumps({'token': token, 'done': False})}\n\n"
+        except Exception as exc:
+            yield f"data: {_json.dumps({'error': str(exc)[:200], 'done': True})}\n\n"
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
+                        "WHERE user_id = $2::uuid",
+                        credit_cost, user_id,
+                    )
+            except Exception:
+                pass
+            return
+        yield f"data: {_json.dumps({'token': '', 'done': True, 'service_used': service_used, 'calls_remaining': calls_remaining})}\n\n"
+    finally:
+        _active_streams[stream_owner_key] = max(0, _active_streams.get(stream_owner_key, 1) - 1)
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -1106,10 +1115,22 @@ async def _execute_one(call: dict, pool, user_id: str, api_key_id: str) -> dict:
     return {"slug": slug, "status": "ok", "result": result, "execution_ms": execution_ms}
 
 
+def _batch_call_cost(call: dict) -> int:
+    """Credit cost for one batch call — must match _execute_one's pricing exactly."""
+    slug = (call.get("slug") or "").strip().lower()
+    config = SERVICE_CONFIGS[slug]
+    if slug == "stability":
+        params = call.get("params") or {}
+        return 100 if params.get("quality") == "ultra" else 45
+    return config["credits"]
+
+
 @router.post("/execute/batch")
 @limiter.limit("10/minute")
 async def execute_batch(request: Request, db=Depends(get_db)):
-    """Execute up to 5 managed service calls in parallel. Each call deducts credits independently."""
+    """Execute up to 5 managed service calls in parallel. Total credit cost is
+    checked atomically up-front — if any call would push the balance negative,
+    the whole batch is rejected before any external call is made."""
     from main import app
 
     api_key_header = request.headers.get("X-Wayforth-API-Key", "")
@@ -1142,6 +1163,27 @@ async def execute_batch(request: Request, db=Depends(get_db)):
                 "message": f"Unknown managed service slug '{slug}'. "
                            "Use GET /services to browse available services.",
             })
+
+    # Atomic batch credit gate — sum the cost of every call and verify the
+    # caller can afford the whole batch before any _execute_one starts.
+    # Without this, parallel per-call deductions in _execute_one would let
+    # the first few calls succeed and the rest fail, producing partial
+    # execution with no caller signal that the batch was incomplete.
+    total_cost = sum(_batch_call_cost(c) for c in calls)
+    balance_row = await db.fetchrow(
+        "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid", str(user_id)
+    )
+    current_balance = balance_row["credits_balance"] if balance_row else 0
+    if current_balance < total_cost:
+        raise HTTPException(status_code=402, detail={
+            "error": "insufficient_credits",
+            "message": "Batch requires more credits than your current balance. "
+                       "No calls were executed.",
+            "credits_required": total_cost,
+            "credits_balance": current_balance,
+            "calls_in_batch": len(calls),
+            "top_up_url": "https://wayforth.io/billing",
+        })
 
     pool = app.state.pool
     batch_start = _time_mod.time()
@@ -1441,6 +1483,26 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
                 "error": "streaming_not_supported",
                 "intent_category": selected_svc.get("category", "unknown"),
             })
+
+        # Per-key concurrent-stream cap — refund the just-deducted credits and
+        # return 429 before opening another long-lived SSE connection.
+        stream_owner_key = hashlib.sha256(api_key_header.encode()).hexdigest()[:16]
+        active = _active_streams.get(stream_owner_key, 0)
+        if active >= _MAX_CONCURRENT_STREAMS_PER_KEY:
+            async with db.transaction():
+                await db.fetchrow(
+                    "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
+                    "WHERE user_id = $2::uuid RETURNING credits_balance",
+                    credit_cost, user_id,
+                )
+            return JSONResponse(status_code=429, content={
+                "error": "too_many_concurrent_streams",
+                "message": f"Maximum {_MAX_CONCURRENT_STREAMS_PER_KEY} concurrent SSE streams per API key.",
+                "active_streams": active,
+                "limit": _MAX_CONCURRENT_STREAMS_PER_KEY,
+            })
+        _active_streams[stream_owner_key] = active + 1
+
         wri = selected_svc.get("wri_score")
         _service_used_sse = {
             "slug": selected_slug,
@@ -1452,6 +1514,7 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
         gen = _run_sse_stream(
             selected_slug, mapped_params, svc_key, str(user_id),
             credit_cost, app.state.pool, _service_used_sse, _calls_remaining,
+            stream_owner_key,
         )
         return StreamingResponse(gen, media_type="text/event-stream", headers={
             "Cache-Control": "no-cache",

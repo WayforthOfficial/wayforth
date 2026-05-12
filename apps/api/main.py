@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -726,6 +726,21 @@ app.include_router(wayf.router)
 
 # ── OpenAPI customisation (security scheme + description) ─────────────────────
 
+_OPENAPI_HIDDEN_PREFIXES = ("/admin", "/admin-api", "/tier3/admin")
+
+
+def _public_routes():
+    """Routes shown in /openapi.json. Admin and internal-provider routes are
+    excluded so the public schema doesn't catalogue privileged endpoints."""
+    out = []
+    for r in app.routes:
+        path = getattr(r, "path", "") or ""
+        if any(path == p or path.startswith(p + "/") or path.startswith(p) for p in _OPENAPI_HIDDEN_PREFIXES):
+            continue
+        out.append(r)
+    return out
+
+
 def _custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
@@ -746,7 +761,7 @@ def _custom_openapi():
             "- `X-RateLimit-Reset` — Unix timestamp when your monthly quota resets\n"
             "- `X-Request-ID` — unique UUID for every request, traceable in logs"
         ),
-        routes=app.routes,
+        routes=_public_routes(),
     )
     schema.setdefault("components", {})["securitySchemes"] = {
         "ApiKeyAuth": {
