@@ -2,12 +2,13 @@
 
 import hashlib
 import logging
+import math
 import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from core.credits import PLANS, CREDITS_PER_CALL, ROUTING_FEE, compute_calls_remaining
+from core.credits import PLANS, CREDITS_PER_CALL, ROUTING_FEE, PAYMENT_MULTIPLIERS, compute_calls_remaining
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier, _get_redis
@@ -248,21 +249,30 @@ async def get_balance(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     credits = await db.fetchrow(
-        "SELECT credits_balance, package_tier FROM user_credits WHERE user_id = $1",
+        "SELECT credits_balance, package_tier, payment_method FROM user_credits WHERE user_id = $1",
         key_record["user_id"],
     )
     balance = credits["credits_balance"] if credits else 0
     pkg_tier = credits["package_tier"] if credits else "free"
+    payment_method = (credits["payment_method"] if credits else None) or "card"
     tier = _credits_to_tier(balance, pkg_tier)
 
     plan_def = PLANS.get(tier, PLANS["free"])
     resets_at = key_record.get("subscription_expires_at") or key_record.get("quota_reset_at")
     payment_rail = key_record.get("payment_rail") or "card"
 
+    base_calls = plan_def["calls_included"]
+    multiplier = PAYMENT_MULTIPLIERS.get(payment_method, 1.00)
+    bonus_calls = math.floor(base_calls * (multiplier - 1.0))
+
     return {
         "plan": tier,
         "calls_remaining": await compute_calls_remaining(db, str(key_record["id"])),
-        "calls_included": plan_def["calls_included"],
+        "calls_included": base_calls + bonus_calls,
+        "base_calls": base_calls,
+        "bonus_calls": bonus_calls,
+        "payment_method": payment_method,
+        "payment_multiplier": multiplier,
         "resets_at": resets_at.isoformat() if resets_at else None,
         "payment_rail": payment_rail,
     }
