@@ -37,7 +37,7 @@ SERVICE_REQUIRED_PARAMS: dict[str, list[str]] = {
 SERVICE_DEFAULTS: dict[str, dict] = {
     "deepl":        {"source_lang": "EN"},
     "groq":         {"model": "llama-3.3-70b-versatile", "max_tokens": 1024},
-    "together":     {"model": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo", "max_tokens": 1024},
+    "together":     {"model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "max_tokens": 1024},
     "stability":    {"steps": 30, "cfg_scale": 7},
     "newsapi":      {"pageSize": 5},
     "alphavantage": {"function": "GLOBAL_QUOTE"},
