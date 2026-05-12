@@ -1050,16 +1050,28 @@ async def get_invoice(year: int, month: int, request: Request, db=Depends(get_db
     else:
         period_end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
 
-    # Check for credit transactions in the period (proxy for activity)
-    row = await db.fetchrow("""
-        SELECT COUNT(*) AS tx_count, ABS(SUM(amount)) AS total_spent
-        FROM credit_transactions
-        WHERE user_id = $1 AND type IN ('deduct', 'call')
-          AND created_at >= $2 AND created_at < $3
-    """, key_record["user_id"], period_start, period_end)
+    now_utc = datetime.now(timezone.utc)
+    is_current_month = (year == now_utc.year and month == now_utc.month)
 
-    if not row or not row["tx_count"]:
-        raise HTTPException(status_code=404, detail="no_activity_in_period")
+    if is_current_month:
+        # Current month: monthly_calls_count on api_keys is always authoritative
+        key_usage = await db.fetchrow(
+            "SELECT monthly_calls_count FROM api_keys WHERE id = $1", key_record["id"]
+        )
+        calls_used = int((key_usage["monthly_calls_count"] or 0) if key_usage else 0)
+        if calls_used == 0:
+            raise HTTPException(status_code=404, detail="no_activity_in_period")
+    else:
+        # Past month: count from credit_transactions (execution + cross_rail)
+        row = await db.fetchrow("""
+            SELECT COUNT(*) AS tx_count
+            FROM credit_transactions
+            WHERE user_id = $1 AND type IN ('execution', 'cross_rail')
+              AND created_at >= $2 AND created_at < $3
+        """, key_record["user_id"], period_start, period_end)
+        calls_used = int((row["tx_count"] or 0) if row else 0)
+        if calls_used == 0:
+            raise HTTPException(status_code=404, detail="no_activity_in_period")
 
     tier = key_record["tier"] or "free"
     plan_def = PLANS.get(tier, PLANS["free"])
@@ -1069,7 +1081,6 @@ async def get_invoice(year: int, month: int, request: Request, db=Depends(get_db
     payment_method = (credits_row["payment_method"] if credits_row else None) or "card"
     month_name = _MONTH_NAMES[month - 1]
     user_prefix = str(key_record["user_id"])[:6].upper()
-    calls_used = int((row["total_spent"] or 0) // max(1, CREDITS_PER_CALL))
 
     return {
         "invoice_id": f"WF-{year}-{month:02d}-{user_prefix}",
