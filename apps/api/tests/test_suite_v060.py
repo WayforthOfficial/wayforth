@@ -1175,3 +1175,44 @@ async def test_T160_sitemap_xml(c):
     ct = r.headers.get("content-type", "")
     assert "xml" in ct, f"expected xml content-type, got {ct!r}"
     assert "wayforth.io" in r.text, f"sitemap missing wayforth.io URLs"
+
+
+# SECTION 19 — v0.6.1 PAYMENT BONUS (T161)
+
+@pytest.mark.asyncio
+async def test_T161_billing_balance_payment_bonus_fields(c):
+    """GET /billing/balance returns base_calls, bonus_calls, payment_method, payment_multiplier.
+    Invariant: calls_included == base_calls + bonus_calls.
+    USDC accounts must show exactly 5% bonus; $WAYF accounts 20% (post-TGE scaffold).
+    """
+    import math as _math
+    r = rec(await c.get("/billing/balance", headers=_uh()))
+    assert r.status_code == 200, f"balance should be 200, got {r.status_code}: {r.text[:200]}"
+    d = r.json()
+
+    for field in ("base_calls", "bonus_calls", "payment_method", "payment_multiplier"):
+        assert field in d, f"missing {field!r} in /billing/balance: {list(d.keys())}"
+
+    assert d["calls_included"] == d["base_calls"] + d["bonus_calls"], (
+        f"calls_included {d['calls_included']} != base_calls {d['base_calls']} "
+        f"+ bonus_calls {d['bonus_calls']}"
+    )
+
+    pm = d["payment_method"]
+    if pm == "usdc":
+        expected_bonus = _math.floor(d["base_calls"] * 0.05)
+        assert d["bonus_calls"] == expected_bonus, (
+            f"USDC: bonus_calls should be {expected_bonus} (5% of {d['base_calls']}), "
+            f"got {d['bonus_calls']}"
+        )
+        assert d["payment_multiplier"] == 1.05, f"USDC multiplier should be 1.05, got {d['payment_multiplier']}"
+    elif pm == "wayf":
+        expected_bonus = _math.floor(d["base_calls"] * 0.20)
+        assert d["bonus_calls"] == expected_bonus, (
+            f"WAYF: bonus_calls should be {expected_bonus} (20% of {d['base_calls']}), "
+            f"got {d['bonus_calls']}"
+        )
+        assert d["payment_multiplier"] == 1.20, f"WAYF multiplier should be 1.20, got {d['payment_multiplier']}"
+    else:
+        assert d["bonus_calls"] == 0, f"card: bonus_calls should be 0, got {d['bonus_calls']}"
+        assert d["payment_multiplier"] == 1.00, f"card multiplier should be 1.00, got {d['payment_multiplier']}"

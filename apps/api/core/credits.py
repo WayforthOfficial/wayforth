@@ -14,6 +14,13 @@ ROUTING_FEE = 0.015  # 1.5% flat, all tiers
 # Blended average for DISPLAY purposes only — never used for billing logic
 CREDITS_PER_CALL = 6
 
+# Multipliers by payment method; wayf is scaffolded (activates post-TGE)
+PAYMENT_MULTIPLIERS: dict[str, float] = {
+    "card": 1.00,
+    "usdc": 1.05,
+    "wayf": 1.20,
+}
+
 PLANS = {
     "free": {
         "monthly_credits":    600,
@@ -29,7 +36,8 @@ PLANS = {
         "calls_included":     1_000,
         "price_usd":          12,
         "price_usdc":         12,
-        "usdc_bonus_credits": 300,
+        "usdc_bonus_credits": 300,    # 5%
+        "wayf_bonus_credits": 1_200,  # 20% — activates post-TGE
         "stripe_price_env":   "STRIPE_PRICE_BUILDER",
         "features":           ["search", "execute", "wayforthrank", "byok", "webhooks"],
     },
@@ -38,7 +46,8 @@ PLANS = {
         "calls_included":     3_500,
         "price_usd":          29,
         "price_usdc":         29,
-        "usdc_bonus_credits": 1_050,
+        "usdc_bonus_credits": 1_050,  # 5%
+        "wayf_bonus_credits": 4_200,  # 20% — activates post-TGE
         "stripe_price_env":   "STRIPE_PRICE_STARTER",
         "features":           ["builder_features", "analytics", "wayforthql"],
     },
@@ -47,7 +56,8 @@ PLANS = {
         "calls_included":     12_000,
         "price_usd":          99,
         "price_usdc":         99,
-        "usdc_bonus_credits": 3_600,
+        "usdc_bonus_credits": 3_600,   # 5%
+        "wayf_bonus_credits": 14_400,  # 20% — activates post-TGE
         "stripe_price_env":   "STRIPE_PRICE_PRO",
         "features":           ["starter_features", "wri_scores", "priority"],
     },
@@ -56,7 +66,8 @@ PLANS = {
         "calls_included":     40_000,
         "price_usd":          299,
         "price_usdc":         299,
-        "usdc_bonus_credits": 12_000,
+        "usdc_bonus_credits": 12_000,  # 5%
+        "wayf_bonus_credits": 48_000,  # 20% — activates post-TGE
         "stripe_price_env":   "STRIPE_PRICE_GROWTH",
         "features":           ["pro_features", "custom_services", "no_limits"],
     },
