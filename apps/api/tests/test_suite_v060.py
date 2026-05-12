@@ -1216,3 +1216,169 @@ async def test_T161_billing_balance_payment_bonus_fields(c):
     else:
         assert d["bonus_calls"] == 0, f"card: bonus_calls should be 0, got {d['bonus_calls']}"
         assert d["payment_multiplier"] == 1.00, f"card multiplier should be 1.00, got {d['payment_multiplier']}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 8 — PLATFORM v0.6.8  (T171–T185)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TEST_FAV_PREFIX = "wf-test-t1"  # slugs used in favorites tests — safe to create/delete
+
+
+async def test_T171_billing_balance_forecast_field(c):
+    """GET /billing/balance must include a top-level 'forecast' key (null OK if < 3 days history)."""
+    r = rec(await c.get("/billing/balance", headers=_uh()))
+    assert r.status_code == 200, f"balance must be 200, got {r.status_code}: {r.text[:200]}"
+    assert "forecast" in r.json(), f"'forecast' key missing from /billing/balance: {list(r.json().keys())}"
+
+
+async def test_T172_add_favorite(c):
+    """POST /account/favorites adds a service slug and returns 201 with the slug echoed."""
+    slug = "wf-test-t172"
+    await c.delete(f"/account/favorites/{slug}", headers=_uh())  # pre-clean in case prior run left it
+    r = rec(await c.post("/account/favorites", json={"slug": slug}, headers=_uh()))
+    assert r.status_code == 201, f"add favorite must be 201, got {r.status_code}: {r.text[:200]}"
+    assert r.json().get("slug") == slug, f"slug mismatch: {r.json()}"
+    await c.delete(f"/account/favorites/{slug}", headers=_uh())
+
+
+async def test_T173_list_favorites_contains_added_slug(c):
+    """GET /account/favorites returns a list that includes a slug we just added."""
+    slug = "wf-test-t173"
+    await c.delete(f"/account/favorites/{slug}", headers=_uh())  # pre-clean
+    await c.post("/account/favorites", json={"slug": slug}, headers=_uh())
+    r = rec(await c.get("/account/favorites", headers=_uh()))
+    assert r.status_code == 200, f"list favorites must be 200, got {r.status_code}: {r.text[:200]}"
+    assert "favorites" in r.json(), f"'favorites' key missing: {list(r.json().keys())}"
+    slugs = [f["slug"] for f in r.json()["favorites"]]
+    assert slug in slugs, f"{slug!r} not in favorites list: {slugs}"
+    await c.delete(f"/account/favorites/{slug}", headers=_uh())
+
+
+async def test_T174_delete_favorite(c):
+    """DELETE /account/favorites/{slug} returns 200 with removed=True."""
+    slug = "wf-test-t174"
+    await c.delete(f"/account/favorites/{slug}", headers=_uh())  # pre-clean
+    await c.post("/account/favorites", json={"slug": slug}, headers=_uh())
+    r = rec(await c.delete(f"/account/favorites/{slug}", headers=_uh()))
+    assert r.status_code == 200, f"delete favorite must be 200, got {r.status_code}: {r.text[:200]}"
+    assert r.json().get("removed") is True, f"removed must be True: {r.json()}"
+
+
+async def test_T175_add_favorite_duplicate_returns_422(c):
+    """POST /account/favorites for an already-saved slug returns 422 already_favorited."""
+    slug = "wf-test-t175"
+    await c.delete(f"/account/favorites/{slug}", headers=_uh())  # pre-clean
+    await c.post("/account/favorites", json={"slug": slug}, headers=_uh())
+    r = rec(await c.post("/account/favorites", json={"slug": slug}, headers=_uh()))
+    assert r.status_code == 422, f"duplicate favorite must be 422, got {r.status_code}: {r.text[:200]}"
+    await c.delete(f"/account/favorites/{slug}", headers=_uh())
+
+
+async def test_T176_changelog_xml_rss(c):
+    """GET /changelog.xml returns 200 application/rss+xml with RSS 2.0 body — no auth required."""
+    r = rec(await c.get("/changelog.xml"))
+    assert r.status_code == 200, f"changelog.xml must be 200, got {r.status_code}"
+    ct = r.headers.get("content-type", "")
+    assert "application/rss+xml" in ct, f"content-type must be rss+xml, got {ct!r}"
+    assert b"<rss" in r.content, "RSS feed body missing <rss tag"
+    assert b"Wayforth" in r.content, "RSS feed body missing 'Wayforth'"
+
+
+async def test_T177_invoice_endpoint_valid_month(c):
+    """GET /billing/invoice/2026/05 returns 200 with invoice_id or 404 (no activity) — never 500."""
+    r = rec(await c.get("/billing/invoice/2026/05", headers=_uh()))
+    assert r.status_code in (200, 404), (
+        f"invoice must be 200 or 404, got {r.status_code}: {r.text[:200]}"
+    )
+    if r.status_code == 200:
+        d = r.json()
+        assert "invoice_id" in d, f"'invoice_id' missing from invoice response: {list(d.keys())}"
+        assert d["invoice_id"].startswith("WF-2026-05-"), (
+            f"invoice_id must start with WF-2026-05-, got {d['invoice_id']!r}"
+        )
+
+
+async def test_T178_get_referral_code(c):
+    """GET /account/referral returns a WF-XXXXXX code and referral_url."""
+    r = rec(await c.get("/account/referral", headers=_uh()))
+    assert r.status_code == 200, f"referral must be 200, got {r.status_code}: {r.text[:200]}"
+    d = r.json()
+    assert "referral_code" in d, f"'referral_code' missing: {list(d.keys())}"
+    assert d["referral_code"].startswith("WF-"), f"referral_code must start WF-, got {d['referral_code']!r}"
+    assert "referral_url" in d, f"'referral_url' missing: {list(d.keys())}"
+    assert "referrals_count" in d, f"'referrals_count' missing: {list(d.keys())}"
+
+
+async def test_T179_redeem_own_referral_code_returns_400(c):
+    """POST /account/referral/redeem with caller's own code must return 400 cannot_redeem_own_code."""
+    r = rec(await c.get("/account/referral", headers=_uh()))
+    assert r.status_code == 200
+    own_code = r.json()["referral_code"]
+    r2 = rec(await c.post("/account/referral/redeem", json={"code": own_code}, headers=_uh()))
+    assert r2.status_code == 400, (
+        f"redeeming own code must be 400, got {r2.status_code}: {r2.text[:200]}"
+    )
+    assert r2.json().get("detail") == "cannot_redeem_own_code", (
+        f"wrong error detail: {r2.json().get('detail')!r}"
+    )
+
+
+async def test_T180_create_org(c):
+    """POST /org/create returns 201 with id and name, or 422 if user already owns an org."""
+    r = rec(await c.post("/org/create", json={"name": "Test Org v068"}, headers=_uh()))
+    assert r.status_code in (201, 422), (
+        f"org/create must be 201 or 422, got {r.status_code}: {r.text[:200]}"
+    )
+    if r.status_code == 201:
+        d = r.json()
+        assert "id" in d, f"'id' missing from org/create response: {list(d.keys())}"
+        assert d.get("name") == "Test Org v068", f"name mismatch: {d.get('name')!r}"
+
+
+async def test_T181_list_org_members(c):
+    """GET /org/members returns 200 with members list, or 404 if user has no org."""
+    r = rec(await c.get("/org/members", headers=_uh()))
+    assert r.status_code in (200, 404), (
+        f"org/members must be 200 or 404, got {r.status_code}: {r.text[:200]}"
+    )
+    if r.status_code == 200:
+        assert "members" in r.json(), f"'members' key missing: {list(r.json().keys())}"
+
+
+async def test_T182_webhooks_list_operational(c):
+    """GET /webhooks returns 200 with webhooks list — confirms webhook infra is operational
+    and the v0.6.8 balance_warning event types didn't break the subsystem."""
+    r = rec(await c.get("/webhooks", headers=_uh()))
+    assert r.status_code == 200, f"GET /webhooks must be 200, got {r.status_code}: {r.text[:200]}"
+    assert "webhooks" in r.json(), f"'webhooks' key missing: {list(r.json().keys())}"
+
+
+async def test_T183_balance_forecast_will_exhaust_field(c):
+    """GET /billing/balance forecast (when non-null) must include will_exhaust_before_reset."""
+    r = rec(await c.get("/billing/balance", headers=_uh()))
+    assert r.status_code == 200
+    d = r.json()
+    forecast = d.get("forecast")
+    if forecast is not None:
+        assert "will_exhaust_before_reset" in forecast, (
+            f"'will_exhaust_before_reset' missing from forecast: {list(forecast.keys())}"
+        )
+
+
+async def test_T184_invoice_past_month_returns_404(c):
+    """GET /billing/invoice/2025/01 must return 404 — no activity in Jan 2025."""
+    r = rec(await c.get("/billing/invoice/2025/01", headers=_uh()))
+    assert r.status_code == 404, (
+        f"old invoice must be 404, got {r.status_code}: {r.text[:200]}"
+    )
+
+
+async def test_T185_delete_nonexistent_favorite_returns_404(c):
+    """DELETE /account/favorites for a slug that was never added returns 404 favorite_not_found."""
+    slug = "wf-test-t185-nonexistent-zzz"
+    await c.delete(f"/account/favorites/{slug}", headers=_uh())  # ensure clean
+    r = rec(await c.delete(f"/account/favorites/{slug}", headers=_uh()))
+    assert r.status_code == 404, (
+        f"deleting non-existent favorite must be 404, got {r.status_code}: {r.text[:200]}"
+    )
