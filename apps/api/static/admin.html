@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wayforth Admin</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0f172a; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; min-height: 100vh; }
+
+/* ── Login ── */
+#login-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+.login-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 40px; width: 360px; }
+.login-logo { font-size: 22px; font-weight: 700; color: #4F46E5; margin-bottom: 8px; }
+.login-subtitle { color: #64748b; font-size: 14px; margin-bottom: 28px; }
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 6px; }
+.form-group input { width: 100%; padding: 10px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; font-size: 14px; outline: none; }
+.form-group input:focus { border-color: #4F46E5; }
+.btn-primary { width: 100%; padding: 11px; background: #4F46E5; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; }
+.btn-primary:hover { background: #4338ca; }
+.login-error { color: #f87171; font-size: 13px; margin-top: 12px; text-align: center; display: none; }
+
+/* ── App Layout ── */
+#app { display: none; height: 100vh; }
+.sidebar { width: 220px; background: #0f172a; border-right: 1px solid #1e293b; position: fixed; top: 0; left: 0; height: 100vh; display: flex; flex-direction: column; }
+.sidebar-logo { padding: 20px 20px 16px; border-bottom: 1px solid #1e293b; }
+.sidebar-logo-text { font-size: 18px; font-weight: 700; color: #4F46E5; }
+.sidebar-sub { font-size: 11px; color: #475569; margin-top: 2px; }
+.sidebar-nav { flex: 1; padding: 12px 0; overflow-y: auto; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 20px; color: #64748b; font-size: 14px; cursor: pointer; border-left: 3px solid transparent; transition: all 0.15s; }
+.nav-item:hover { color: #e2e8f0; background: #1e293b; }
+.nav-item.active { color: #818cf8; background: #1e293b; border-left-color: #4F46E5; }
+.nav-icon { width: 16px; text-align: center; font-size: 15px; }
+.sidebar-footer { padding: 16px 20px; border-top: 1px solid #1e293b; font-size: 12px; color: #475569; }
+.logout-btn { color: #64748b; cursor: pointer; font-size: 12px; margin-top: 6px; display: inline-block; }
+.logout-btn:hover { color: #f87171; }
+
+.main { margin-left: 220px; padding: 28px 32px; min-height: 100vh; }
+.page-header { margin-bottom: 24px; }
+.page-title { font-size: 22px; font-weight: 700; color: #e2e8f0; }
+.page-sub { font-size: 14px; color: #64748b; margin-top: 4px; }
+
+/* ── Stats Grid ── */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 28px; }
+.stat-card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 20px; }
+.stat-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+.stat-value { font-size: 30px; font-weight: 700; color: #e2e8f0; margin-top: 4px; }
+.stat-sub { font-size: 12px; color: #475569; margin-top: 4px; }
+
+/* ── Cards / Tables ── */
+.card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; overflow: hidden; margin-bottom: 24px; }
+.card-header { padding: 16px 20px; border-bottom: 1px solid #334155; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.card-title { font-size: 15px; font-weight: 600; color: #e2e8f0; }
+table { width: 100%; border-collapse: collapse; }
+th { background: #0f172a; color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; padding: 11px 16px; text-align: left; font-weight: 500; white-space: nowrap; }
+td { padding: 13px 16px; font-size: 13px; border-top: 1px solid #1e293b; vertical-align: middle; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+.empty-state { text-align: center; padding: 60px 20px; color: #475569; }
+.empty-state-icon { font-size: 36px; margin-bottom: 12px; }
+.empty-state-title { font-size: 16px; font-weight: 600; color: #64748b; margin-bottom: 6px; }
+.empty-state-text { font-size: 14px; max-width: 420px; margin: 0 auto 20px; }
+
+/* ── Badges ── */
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
+.badge-green  { background: #052e16; border: 1px solid #166534; color: #4ade80; }
+.badge-red    { background: #2d0909; border: 1px solid #991b1b; color: #f87171; }
+.badge-yellow { background: #1c1504; border: 1px solid #854d0e; color: #fbbf24; }
+.badge-blue   { background: #0c1a3a; border: 1px solid #1d4ed8; color: #60a5fa; }
+.badge-gray   { background: #1e293b; border: 1px solid #334155; color: #94a3b8; }
+.badge-purple { background: #1e1b4b; border: 1px solid #4338ca; color: #a5b4fc; }
+.dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
+.dot-green { background: #22c55e; }
+.dot-red    { background: #ef4444; }
+
+/* ── Action Buttons ── */
+.btn { padding: 6px 12px; border-radius: 5px; font-size: 12px; font-weight: 500; cursor: pointer; border: none; transition: opacity 0.15s; }
+.btn:hover { opacity: 0.85; }
+.btn-sm { padding: 4px 10px; font-size: 11px; }
+.btn-default { background: #334155; color: #e2e8f0; }
+.btn-blue   { background: #1d4ed8; color: white; }
+.btn-red    { background: #991b1b; color: white; }
+.btn-green  { background: #166534; color: white; }
+.btn-yellow { background: #854d0e; color: white; }
+.btn-outline { background: transparent; border: 1px solid #334155; color: #94a3b8; }
+.btn-outline:hover { border-color: #64748b; color: #e2e8f0; }
+.actions { display: flex; gap: 6px; }
+
+/* ── Search / Filters ── */
+.toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.search-input { padding: 8px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; font-size: 13px; outline: none; min-width: 220px; }
+.search-input:focus { border-color: #4F46E5; }
+.filter-select { padding: 8px 10px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #94a3b8; font-size: 13px; outline: none; }
+.filter-select:focus { border-color: #4F46E5; }
+
+/* ── Pagination ── */
+.pagination { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-top: 1px solid #334155; font-size: 13px; color: #64748b; }
+.page-btn { padding: 5px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 5px; color: #94a3b8; cursor: pointer; font-size: 12px; }
+.page-btn:hover:not(:disabled) { border-color: #4F46E5; color: #818cf8; }
+.page-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Modal ── */
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: center; justify-content: center; }
+.modal-overlay.show { display: flex; }
+.modal { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 28px; width: 480px; max-width: 95vw; }
+.modal-title { font-size: 17px; font-weight: 700; margin-bottom: 8px; }
+.modal-body { color: #94a3b8; font-size: 14px; margin-bottom: 20px; line-height: 1.6; }
+.modal-footer { display: flex; gap: 10px; justify-content: flex-end; }
+.modal-form-group { margin-bottom: 14px; }
+.modal-form-group label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 5px; }
+.modal-form-group input, .modal-form-group select, .modal-form-group textarea {
+  width: 100%; padding: 9px 11px; background: #0f172a; border: 1px solid #334155;
+  border-radius: 6px; color: #e2e8f0; font-size: 13px; outline: none;
+}
+.modal-form-group textarea { resize: vertical; min-height: 72px; }
+.modal-form-group input:focus, .modal-form-group select:focus, .modal-form-group textarea:focus { border-color: #4F46E5; }
+.modal-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* ── Misc ── */
+.mono { font-family: monospace; font-size: 12px; color: #94a3b8; }
+.text-muted { color: #64748b; }
+.text-sm { font-size: 12px; }
+.back-link { display: inline-flex; align-items: center; gap: 6px; color: #818cf8; font-size: 13px; cursor: pointer; margin-bottom: 20px; }
+.back-link:hover { color: #a5b4fc; }
+.spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid #334155; border-top-color: #4F46E5; border-radius: 50%; animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-row td { text-align: center; padding: 40px; color: #475569; }
+.checkbox-col { width: 40px; }
+input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; accent-color: #4F46E5; }
+.bulk-bar { background: #1e3a5f; border: 1px solid #1d4ed8; border-radius: 8px; padding: 10px 16px; display: flex; align-items: center; gap: 12px; margin-bottom: 16px; font-size: 13px; color: #60a5fa; display: none; }
+.tier3-empty { text-align: center; padding: 80px 20px; }
+.tier3-icon { font-size: 48px; margin-bottom: 16px; }
+.tier3-title { font-size: 20px; font-weight: 700; color: #e2e8f0; margin-bottom: 10px; }
+.tier3-text { font-size: 15px; color: #64748b; max-width: 440px; margin: 0 auto 24px; line-height: 1.7; }
+.toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px 18px; font-size: 13px; color: #e2e8f0; z-index: 200; display: none; transition: opacity 0.3s; }
+.toast.success { border-color: #166534; color: #4ade80; }
+.toast.error { border-color: #991b1b; color: #f87171; }
+</style>
+</head>
+<body>
+
+<!-- ── Login ── -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">Wayforth</div>
+    <div class="login-subtitle">Admin Panel</div>
+    <div class="form-group">
+      <label>Email</label>
+      <input type="email" id="login-email" placeholder="admin@wayforth.io" autocomplete="username">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password">
+    </div>
+    <button class="btn-primary" id="login-btn" onclick="doLogin()">Sign in</button>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
+<!-- ── App ── -->
+<div id="app">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-text">Wayforth</div>
+      <div class="sidebar-sub">Admin Panel</div>
+    </div>
+    <div class="sidebar-nav">
+      <div class="nav-item active" onclick="nav('dashboard')"><span class="nav-icon">⊞</span> Dashboard</div>
+      <div class="nav-item" onclick="nav('users')"><span class="nav-icon">👤</span> Users</div>
+      <div class="nav-item" onclick="nav('providers')"><span class="nav-icon">🏢</span> Providers</div>
+      <div class="nav-item" onclick="nav('services')"><span class="nav-icon">⚡</span> Services</div>
+      <div class="nav-item" onclick="nav('stats')"><span class="nav-icon">📊</span> Stats</div>
+      <div class="nav-item" onclick="nav('health')"><span class="nav-icon">🩺</span> Health</div>
+      <div class="nav-item" onclick="nav('tier3')"><span class="nav-icon">🔒</span> Tier 3 KYB</div>
+    </div>
+    <div class="sidebar-footer">
+      <div id="admin-name" class="text-sm" style="color:#94a3b8"></div>
+      <div id="admin-role" class="text-sm text-muted"></div>
+      <span class="logout-btn" onclick="doLogout()">Sign out</span>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="main" id="main-content">
+    <!-- sections rendered here -->
+  </div>
+</div>
+
+<!-- ── Confirm Modal ── -->
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal">
+    <div class="modal-title" id="confirm-title">Confirm action</div>
+    <div class="modal-body" id="confirm-body">Are you sure?</div>
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal('confirm-modal')">Cancel</button>
+      <button class="btn btn-red" id="confirm-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Edit Service Modal ── -->
+<div class="modal-overlay" id="edit-svc-modal">
+  <div class="modal" style="width:540px">
+    <div class="modal-title">Edit Service</div>
+    <div id="edit-svc-form">
+      <div class="modal-form-row">
+        <div class="modal-form-group"><label>Name</label><input id="es-name" type="text"></div>
+        <div class="modal-form-group"><label>Category</label><input id="es-category" type="text"></div>
+      </div>
+      <div class="modal-form-group"><label>Description</label><textarea id="es-description"></textarea></div>
+      <div class="modal-form-row">
+        <div class="modal-form-group">
+          <label>Tier</label>
+          <select id="es-tier">
+            <option value="1">Tier 1</option>
+            <option value="2">Tier 2 (Verified)</option>
+            <option value="3">Tier 3</option>
+          </select>
+        </div>
+        <div class="modal-form-group"><label>Price (USDC)</label><input id="es-price" type="number" step="0.001" min="0"></div>
+      </div>
+      <div class="modal-form-group">
+        <label>x402 Supported</label>
+        <select id="es-x402">
+          <option value="false">No</option>
+          <option value="true">Yes</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal('edit-svc-modal')">Cancel</button>
+      <button class="btn btn-blue" onclick="saveEditService()">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast ── -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ── Auth ──────────────────────────────────────────────────────────────────────
+let _adminKey = null;   // master key from URL ?key=
+let _token    = null;   // session token from login
+let _session  = null;   // {email, role, full_name}
+let _editSvcSlug = null;
+
+function authHeaders() {
+  if (_adminKey) return { 'X-Admin-Key': _adminKey };
+  if (_token)    return { 'X-Admin-Token': _token };
+  return {};
+}
+
+async function api(path, opts = {}) {
+  opts.headers = { 'Content-Type': 'application/json', ...authHeaders(), ...(opts.headers || {}) };
+  const r = await fetch(path, opts);
+  if (r.status === 401) { showLogin(); return null; }
+  return r;
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+(async () => {
+  const params = new URLSearchParams(location.search);
+  const keyParam = params.get('key');
+  if (keyParam) {
+    _adminKey = keyParam;
+    // verify key is valid
+    const r = await fetch('/admin-api/auth/me', { headers: authHeaders() });
+    if (r.ok) {
+      _session = await r.json();
+      showApp();
+      return;
+    }
+    _adminKey = null;
+  }
+  // check session storage
+  const tok = sessionStorage.getItem('wf_admin_token');
+  if (tok) {
+    _token = tok;
+    const r = await fetch('/admin-api/auth/me', { headers: authHeaders() });
+    if (r.ok) {
+      _session = await r.json();
+      showApp();
+      return;
+    }
+    sessionStorage.removeItem('wf_admin_token');
+    _token = null;
+  }
+  showLogin();
+})();
+
+function showLogin() {
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+}
+
+function showApp() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  if (_session) {
+    document.getElementById('admin-name').textContent = _session.full_name || _session.email;
+    document.getElementById('admin-role').textContent = _session.role || '';
+  }
+  nav('dashboard');
+}
+
+async function doLogin() {
+  const email = document.getElementById('login-email').value.trim();
+  const pw    = document.getElementById('login-password').value;
+  const errEl = document.getElementById('login-error');
+  errEl.style.display = 'none';
+  if (!email || !pw) { errEl.textContent = 'Email and password required.'; errEl.style.display = 'block'; return; }
+
+  const btn = document.getElementById('login-btn');
+  btn.textContent = 'Signing in…'; btn.disabled = true;
+
+  try {
+    const r = await fetch('/admin-api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: pw }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.detail || 'Invalid credentials');
+    }
+    const d = await r.json();
+    _token = d.token;
+    _session = d.admin;
+    sessionStorage.setItem('wf_admin_token', _token);
+    showApp();
+  } catch (e) {
+    errEl.textContent = e.message; errEl.style.display = 'block';
+  } finally {
+    btn.textContent = 'Sign in'; btn.disabled = false;
+  }
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.getElementById('login-screen').style.display !== 'none') doLogin();
+});
+
+async function doLogout() {
+  await fetch('/admin-api/auth/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
+  sessionStorage.removeItem('wf_admin_token');
+  _token = _adminKey = _session = null;
+  showLogin();
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+let _currentSection = 'dashboard';
+const navItems = document.querySelectorAll('.nav-item');
+function nav(section) {
+  _currentSection = section;
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  const labels = { dashboard: 'Dashboard', users: 'Users', providers: 'Providers', services: 'Services', stats: 'Stats', health: 'Health', tier3: 'Tier 3 KYB' };
+  document.querySelectorAll('.nav-item').forEach(el => {
+    if (el.textContent.trim().replace(/^./, '').trim() === labels[section] || el.textContent.includes(labels[section])) el.classList.add('active');
+  });
+  const sections = { dashboard, users, providers, services, stats, health, tier3 };
+  if (sections[section]) sections[section]();
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg, type = 'success') {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'toast ' + type; t.style.display = 'block';
+  setTimeout(() => { t.style.display = 'none'; }, 3000);
+}
+
+// ── Modal Helpers ─────────────────────────────────────────────────────────────
+function showModal(id) { document.getElementById(id).classList.add('show'); }
+function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+function confirm(title, body, onOk, btnLabel = 'Confirm', btnClass = 'btn-red') {
+  document.getElementById('confirm-title').textContent = title;
+  document.getElementById('confirm-body').textContent  = body;
+  const ok = document.getElementById('confirm-ok');
+  ok.textContent = btnLabel; ok.className = 'btn ' + btnClass;
+  ok.onclick = () => { closeModal('confirm-modal'); onOk(); };
+  showModal('confirm-modal');
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fmt(n) { return Number(n || 0).toLocaleString(); }
+function fmtDate(d) { if (!d) return '—'; return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
+function statusBadge(active, label = ['Active', 'Suspended']) {
+  return active
+    ? `<span class="badge badge-green"><span class="dot dot-green"></span>${label[0]}</span>`
+    : `<span class="badge badge-red"><span class="dot dot-red"></span>${label[1]}</span>`;
+}
+function tierBadge(t) {
+  const cls = { 1: 'badge-gray', 2: 'badge-blue', 3: 'badge-purple' }[t] || 'badge-gray';
+  return `<span class="badge ${cls}">Tier ${t||1}</span>`;
+}
+function set(id, html) { document.getElementById('main-content').innerHTML = html; }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════════
+async function dashboard() {
+  set('main-content', `
+    <div class="page-header"><div class="page-title">Dashboard</div><div class="page-sub">Platform overview</div></div>
+    <div class="stats-grid" id="dash-stats"><div style="grid-column:1/-1;text-align:center;padding:40px;color:#475569"><div class="spinner"></div></div></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+      <div class="card"><div class="card-header"><div class="card-title">Recent Searches (30d)</div></div><div id="dash-chart-search" style="padding:20px;color:#475569;text-align:center">Loading…</div></div>
+      <div class="card"><div class="card-header"><div class="card-title">User Signups (30d)</div></div><div id="dash-chart-signups" style="padding:20px;color:#475569;text-align:center">Loading…</div></div>
+    </div>`);
+
+  const r = await api('/admin-api/overview');
+  if (!r || !r.ok) return;
+  const d = await r.json();
+  const s = d.stats;
+
+  document.getElementById('dash-stats').innerHTML = [
+    ['Total Services', fmt(s.total_services), `${fmt(s.tier2)} tier 2`],
+    ['Total Users', fmt(s.total_users), `${fmt(s.total_keys)} API keys`],
+    ['Searches 24h', fmt(s.searches_24h), `${fmt(s.searches_7d)} / 7d`],
+    ['Agents', fmt(s.total_agents), ''],
+    ['Pending KYB', fmt(s.pending_tier3), 'tier 3'],
+  ].map(([label, val, sub]) => `
+    <div class="stat-card">
+      <div class="stat-label">${label}</div>
+      <div class="stat-value">${val}</div>
+      ${sub ? `<div class="stat-sub">${sub}</div>` : ''}
+    </div>`).join('');
+
+  renderSparkline('dash-chart-search', d.daily_searches);
+  renderSparkline('dash-chart-signups', d.daily_signups);
+}
+
+function renderSparkline(id, data) {
+  const el = document.getElementById(id);
+  if (!data || !data.length) { el.textContent = 'No data'; return; }
+  const max = Math.max(...data.map(d => d.count), 1);
+  const bars = data.map(d => {
+    const h = Math.max(4, Math.round(d.count / max * 80));
+    return `<div title="${d.date}: ${d.count}" style="flex:1;height:${h}px;background:#4F46E5;border-radius:2px 2px 0 0;opacity:0.8;min-width:4px"></div>`;
+  }).join('');
+  el.innerHTML = `<div style="display:flex;align-items:flex-end;gap:3px;height:80px;padding:0 4px">${bars}</div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:#475569;margin-top:8px;padding:0 4px">
+      <span>${data[0]?.date || ''}</span><span>${data[data.length-1]?.date || ''}</span>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// USERS
+// ═══════════════════════════════════════════════════════════════════════════════
+let _usersPage = 0;
+async function users(page = 0) {
+  _usersPage = page;
+  set('main-content', `
+    <div class="page-header"><div class="page-title">Users</div><div class="page-sub">All registered accounts</div></div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">All Users</div>
+        <div class="toolbar">
+          <input class="search-input" id="users-search" placeholder="Search email…" oninput="usersSearch()">
+        </div>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Email</th><th>Tier</th><th>Calls (month)</th><th>Credits</th><th>Joined</th><th>Status</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="users-body"><tr class="loading-row"><td colspan="7"><div class="spinner"></div></td></tr></tbody>
+      </table>
+      <div class="pagination" id="users-pager"></div>
+    </div>`);
+
+  await loadUsers();
+}
+
+let _usersQ = '';
+function usersSearch() {
+  _usersQ = document.getElementById('users-search').value;
+  clearTimeout(window._usersSearchTimer);
+  window._usersSearchTimer = setTimeout(() => loadUsers(0), 300);
+}
+
+async function loadUsers(offset = _usersPage * 50) {
+  const r = await api(`/admin-api/users?limit=50&offset=${offset}`);
+  if (!r || !r.ok) return;
+  const d = await r.json();
+  const tbody = document.getElementById('users-body');
+  const pager = document.getElementById('users-pager');
+  if (!tbody) return;
+
+  if (!d.users.length) { tbody.innerHTML = `<tr><td colspan="7" class="empty-state">No users found</td></tr>`; return; }
+
+  tbody.innerHTML = d.users.map(u => `
+    <tr>
+      <td><div style="font-weight:500">${u.email}</div><div class="mono">${u.key_prefix ? u.key_prefix + '…' : '—'}</div></td>
+      <td>${tierBadge(u.tier === 'free' ? 1 : u.tier === 'builder' ? 1 : u.tier === 'starter' ? 2 : 3)}&nbsp;<span class="badge badge-gray">${u.tier || 'free'}</span></td>
+      <td>${fmt(u.monthly_calls_count)}</td>
+      <td>${fmt(u.credits_balance)}</td>
+      <td class="text-muted">${fmtDate(u.created_at)}</td>
+      <td>${statusBadge(u.subscription_status !== 'suspended')}</td>
+      <td><div class="actions">
+        <button class="btn btn-sm btn-outline" onclick="viewUser('${u.id}','${u.email}')">View</button>
+      </div></td>
+    </tr>`).join('');
+
+  const page = Math.floor(offset / 50);
+  const total = d.total || 0;
+  const pages = Math.ceil(total / 50);
+  pager.innerHTML = `
+    <span>${fmt(total)} total</span>
+    <button class="page-btn" onclick="loadUsers(${(page-1)*50})" ${page===0?'disabled':''}>← Prev</button>
+    <span>Page ${page+1} / ${pages}</span>
+    <button class="page-btn" onclick="loadUsers(${(page+1)*50})" ${page>=pages-1?'disabled':''}>Next →</button>`;
+}
+
+function viewUser(id, email) {
+  toast('Opening user ' + email);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROVIDERS
+// ═══════════════════════════════════════════════════════════════════════════════
+let _providersSort = 'newest';
+let _providersQ = '';
+
+async function providers() {
+  set('main-content', `
+    <div class="page-header"><div class="page-title">Providers</div><div class="page-sub">Registered API providers</div></div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">All Providers</div>
+        <div class="toolbar">
+          <input class="search-input" id="prov-search" placeholder="Filter by email…" value="${_providersQ}" oninput="providersFilter()">
+          <select class="filter-select" id="prov-sort" onchange="providersSort()">
+            <option value="newest" ${_providersSort==='newest'?'selected':''}>Newest</option>
+            <option value="most_services" ${_providersSort==='most_services'?'selected':''}>Most Services</option>
+            <option value="most_calls" ${_providersSort==='most_calls'?'selected':''}>Most Calls</option>
+          </select>
+        </div>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Email</th><th>Company</th><th>Services</th><th>Total Calls</th><th>Verified</th><th>Joined</th><th>Status</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="prov-body"><tr class="loading-row"><td colspan="8"><div class="spinner"></div></td></tr></tbody>
+      </table>
+      <div class="pagination" id="prov-pager"></div>
+    </div>`);
+
+  await loadProviders();
+}
+
+function providersFilter() {
+  _providersQ = document.getElementById('prov-search').value;
+  clearTimeout(window._provTimer);
+  window._provTimer = setTimeout(() => loadProviders(), 300);
+}
+function providersSort() {
+  _providersSort = document.getElementById('prov-sort').value;
+  loadProviders();
+}
+
+async function loadProviders(offset = 0) {
+  const qs = new URLSearchParams({ q: _providersQ, sort: _providersSort, limit: 50, offset }).toString();
+  const r = await api('/admin-api/providers?' + qs);
+  if (!r || !r.ok) return;
+  const d = await r.json();
+  const tbody = document.getElementById('prov-body');
+  const pager = document.getElementById('prov-pager');
+  if (!tbody) return;
+
+  if (!d.providers.length) {
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state"><div class="empty-state-icon">🏢</div><div class="empty-state-title">No providers found</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = d.providers.map(p => `
+    <tr>
+      <td style="font-weight:500">${p.email}</td>
+      <td class="text-muted">${p.company_name || '—'}</td>
+      <td>${fmt(p.service_count)}</td>
+      <td>${fmt(p.total_calls)}</td>
+      <td>${p.verified ? '<span class="badge badge-green">✓ Yes</span>' : '<span class="badge badge-gray">No</span>'}</td>
+      <td class="text-muted">${fmtDate(p.created_at)}</td>
+      <td>${statusBadge(!p.suspended)}</td>
+      <td><div class="actions">
+        <button class="btn btn-sm btn-outline" onclick="providerDetail('${p.id}')">View</button>
+        ${p.suspended
+          ? `<button class="btn btn-sm btn-green" onclick="reinstateProvider('${p.id}','${p.email}')">Reinstate</button>`
+          : `<button class="btn btn-sm btn-red" onclick="suspendProvider('${p.id}','${p.email}')">Suspend</button>`}
+      </div></td>
+    </tr>`).join('');
+
+  const page = Math.floor(offset / 50);
+  const pages = Math.ceil((d.total || 0) / 50);
+  pager.innerHTML = `
+    <span>${fmt(d.total)} total</span>
+    <button class="page-btn" onclick="loadProviders(${(page-1)*50})" ${page===0?'disabled':''}>← Prev</button>
+    <span>Page ${page+1} / ${pages||1}</span>
+    <button class="page-btn" onclick="loadProviders(${(page+1)*50})" ${page>=pages-1?'disabled':''}>Next →</button>`;
+}
+
+function suspendProvider(id, email) {
+  confirm('Suspend Provider', `Suspend ${email}? Their services will remain in the catalog.`, async () => {
+    const r = await api(`/admin-api/providers/${id}/suspend`, { method: 'POST', body: '{}' });
+    if (r && r.ok) { toast('Provider suspended'); loadProviders(); }
+    else toast('Failed to suspend provider', 'error');
+  }, 'Suspend');
+}
+
+function reinstateProvider(id, email) {
+  confirm('Reinstate Provider', `Reinstate ${email}?`, async () => {
+    const r = await api(`/admin-api/providers/${id}/reinstate`, { method: 'POST', body: '{}' });
+    if (r && r.ok) { toast('Provider reinstated'); loadProviders(); }
+    else toast('Failed to reinstate provider', 'error');
+  }, 'Reinstate', 'btn-green');
+}
+
+// ── Provider Detail ───────────────────────────────────────────────────────────
+async function providerDetail(id) {
+  set('main-content', `
+    <div class="back-link" onclick="providers()">← Back to Providers</div>
+    <div id="prov-detail-content"><div style="text-align:center;padding:60px;color:#475569"><div class="spinner"></div></div></div>`);
+
+  const r = await api(`/admin-api/providers/${id}`);
+  if (!r || !r.ok) { document.getElementById('prov-detail-content').innerHTML = '<div class="empty-state">Provider not found.</div>'; return; }
+  const d = await r.json();
+  const p = d.provider;
+
+  document.getElementById('prov-detail-content').innerHTML = `
+    <!-- Info Card -->
+    <div class="card" style="margin-bottom:24px">
+      <div class="card-header">
+        <div>
+          <div class="card-title">${p.company_name || p.email}</div>
+          <div class="text-muted text-sm" style="margin-top:2px">${p.email}</div>
+        </div>
+        <div class="actions">
+          ${p.suspended
+            ? `<button class="btn btn-green" onclick="reinstateProviderDetail('${p.id}','${p.email}')">Reinstate</button>`
+            : `<button class="btn btn-red"   onclick="suspendProviderDetail('${p.id}','${p.email}')">Suspend</button>`}
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0;border-top:1px solid #334155">
+        ${[
+          ['Status', p.suspended ? '<span class="badge badge-red">Suspended</span>' : '<span class="badge badge-green">Active</span>'],
+          ['Verified', p.verified ? '<span class="badge badge-green">✓ Yes</span>' : '<span class="badge badge-gray">No</span>'],
+          ['Tier', `<span class="badge badge-purple">${p.tier || 'observer'}</span>`],
+          ['Joined', fmtDate(p.created_at)],
+          ['Last Login', fmtDate(p.last_login_at)],
+          ['Services', fmt(d.services.length)],
+        ].map(([label, val]) => `
+          <div style="padding:16px 20px;border-right:1px solid #1e293b">
+            <div class="stat-label">${label}</div>
+            <div style="margin-top:6px;font-size:13px">${val}</div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <!-- Services Table -->
+    <div class="card">
+      <div class="card-header"><div class="card-title">Services (${d.services.length})</div></div>
+      <table>
+        <thead><tr>
+          <th>Slug</th><th>Name</th><th>Category</th><th>Tier</th><th>Verified</th><th>Calls</th><th>Price (USDC)</th><th>Actions</th>
+        </tr></thead>
+        <tbody>
+          ${!d.services.length
+            ? `<tr><td colspan="8" class="empty-state">No services registered</td></tr>`
+            : d.services.map(s => `
+            <tr>
+              <td class="mono">${s.slug}</td>
+              <td style="font-weight:500">${s.name}</td>
+              <td class="text-muted">${s.category || '—'}</td>
+              <td>${tierBadge(s.tier)}</td>
+              <td>${s.verified ? '<span class="badge badge-green">✓</span>' : '<span class="badge badge-gray">No</span>'}</td>
+              <td>${fmt(s.calls)}</td>
+              <td class="mono">${s.price ? '$' + Number(s.price).toFixed(4) : '—'}</td>
+              <td><div class="actions">
+                ${s.tier < 2
+                  ? `<button class="btn btn-sm btn-green" onclick="verifySvc('${s.slug}', this)">Verify</button>`
+                  : `<button class="btn btn-sm btn-yellow" onclick="demoteSvc('${s.slug}', this)">Demote</button>`}
+                <button class="btn btn-sm btn-outline" onclick="openEditSvc('${s.slug}','${s.name}','${s.category}','${s.tier}','${s.price}','false')">Edit</button>
+                <button class="btn btn-sm btn-red" onclick="deleteSvcConfirm('${s.slug}', () => providerDetail('${p.id}'))">Delete</button>
+              </div></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function suspendProviderDetail(id, email) {
+  confirm('Suspend Provider', `Suspend ${email}?`, async () => {
+    const r = await api(`/admin-api/providers/${id}/suspend`, { method: 'POST', body: '{}' });
+    if (r && r.ok) { toast('Suspended'); providerDetail(id); }
+    else toast('Failed', 'error');
+  }, 'Suspend');
+}
+function reinstateProviderDetail(id, email) {
+  confirm('Reinstate Provider', `Reinstate ${email}?`, async () => {
+    const r = await api(`/admin-api/providers/${id}/reinstate`, { method: 'POST', body: '{}' });
+    if (r && r.ok) { toast('Reinstated'); providerDetail(id); }
+    else toast('Failed', 'error');
+  }, 'Reinstate', 'btn-green');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SERVICES
+// ═══════════════════════════════════════════════════════════════════════════════
+let _svcsOffset = 0;
+let _svcsFilters = { q: '', category: '', tier: '', verified: '', x402: '' };
+let _svcsSelected = new Set();
+
+async function services() {
+  set('main-content', `
+    <div class="page-header"><div class="page-title">Services</div><div class="page-sub">Full catalog management</div></div>
+    <div class="bulk-bar" id="bulk-bar">
+      <span id="bulk-count">0 selected</span>
+      <button class="btn btn-sm btn-green" onclick="bulkAction('verify')">✓ Verify All</button>
+      <button class="btn btn-sm btn-red" onclick="bulkAction('delete')">🗑 Delete All</button>
+      <button class="btn btn-sm btn-default" onclick="clearSelection()">Clear</button>
+    </div>
+    <div class="card">
+      <div class="card-header" style="flex-wrap:wrap;gap:10px">
+        <div class="card-title">Service Catalog</div>
+        <div class="toolbar">
+          <input class="search-input" id="svcs-q" placeholder="Search slug or name…" oninput="svcsFilter('q',this.value)">
+          <select class="filter-select" id="svcs-cat" onchange="svcsFilter('category',this.value)">
+            <option value="">All categories</option>
+          </select>
+          <select class="filter-select" onchange="svcsFilter('tier',this.value)">
+            <option value="">All tiers</option>
+            <option value="1">Tier 1</option>
+            <option value="2">Tier 2</option>
+            <option value="3">Tier 3</option>
+          </select>
+          <select class="filter-select" onchange="svcsFilter('verified',this.value)">
+            <option value="">Any verified</option>
+            <option value="true">Verified only</option>
+            <option value="false">Unverified only</option>
+          </select>
+          <select class="filter-select" onchange="svcsFilter('x402',this.value)">
+            <option value="">Any x402</option>
+            <option value="true">x402 only</option>
+            <option value="false">No x402</option>
+          </select>
+        </div>
+      </div>
+      <table>
+        <thead><tr>
+          <th class="checkbox-col"><input type="checkbox" id="select-all" onchange="toggleSelectAll(this)"></th>
+          <th>Slug</th><th>Name</th><th>Category</th><th>Tier</th><th>Verified</th><th>x402</th><th>Calls</th><th>Provider</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="svcs-body"><tr class="loading-row"><td colspan="10"><div class="spinner"></div></td></tr></tbody>
+      </table>
+      <div class="pagination" id="svcs-pager"></div>
+    </div>`);
+
+  _svcsFilters = { q: '', category: '', tier: '', verified: '', x402: '' };
+  _svcsSelected.clear();
+  await loadServices();
+}
+
+function svcsFilter(key, val) {
+  _svcsFilters[key] = val;
+  _svcsOffset = 0;
+  clearTimeout(window._svcsTimer);
+  window._svcsTimer = setTimeout(() => loadServices(), key === 'q' ? 300 : 0);
+}
+
+async function loadServices(offset = _svcsOffset) {
+  _svcsOffset = offset;
+  const qs = new URLSearchParams({ ...Object.fromEntries(Object.entries(_svcsFilters).filter(([,v])=>v)), limit: 50, offset }).toString();
+  const r = await api('/admin-api/catalog/services?' + qs);
+  if (!r || !r.ok) return;
+  const d = await r.json();
+  const tbody = document.getElementById('svcs-body');
+  const pager = document.getElementById('svcs-pager');
+  if (!tbody) return;
+
+  // Populate category dropdown once
+  const catEl = document.getElementById('svcs-cat');
+  if (catEl && catEl.options.length <= 1 && d.categories) {
+    d.categories.forEach(c => {
+      const o = document.createElement('option'); o.value = c; o.textContent = c; catEl.appendChild(o);
+    });
+    if (_svcsFilters.category) catEl.value = _svcsFilters.category;
+  }
+
+  if (!d.services.length) {
+    tbody.innerHTML = `<tr><td colspan="10"><div class="empty-state"><div class="empty-state-icon">⚡</div><div class="empty-state-title">No services found</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = d.services.map(s => `
+    <tr>
+      <td><input type="checkbox" class="svc-check" value="${s.slug}" onchange="toggleSelect(this)" ${_svcsSelected.has(s.slug)?'checked':''}></td>
+      <td class="mono">${s.slug || '—'}</td>
+      <td style="font-weight:500;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.name}</td>
+      <td class="text-muted">${s.category || '—'}</td>
+      <td>${tierBadge(s.tier)}</td>
+      <td>${s.tier >= 2 ? '<span class="badge badge-green">✓</span>' : '<span class="badge badge-gray">—</span>'}</td>
+      <td>${s.x402_supported ? '<span class="badge badge-purple">x402</span>' : '<span class="text-muted">—</span>'}</td>
+      <td>${fmt(s.calls)}</td>
+      <td class="text-muted text-sm" style="max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.provider || '—'}</td>
+      <td><div class="actions">
+        ${s.tier < 2
+          ? `<button class="btn btn-sm btn-green" onclick="verifySvc('${s.slug}',this)">Verify</button>`
+          : `<button class="btn btn-sm btn-yellow" onclick="demoteSvc('${s.slug}',this)">Demote</button>`}
+        <button class="btn btn-sm btn-outline" onclick="openEditSvc('${s.slug}','${(s.name||'').replace(/'/g,"\\'")}','${s.category||''}','${s.tier||1}','${s.price||0}','${s.x402_supported?'true':'false'}')">Edit</button>
+        <button class="btn btn-sm btn-red" onclick="deleteSvcConfirm('${s.slug}', loadServices)">Delete</button>
+      </div></td>
+    </tr>`).join('');
+
+  const page = Math.floor(offset / 50);
+  const pages = Math.ceil((d.total || 0) / 50);
+  pager.innerHTML = `
+    <span>${fmt(d.total)} services</span>
+    <button class="page-btn" onclick="loadServices(${(page-1)*50})" ${page===0?'disabled':''}>← Prev</button>
+    <span>Page ${page+1} / ${pages||1}</span>
+    <button class="page-btn" onclick="loadServices(${(page+1)*50})" ${page>=pages-1?'disabled':''}>Next →</button>`;
+}
+
+function toggleSelectAll(cb) {
+  document.querySelectorAll('.svc-check').forEach(el => {
+    el.checked = cb.checked;
+    if (cb.checked) _svcsSelected.add(el.value); else _svcsSelected.delete(el.value);
+  });
+  updateBulkBar();
+}
+function toggleSelect(el) {
+  if (el.checked) _svcsSelected.add(el.value); else _svcsSelected.delete(el.value);
+  updateBulkBar();
+}
+function updateBulkBar() {
+  const bar = document.getElementById('bulk-bar');
+  const cnt = document.getElementById('bulk-count');
+  if (!bar) return;
+  bar.style.display = _svcsSelected.size > 0 ? 'flex' : 'none';
+  if (cnt) cnt.textContent = _svcsSelected.size + ' selected';
+}
+function clearSelection() {
+  _svcsSelected.clear();
+  document.querySelectorAll('.svc-check').forEach(el => el.checked = false);
+  const all = document.getElementById('select-all'); if (all) all.checked = false;
+  updateBulkBar();
+}
+async function bulkAction(action) {
+  const slugs = [..._svcsSelected];
+  if (!slugs.length) return;
+  const label = action === 'verify' ? 'verify' : 'delete';
+  confirm(`Bulk ${label}`, `${label.charAt(0).toUpperCase()+label.slice(1)} ${slugs.length} services?`, async () => {
+    const r = await api('/admin-api/catalog/services/bulk', {
+      method: 'POST', body: JSON.stringify({ slugs, action }),
+    });
+    if (r && r.ok) { toast(`${slugs.length} services ${label}d`); clearSelection(); loadServices(); }
+    else toast('Bulk action failed', 'error');
+  }, label.charAt(0).toUpperCase()+label.slice(1), action === 'delete' ? 'btn-red' : 'btn-green');
+}
+
+// ── Service Actions ───────────────────────────────────────────────────────────
+async function verifySvc(slug, btn) {
+  if (btn) { btn.textContent = '…'; btn.disabled = true; }
+  const r = await api(`/admin-api/catalog/services/${slug}/verify`, { method: 'POST', body: '{}' });
+  if (r && r.ok) { toast(`${slug} verified`); loadServices(_svcsOffset); }
+  else { toast('Failed', 'error'); if (btn) { btn.textContent = 'Verify'; btn.disabled = false; } }
+}
+async function demoteSvc(slug, btn) {
+  if (btn) { btn.textContent = '…'; btn.disabled = true; }
+  const r = await api(`/admin-api/catalog/services/${slug}/demote`, { method: 'POST', body: '{}' });
+  if (r && r.ok) { toast(`${slug} demoted`); loadServices(_svcsOffset); }
+  else { toast('Failed', 'error'); if (btn) { btn.textContent = 'Demote'; btn.disabled = false; } }
+}
+function deleteSvcConfirm(slug, onDone) {
+  confirm('Delete Service', `Permanently delete "${slug}" from the catalog?`, async () => {
+    const r = await api(`/admin-api/catalog/services/${slug}`, { method: 'DELETE' });
+    if (r && r.ok) { toast(`${slug} deleted`); if (typeof onDone === 'function') onDone(); }
+    else toast('Delete failed', 'error');
+  }, 'Delete');
+}
+
+function openEditSvc(slug, name, category, tier, price, x402) {
+  _editSvcSlug = slug;
+  document.getElementById('es-name').value        = name;
+  document.getElementById('es-category').value    = category;
+  document.getElementById('es-tier').value        = tier;
+  document.getElementById('es-price').value       = price;
+  document.getElementById('es-x402').value        = x402;
+  // description requires a separate fetch
+  api(`/admin-api/catalog/services?q=${encodeURIComponent(slug)}&limit=1`).then(async r => {
+    if (r && r.ok) {
+      const d = await r.json();
+      const svc = d.services.find(s => s.slug === slug);
+      if (svc) document.getElementById('es-description').value = svc.description || '';
+    }
+  });
+  showModal('edit-svc-modal');
+}
+async function saveEditService() {
+  if (!_editSvcSlug) return;
+  const body = {
+    name:         document.getElementById('es-name').value,
+    description:  document.getElementById('es-description').value,
+    category:     document.getElementById('es-category').value,
+    coverage_tier: parseInt(document.getElementById('es-tier').value),
+    pricing_usdc:  parseFloat(document.getElementById('es-price').value) || 0,
+    x402_supported: document.getElementById('es-x402').value === 'true',
+  };
+  const r = await api(`/admin-api/catalog/services/${_editSvcSlug}`, {
+    method: 'PATCH', body: JSON.stringify(body),
+  });
+  if (r && r.ok) {
+    toast(`${_editSvcSlug} updated`);
+    closeModal('edit-svc-modal');
+    loadServices(_svcsOffset);
+  } else {
+    toast('Update failed', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATS
+// ═══════════════════════════════════════════════════════════════════════════════
+async function stats() {
+  set('main-content', `
+    <div class="page-header"><div class="page-title">Stats</div><div class="page-sub">Platform analytics</div></div>
+    <div id="stats-content" style="text-align:center;padding:60px;color:#475569"><div class="spinner"></div></div>`);
+
+  const r = await api('/admin-api/overview');
+  if (!r || !r.ok) return;
+  const d = await r.json();
+  const s = d.stats;
+
+  document.getElementById('stats-content').innerHTML = `
+    <div class="stats-grid">
+      ${[
+        ['Services', fmt(s.total_services)],
+        ['Tier 2 Verified', fmt(s.tier2)],
+        ['Users', fmt(s.total_users)],
+        ['API Keys', fmt(s.total_keys)],
+        ['Searches 24h', fmt(s.searches_24h)],
+        ['Searches 7d', fmt(s.searches_7d)],
+        ['Agents', fmt(s.total_agents)],
+      ].map(([l,v]) => `<div class="stat-card"><div class="stat-label">${l}</div><div class="stat-value">${v}</div></div>`).join('')}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+      <div class="card">
+        <div class="card-header"><div class="card-title">Daily Searches (30d)</div></div>
+        <div style="padding:20px" id="stats-search-chart">Loading…</div>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-title">Daily Signups (30d)</div></div>
+        <div style="padding:20px" id="stats-signup-chart">Loading…</div>
+      </div>
+    </div>`;
+
+  renderSparkline('stats-search-chart', d.daily_searches);
+  renderSparkline('stats-signup-chart', d.daily_signups);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HEALTH
+// ═══════════════════════════════════════════════════════════════════════════════
+async function health() {
+  set('main-content', `
+    <div class="page-header"><div class="page-title">Health</div><div class="page-sub">System and service health</div></div>
+    <div id="health-content" style="text-align:center;padding:60px;color:#475569"><div class="spinner"></div></div>`);
+
+  const [statusR, overR] = await Promise.all([
+    fetch('/status'),
+    api('/admin-api/overview'),
+  ]);
+
+  let statusData = null, overData = null;
+  try { if (statusR.ok) statusData = await statusR.json(); } catch {}
+  try { if (overR && overR.ok) overData = await overR.json(); } catch {}
+
+  const dbOk = statusData?.status !== 'error';
+
+  document.getElementById('health-content').innerHTML = `
+    <div class="stats-grid" style="margin-bottom:20px">
+      <div class="stat-card"><div class="stat-label">API</div><div class="stat-value" style="font-size:20px">${statusData ? '✓ Online' : '✗ Error'}</div></div>
+      <div class="stat-card"><div class="stat-label">Database</div><div class="stat-value" style="font-size:20px">${dbOk ? '✓ Ok' : '✗ Error'}</div></div>
+      <div class="stat-card"><div class="stat-label">Version</div><div class="stat-value" style="font-size:20px">${statusData?.version || '—'}</div></div>
+    </div>
+    ${overData ? `
+    <div class="card">
+      <div class="card-header"><div class="card-title">Overview</div></div>
+      <div style="padding:20px;color:#94a3b8;font-size:14px">
+        Services: <b>${fmt(overData.stats.total_services)}</b> &nbsp;|&nbsp;
+        Users: <b>${fmt(overData.stats.total_users)}</b> &nbsp;|&nbsp;
+        Searches 24h: <b>${fmt(overData.stats.searches_24h)}</b> &nbsp;|&nbsp;
+        Pending KYB: <b>${fmt(overData.stats.pending_tier3)}</b>
+      </div>
+    </div>` : ''}`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TIER 3
+// ═══════════════════════════════════════════════════════════════════════════════
+function tier3() {
+  set('main-content', `
+    <div class="page-header"><div class="page-title">Tier 3 KYB</div><div class="page-sub">Provider identity verification</div></div>
+    <div class="card">
+      <div style="padding:60px 20px;text-align:center">
+        <div style="font-size:48px;margin-bottom:16px">🔒</div>
+        <div style="font-size:20px;font-weight:700;color:#e2e8f0;margin-bottom:12px">KYB verification launching with v0.7.0</div>
+        <div style="font-size:15px;color:#64748b;max-width:440px;margin:0 auto 28px;line-height:1.7">
+          Provider Know Your Business (KYB) verification is not yet active.<br>
+          For now, manually verify providers from the Providers tab.
+        </div>
+        <button class="btn btn-blue" style="padding:10px 24px;font-size:14px" onclick="nav('providers')">Go to Providers →</button>
+      </div>
+    </div>`);
+}
+</script>
+</body>
+</html>
