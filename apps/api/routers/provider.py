@@ -252,12 +252,18 @@ async def provider_me(request: Request, db=Depends(get_db)):
     """Return current provider profile and service."""
     provider = await _get_provider(request, db)
     svc = await _get_provider_service(db, provider["provider_id"])
+    services_count = await db.fetchval(
+        "SELECT COUNT(*) FROM provider_services WHERE provider_id = $1",
+        provider["provider_id"],
+    ) or 0
     return {
         "provider_id": str(provider["provider_id"]),
         "company_name": provider["company_name"],
         "email": provider["email"],
         "tier": provider["tier"],
         "verified": provider["verified"],
+        "verification_status": "verified" if provider["verified"] else "pending",
+        "services_count": int(services_count),
         "service": {
             "slug": svc["service_slug"] if svc else None,
             "name": svc["service_name"] if svc else None,
@@ -345,6 +351,19 @@ async def provider_overview(request: Request, db=Depends(get_db)):
             avg_ms = round(float(probe_stats["avg_ms"] or 0))
             uptime_7d = round(probe_stats["ok"] * 100.0 / probe_stats["total"], 1)
 
+    # Services count and estimated earnings
+    services_listed = await db.fetchval(
+        "SELECT COUNT(*) FROM provider_services WHERE provider_id = $1",
+        provider["provider_id"],
+    ) or 0
+    pricing_row = await db.fetchrow(
+        "SELECT pricing_usdc FROM services WHERE slug = $1 LIMIT 1", slug
+    )
+    price_per_call = float(pricing_row["pricing_usdc"] or 0) if pricing_row else 0.0
+    estimated_earnings_usdc = round(
+        (calls_this_month + calls_last_month) * price_per_call, 4
+    )
+
     # Category rank
     category = svc_row["category"] if svc_row else None
     wri_score = float(svc_row["wri_score"] or 0) if svc_row else 0.0
@@ -405,6 +424,8 @@ async def provider_overview(request: Request, db=Depends(get_db)):
             "uptime_7d_pct": uptime_7d,
             "total_signals": total_signals,
             "payment_rate": payment_rate,
+            "services_listed": int(services_listed),
+            "estimated_earnings_usdc": estimated_earnings_usdc,
         },
         "wri_trend": wri_trend,
     }
@@ -413,15 +434,8 @@ async def provider_overview(request: Request, db=Depends(get_db)):
 @router.get("/provider/queries", tags=["Provider"])
 @limiter.limit("30/minute")
 async def provider_queries(request: Request, db=Depends(get_db)):
-    """Search queries that discovered this service. Intelligence+ tier only."""
+    """Search queries that discovered this service."""
     provider = await _get_provider(request, db)
-    if provider["tier"] == "observer":
-        raise HTTPException(status_code=403, detail={
-            "error": "upgrade_required",
-            "message": "Query analytics require the Intelligence plan ($99/month).",
-            "upgrade_url": "https://wayforth.io/providers/upgrade",
-        })
-
     svc = await _get_provider_service(db, provider["provider_id"])
     if not svc:
         raise HTTPException(status_code=404, detail={"error": "no_service_registered"})
@@ -445,7 +459,7 @@ async def provider_queries(request: Request, db=Depends(get_db)):
     queries = [
         {
             "query": r["query_text"],
-            "times_shown": r["times_shown"],
+            "times_shown": int(r["times_shown"]),
             "times_executed": int(r["times_executed"] or 0),
             "conversion_rate": round(int(r["times_executed"] or 0) * 100.0 / max(r["times_shown"], 1), 1),
             "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
@@ -453,25 +467,26 @@ async def provider_queries(request: Request, db=Depends(get_db)):
         for r in rows
     ]
 
+    if not queries:
+        queries = [
+            {"query": "fast inference api", "times_shown": 12, "times_executed": 3, "conversion_rate": 25.0, "last_seen": None},
+            {"query": "llm inference endpoint", "times_shown": 8, "times_executed": 1, "conversion_rate": 12.5, "last_seen": None},
+            {"query": "cheap gpt alternative", "times_shown": 5, "times_executed": 0, "conversion_rate": 0.0, "last_seen": None},
+        ]
+
     return {
         "queries": queries,
         "total_unique_queries": len(queries),
         "period": "last_30_days",
+        "is_sample": len(rows) == 0,
     }
 
 
 @router.get("/provider/competitors", tags=["Provider"])
 @limiter.limit("30/minute")
 async def provider_competitors(request: Request, db=Depends(get_db)):
-    """Competitive positioning within the same category. Intelligence+ tier only."""
+    """Competitive positioning within the same category."""
     provider = await _get_provider(request, db)
-    if provider["tier"] == "observer":
-        raise HTTPException(status_code=403, detail={
-            "error": "upgrade_required",
-            "message": "Competitor data requires the Intelligence plan ($99/month).",
-            "upgrade_url": "https://wayforth.io/providers/upgrade",
-        })
-
     svc = await _get_provider_service(db, provider["provider_id"])
     if not svc:
         raise HTTPException(status_code=404, detail={"error": "no_service_registered"})
@@ -481,8 +496,20 @@ async def provider_competitors(request: Request, db=Depends(get_db)):
         "SELECT category, wri_score FROM services WHERE slug = $1 OR name ILIKE $2 LIMIT 1",
         slug, f"%{SERVICE_DISPLAY_NAMES.get(slug, slug)}%",
     )
-    if not svc_row:
-        raise HTTPException(status_code=404, detail={"error": "service_not_in_catalog"})
+
+    if not svc_row or not svc_row["category"]:
+        # No catalog entry or category — return sample data
+        return {
+            "your_service": {"slug": slug, "wri_score": 0.0, "category_rank": 1},
+            "competitors": [
+                {"label": "Competitor A", "wri_score": 72.4, "category_rank": 2, "signals": 18, "managed": False},
+                {"label": "Competitor B", "wri_score": 68.1, "category_rank": 3, "signals": 9, "managed": False},
+                {"label": "Competitor C", "wri_score": 61.5, "category_rank": 4, "signals": 4, "managed": True},
+            ],
+            "category": None,
+            "total_in_category": 4,
+            "is_sample": True,
+        }
 
     category = svc_row["category"]
     my_wri = float(svc_row["wri_score"] or 0)
@@ -493,7 +520,7 @@ async def provider_competitors(request: Request, db=Depends(get_db)):
         FROM services s
         LEFT JOIN search_analytics sa ON sa.clicked_slug = s.slug
             AND sa.created_at >= NOW() - INTERVAL '30 days'
-        WHERE s.category = $1 AND s.wri_score IS NOT NULL
+        WHERE s.category = $1 AND s.wri_score IS NOT NULL AND s.source != 'demo'
         GROUP BY s.slug, s.name, s.wri_score
         ORDER BY s.wri_score DESC
     """, category)
@@ -528,6 +555,7 @@ async def provider_competitors(request: Request, db=Depends(get_db)):
         "competitors": competitors_out[:9],
         "category": category,
         "total_in_category": len(peers),
+        "is_sample": False,
     }
 
 
@@ -629,15 +657,8 @@ async def provider_performance(request: Request, db=Depends(get_db)):
 @router.get("/provider/agents", tags=["Provider"])
 @limiter.limit("30/minute")
 async def provider_agents(request: Request, db=Depends(get_db)):
-    """Agent tier breakdown for callers of this service. Premium tier only."""
+    """Agent IDs that called this service, with call count and last active."""
     provider = await _get_provider(request, db)
-    if provider["tier"] != "premium":
-        raise HTTPException(status_code=403, detail={
-            "error": "upgrade_required",
-            "message": "Agent analytics require the Premium plan ($299/month).",
-            "upgrade_url": "https://wayforth.io/providers/upgrade",
-        })
-
     svc = await _get_provider_service(db, provider["provider_id"])
     if not svc:
         raise HTTPException(status_code=404, detail={"error": "no_service_registered"})
@@ -645,7 +666,37 @@ async def provider_agents(request: Request, db=Depends(get_db)):
     slug = svc["service_slug"]
     month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    # Wallet-based callers (x402) joined with identity
+    # Per-agent call counts from agent_identities joined with search_analytics
+    agent_rows = await db.fetch("""
+        SELECT ai.agent_id,
+               ai.total_searches AS call_count,
+               ai.last_active_at
+        FROM agent_identities ai
+        WHERE EXISTS (
+            SELECT 1 FROM search_analytics sa
+            WHERE sa.session_id = ai.agent_id
+        )
+        ORDER BY ai.last_active_at DESC NULLS LAST
+        LIMIT 50
+    """)
+
+    agents = [
+        {
+            "agent_id": r["agent_id"],
+            "call_count": int(r["call_count"] or 0),
+            "last_active": r["last_active_at"].isoformat() if r["last_active_at"] else None,
+        }
+        for r in agent_rows
+    ]
+
+    if not agents:
+        agents = [
+            {"agent_id": "agent_sample_a1b2c3", "call_count": 47, "last_active": None},
+            {"agent_id": "agent_sample_d4e5f6", "call_count": 23, "last_active": None},
+            {"agent_id": "agent_sample_g7h8i9", "call_count": 8, "last_active": None},
+        ]
+
+    # Wallet-based tier breakdown
     wallet_rows = await db.fetch("""
         SELECT xi.tier,
                COUNT(DISTINCT xi.wallet_address) AS count
@@ -663,9 +714,8 @@ async def provider_agents(request: Request, db=Depends(get_db)):
         if r["tier"] in tier_counts:
             tier_counts[r["tier"]] = int(r["count"])
 
-    total_unique = sum(tier_counts.values())
+    total_unique = sum(tier_counts.values()) or len(agents)
 
-    # Returning agents (called before this month)
     returning = await db.fetchval("""
         SELECT COUNT(DISTINCT service_id)
         FROM credit_transactions
@@ -683,10 +733,12 @@ async def provider_agents(request: Request, db=Depends(get_db)):
     """, slug, month_start) or 0
 
     return {
+        "agents": agents,
         "agent_tiers": tier_counts,
         "total_unique_agents": total_unique,
         "returning_agents": int(returning),
         "new_agents_this_month": int(new_this_month),
+        "is_sample": len(agent_rows) == 0,
     }
 
 
