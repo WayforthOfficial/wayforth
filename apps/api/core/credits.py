@@ -154,6 +154,35 @@ async def compute_calls_remaining(conn, api_key_id: str) -> int:
     return max(0, p["calls_included"] - row["monthly_calls_count"])
 
 
+async def _maybe_send_usage_warning_email(pool, user_id: str, calls_remaining: int, percent_used: int, tier: str) -> None:
+    try:
+        async with pool.acquire() as _conn:
+            row = await _conn.fetchrow(
+                """SELECT u.email, ak.monthly_calls_reset_at
+                   FROM users u
+                   JOIN api_keys ak ON ak.user_id = u.id
+                   WHERE u.id = $1::uuid AND ak.active = true LIMIT 1""",
+                user_id,
+            )
+        if row and row["email"]:
+            reset_dt = row["monthly_calls_reset_at"]
+            reset_date = reset_dt.strftime("%B %d") if reset_dt else "next month"
+            import asyncio as _asyncio
+            await _asyncio.to_thread(
+                _send_usage_warning_email, row["email"], calls_remaining, percent_used, tier, reset_date
+            )
+    except Exception as _e:
+        logger.warning("_maybe_send_usage_warning_email error: %s", _e)
+
+
+def _send_usage_warning_email(to_email: str, calls_remaining: int, percent_used: int, tier: str, reset_date: str) -> None:
+    try:
+        from notifications import send_usage_warning_email
+        send_usage_warning_email(to_email, calls_remaining, percent_used, tier, reset_date)
+    except Exception as _e:
+        logger.warning("send_usage_warning_email error: %s", _e)
+
+
 async def _increment_calls(pool, api_key_id: str) -> int:
     """Single increment site for calls_count and monthly_calls_count.
     All call paths (/run, /execute) go through here — nowhere else.
@@ -179,12 +208,27 @@ async def _increment_calls(pool, api_key_id: str) -> int:
                 api_key_id, row["calls_count"], row["monthly_calls_count"],
                 row["tier"], remaining,
             )
-            # Fire wayf.balance_low on exactly crossing the 10% threshold
+            # Fire usage alerts on threshold crossings (fires exactly once per crossing)
             monthly_limit = p["calls_included"]
             if monthly_limit > 0:
-                threshold = monthly_limit * 0.10
-                if 0 < remaining < threshold and (remaining + 1) >= threshold:
-                    import asyncio as _asyncio
+                import asyncio as _asyncio
+                # 80% used — 20% remaining
+                t80 = monthly_limit * 0.20
+                if 0 < remaining < t80 and (remaining + 1) >= t80:
+                    _asyncio.create_task(_dispatch_webhooks(
+                        str(row["user_id"]), "wayf.balance_warning_80", {
+                            "calls_remaining": remaining,
+                            "monthly_limit": monthly_limit,
+                            "threshold_percent": 80,
+                            "tier": row["tier"],
+                        }
+                    ))
+                    _asyncio.create_task(_maybe_send_usage_warning_email(
+                        pool, str(row["user_id"]), remaining, 80, row["tier"]
+                    ))
+                # 90% used — 10% remaining (existing wayf.balance_low)
+                t10 = monthly_limit * 0.10
+                if 0 < remaining < t10 and (remaining + 1) >= t10:
                     _asyncio.create_task(_dispatch_webhooks(
                         str(row["user_id"]), "wayf.balance_low", {
                             "calls_remaining": remaining,
@@ -192,6 +236,20 @@ async def _increment_calls(pool, api_key_id: str) -> int:
                             "threshold_percent": 10,
                             "tier": row["tier"],
                         }
+                    ))
+                # 95% used — 5% remaining
+                t5 = monthly_limit * 0.05
+                if 0 < remaining < t5 and (remaining + 1) >= t5:
+                    _asyncio.create_task(_dispatch_webhooks(
+                        str(row["user_id"]), "wayf.balance_warning_95", {
+                            "calls_remaining": remaining,
+                            "monthly_limit": monthly_limit,
+                            "threshold_percent": 95,
+                            "tier": row["tier"],
+                        }
+                    ))
+                    _asyncio.create_task(_maybe_send_usage_warning_email(
+                        pool, str(row["user_id"]), remaining, 95, row["tier"]
                     ))
             return remaining
         logger.error("CALLS_INCREMENT_NOMATCH key=%s — UPDATE matched 0 rows", api_key_id)
