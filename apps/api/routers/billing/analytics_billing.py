@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from core.credits import check_and_deduct_credits
+from core.credits import check_and_deduct_credits, PAYMENT_MULTIPLIERS
 from core.db import get_db
 from core.rate_limit import limiter
 
@@ -42,12 +42,20 @@ async def get_transactions(request: Request, limit: int = 50, offset: int = 0, d
         key_record['user_id']
     )
 
+    credits_row = await db.fetchrow(
+        "SELECT payment_method FROM user_credits WHERE user_id = $1",
+        key_record['user_id']
+    )
+    user_payment_method = (credits_row["payment_method"] if credits_row else None) or "card"
+    user_multiplier = PAYMENT_MULTIPLIERS.get(user_payment_method, 1.00)
+
     _type_map = {
         "usage": "execution", "byok": "execution", "managed": "execution",
         "byok_10pct": "execution", "managed_30pct": "execution",
         "purchase": "purchase", "mock_purchase": "purchase",
         "mock_topup": "credits_added", "refund": "refund",
     }
+    _purchase_types = {"purchase", "credits_added"}
 
     def _clean_tx(t):
         row = dict(t)
@@ -58,6 +66,12 @@ async def get_transactions(request: Request, limit: int = 50, offset: int = 0, d
         if row["type"] == "credits_added" and "mock" in desc.lower():
             desc = "Credits added (test)"
         row["description"] = desc
+        if row["type"] in _purchase_types:
+            row["payment_method"] = user_payment_method
+            row["multiplier_applied"] = user_multiplier
+        else:
+            row["payment_method"] = None
+            row["multiplier_applied"] = None
         return row
 
     return {
