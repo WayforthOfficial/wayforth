@@ -111,7 +111,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
                 }
             )
 
-    conditions = ["coverage_tier >= $1"]
+    conditions = ["coverage_tier >= $1", "source != 'demo'"]
     params: list = [body.tier_min if body.tier_min is not None else 0]
     idx = 2
 
