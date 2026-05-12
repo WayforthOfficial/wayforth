@@ -202,3 +202,107 @@ def send_welcome_email(to_email: str, api_key_prefix: str, tier: str) -> bool:
     except Exception as e:
         logger.error(f"Welcome email failed: {e}")
         return False
+
+
+def send_usage_warning_email(to_email: str, calls_remaining: int, percent_used: int, plan: str, reset_date: str) -> bool:
+    if not resend.api_key or not to_email:
+        return False
+    icon = "⚠" if percent_used == 80 else "🚨"
+    color = "#F59E0B" if percent_used == 80 else "#EF4444"
+    extra = "" if percent_used == 80 else " Upgrade now to avoid interruption."
+    try:
+        resend.Emails.send({
+            "from": FROM_EMAIL,
+            "to": to_email,
+            "subject": f"You've used {percent_used}% of your Wayforth monthly calls",
+            "html": f"""
+            <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0F172A;color:#E2E8F0;padding:40px;border-radius:12px;">
+                <h1 style="color:#4F46E5;margin:0 0 8px">Wayforth</h1>
+                <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0;border-left:4px solid {color};">
+                    <p style="color:{color};font-weight:bold;margin:0 0 8px">{icon} {percent_used}% of monthly calls used</p>
+                    <p style="color:#E2E8F0;font-size:18px;font-weight:bold;margin:0">{calls_remaining:,} calls remaining</p>
+                    <p style="color:#94A3B8;font-size:13px;margin:8px 0 0">
+                        {plan.title()} plan · Resets {reset_date}{extra}
+                    </p>
+                </div>
+                <p style="margin-top:24px">
+                    <a href="https://wayforth.io/billing" style="background:#4F46E5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Upgrade at wayforth.io/billing →</a>
+                </p>
+                <p style="margin-top:32px;color:#64748B;font-size:13px">Wayforth · <a href="https://wayforth.io" style="color:#4F46E5">wayforth.io</a></p>
+            </div>
+            """,
+        })
+        return True
+    except Exception as e:
+        logger.warning("send_usage_warning_email failed: %s", e)
+        return False
+
+
+def send_payment_failed_email(to_email: str, plan_name: str, attempt: int) -> bool:
+    if not resend.api_key or not to_email:
+        return False
+    if attempt == 1:
+        subject = "Your Wayforth payment failed"
+        body = (
+            f"We couldn't process your payment for {plan_name}. "
+            "Please update your payment method at wayforth.io/billing "
+            f"to keep your {plan_name} access. Your account remains active for 3 days."
+        )
+    else:
+        subject = "Final warning: Wayforth payment still failed"
+        body = (
+            f"Your payment for {plan_name} has failed again. "
+            "Update your payment method immediately at wayforth.io/billing."
+        )
+    try:
+        resend.Emails.send({
+            "from": FROM_EMAIL,
+            "to": to_email,
+            "subject": subject,
+            "html": f"""
+            <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0F172A;color:#E2E8F0;padding:40px;border-radius:12px;">
+                <h1 style="color:#4F46E5;margin:0 0 8px">Wayforth</h1>
+                <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0;border-left:4px solid #EF4444;">
+                    <p style="color:#EF4444;font-weight:bold;margin:0 0 8px">🚨 Payment failed</p>
+                    <p style="color:#E2E8F0;margin:0">{body}</p>
+                </div>
+                <p style="margin-top:24px">
+                    <a href="https://wayforth.io/billing" style="background:#4F46E5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Update payment method →</a>
+                </p>
+                <p style="margin-top:32px;color:#64748B;font-size:13px">Wayforth · <a href="https://wayforth.io" style="color:#4F46E5">wayforth.io</a></p>
+            </div>
+            """,
+        })
+        return True
+    except Exception as e:
+        logger.warning("send_payment_failed_email failed: %s", e)
+        return False
+
+
+def send_account_downgraded_email(to_email: str, plan_name: str) -> bool:
+    if not resend.api_key or not to_email:
+        return False
+    try:
+        resend.Emails.send({
+            "from": FROM_EMAIL,
+            "to": to_email,
+            "subject": "Your Wayforth account has been downgraded",
+            "html": f"""
+            <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0F172A;color:#E2E8F0;padding:40px;border-radius:12px;">
+                <h1 style="color:#4F46E5;margin:0 0 8px">Wayforth</h1>
+                <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0;border-left:4px solid #EF4444;">
+                    <p style="color:#EF4444;font-weight:bold;margin:0 0 8px">Account downgraded</p>
+                    <p style="color:#E2E8F0;margin:0">Due to repeated payment failures your account has been downgraded to the Free tier.
+                    Reactivate {plan_name} at wayforth.io/billing.</p>
+                </div>
+                <p style="margin-top:24px">
+                    <a href="https://wayforth.io/billing" style="background:#4F46E5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Reactivate at wayforth.io/billing →</a>
+                </p>
+                <p style="margin-top:32px;color:#64748B;font-size:13px">Wayforth · <a href="https://wayforth.io" style="color:#4F46E5">wayforth.io</a></p>
+            </div>
+            """,
+        })
+        return True
+    except Exception as e:
+        logger.warning("send_account_downgraded_email failed: %s", e)
+        return False
