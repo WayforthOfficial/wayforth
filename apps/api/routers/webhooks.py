@@ -16,6 +16,7 @@ from core.auth import _resolve_user
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier
+from core.url_validation import validate_external_url
 from services.managed import SERVICE_DISPLAY_NAMES, SERVICE_CONFIGS
 
 logger = logging.getLogger("wayforth")
@@ -193,8 +194,7 @@ async def register_webhook(request: Request, body: WebhookRegistration, db=Depen
     require_tier(_tier, "webhooks")
 
     webhook_url = body.resolved_url
-    if not webhook_url.startswith("https://"):
-        raise HTTPException(status_code=400, detail="url must use HTTPS")
+    validate_external_url(webhook_url, field_name="url")
 
     # Lock contact_email to the authenticated user — callers cannot register webhooks for others
     owner = await db.fetchrow(
@@ -294,11 +294,7 @@ async def create_wri_alert(request: Request, db=Depends(get_db)):
             "error": "invalid_min_signals",
             "message": "min_signals must be between 1 and 100",
         })
-    if not notify_url.startswith("https://"):
-        raise HTTPException(status_code=422, detail={
-            "error": "invalid_notify_url",
-            "message": "notify_url must start with https://",
-        })
+    validate_external_url(notify_url, field_name="notify_url")
 
     row = await db.fetchrow("""
         INSERT INTO wri_alerts
