@@ -629,12 +629,43 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
         sub_id = invoice.get("subscription")
         if not sub_id:
             return {"status": "no_subscription"}
-        # Mark grace period — subscription still active but payment failed
-        await db.execute("""
-            UPDATE api_keys
-            SET subscription_status = 'past_due'
-            WHERE stripe_subscription_id = $1
+        # Mark grace period and run dunning logic
+        key_row = await db.fetchrow("""
+            SELECT k.user_id, k.tier, k.dunning_failure_count, u.email
+            FROM api_keys k
+            JOIN users u ON u.id = k.user_id
+            WHERE k.stripe_subscription_id = $1
         """, sub_id)
+        if key_row:
+            failure_count = (key_row["dunning_failure_count"] or 0) + 1
+            plan_name = key_row["tier"] or "your plan"
+            if failure_count >= 3:
+                # Downgrade to free
+                await db.execute("""
+                    UPDATE api_keys
+                    SET subscription_status = 'cancelled', tier = 'free',
+                        dunning_failure_count = 0
+                    WHERE stripe_subscription_id = $1
+                """, sub_id)
+                import asyncio as _aio
+                if key_row["email"]:
+                    from notifications import send_account_downgraded_email
+                    _aio.create_task(_aio.to_thread(
+                        send_account_downgraded_email, key_row["email"], plan_name
+                    ))
+            else:
+                await db.execute("""
+                    UPDATE api_keys
+                    SET subscription_status = 'past_due',
+                        dunning_failure_count = $1
+                    WHERE stripe_subscription_id = $2
+                """, failure_count, sub_id)
+                import asyncio as _aio
+                if key_row["email"]:
+                    from notifications import send_payment_failed_email
+                    _aio.create_task(_aio.to_thread(
+                        send_payment_failed_email, key_row["email"], plan_name, failure_count
+                    ))
         return {"status": "payment_failed_grace_period"}
 
     return {"status": "ignored"}
