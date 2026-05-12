@@ -77,7 +77,7 @@ async def list_favorites(request: Request, db=Depends(get_db)):
 
     rows = await db.fetch(
         """
-        SELECT sf.slug, sf.created_at, s.name, s.description, s.base_url AS url
+        SELECT sf.slug, sf.created_at, s.name, s.description, s.endpoint_url AS url
         FROM service_favorites sf
         LEFT JOIN services s ON s.slug = sf.slug
         WHERE sf.user_id = $1::uuid
