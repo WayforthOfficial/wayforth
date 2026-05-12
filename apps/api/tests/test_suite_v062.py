@@ -97,14 +97,21 @@ async def test_T164_services_slug_injection(c):
 @pytest.mark.asyncio
 async def test_T165_webhook_ssrf_blocked(c):
     """Webhook registration must reject internal/loopback/link-local URLs
-    BEFORE the URL is stored or any HTTP request is made."""
+    BEFORE the URL is stored or any HTTP request is made.
+
+    /webhooks/register has a 5/minute rate limit — keep this list at 4 entries
+    so the rate limit itself doesn't mask the SSRF defense we're verifying.
+    Each is a distinct private/internal target class:
+      - AWS / GCP-style cloud metadata IP (link-local)
+      - Railway internal service DNS (.internal suffix)
+      - localhost hostname
+      - RFC1918 literal
+    """
     internal_urls = [
-        "https://169.254.169.254/latest/meta-data/",          # AWS metadata
-        "https://redis.railway.internal/",
-        "https://postgres.railway.internal/",
-        "https://localhost/webhook",
-        "https://127.0.0.1/webhook",
-        "https://10.0.0.1/webhook",
+        "https://169.254.169.254/latest/meta-data/",  # link-local cloud metadata
+        "https://redis.railway.internal/",            # internal-DNS suffix
+        "https://localhost/webhook",                  # localhost hostname
+        "https://10.0.0.1/webhook",                   # RFC1918 literal
     ]
     for url in internal_urls:
         r = rec(await c.post("/webhooks/register", headers=_uh(), json={
@@ -119,7 +126,7 @@ async def test_T165_webhook_ssrf_blocked(c):
             f"expected SSRF block error for {url!r}, got {detail!r}"
         )
 
-    # Also for WRI alert webhooks
+    # WRI alerts has its own 20/min rate limit — verify SSRF defense covers it too.
     r = rec(await c.post("/webhooks/wri-alerts", headers=_uh(), json={
         "threshold_score": 75.0,
         "min_signals": 5,
