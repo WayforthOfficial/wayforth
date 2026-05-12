@@ -13,7 +13,7 @@ import sentry_sdk
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.6.2"
+VERSION = "0.6.8"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -492,6 +492,55 @@ async def lifespan(app: FastAPI):
                 WHERE ak.id = sub.api_key_id
                   AND ak.calls_count = 0
             """)
+            # v0.6.8 migrations
+            await _mconn.execute("""
+                ALTER TABLE api_keys
+                    ADD COLUMN IF NOT EXISTS dunning_failure_count INTEGER NOT NULL DEFAULT 0
+            """)
+            await _mconn.execute("""
+                ALTER TABLE user_credits
+                    ADD COLUMN IF NOT EXISTS warning_80_sent_at TIMESTAMPTZ,
+                    ADD COLUMN IF NOT EXISTS warning_95_sent_at TIMESTAMPTZ
+            """)
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS service_favorites (
+                    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    slug       TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (user_id, slug)
+                )
+            """)
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS referrals (
+                    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    referrer_user_id UUID NOT NULL REFERENCES users(id),
+                    referred_user_id UUID REFERENCES users(id),
+                    code             TEXT UNIQUE NOT NULL,
+                    redeemed_at      TIMESTAMPTZ,
+                    created_at       TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS referrals_code_idx ON referrals(code)
+            """)
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS organizations (
+                    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name          TEXT NOT NULL,
+                    owner_user_id UUID NOT NULL REFERENCES users(id),
+                    created_at    TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS org_members (
+                    org_id    UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    user_id   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    role      TEXT NOT NULL DEFAULT 'member'
+                        CHECK (role IN ('owner','admin','member')),
+                    joined_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (org_id, user_id)
+                )
+            """)
     except Exception as e:
         import traceback
         print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
@@ -711,6 +760,7 @@ async def check_auth(request: Request) -> dict:
 from routers import (
     search, execute, billing, webhooks, provider, admin, x402, auth, agent, wayf
 )
+from routers.org import router as org_router
 
 app.include_router(search.router)
 app.include_router(execute.router)
@@ -722,6 +772,7 @@ app.include_router(x402.router)
 app.include_router(auth.router)
 app.include_router(agent.router)
 app.include_router(wayf.router)
+app.include_router(org_router)
 
 
 # ── OpenAPI customisation (security scheme + description) ─────────────────────
@@ -927,3 +978,107 @@ async def get_chain_info():
             "rate_pct": 1.5,
         },
     }
+
+
+# ── Changelog RSS feed ────────────────────────────────────────────────────────
+
+_CHANGELOG_ENTRIES = [
+    {
+        "version": "0.6.8",
+        "title": "Platform: usage alerts, dunning emails, forecasting, favorites, referrals, org accounts",
+        "date": "Tue, 13 May 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.8",
+        "description": "Usage alerts at 80%/95%, Stripe dunning with downgrade on 3rd failure, usage forecasting in /billing/balance, service favorites, referral program, and team/org accounts.",
+    },
+    {
+        "version": "0.6.7",
+        "title": "WAYF points, wallet redemption, and agent billing improvements",
+        "date": "Mon, 04 May 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.7",
+        "description": "WAYF loyalty points system, wallet-based redemption, agent billing permission levels, and auto-topup improvements.",
+    },
+    {
+        "version": "0.6.6",
+        "title": "x402 pay-per-call, Base Sepolia escrow, agent identity tiers",
+        "date": "Mon, 27 Apr 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.6",
+        "description": "x402 protocol support for native pay-per-call on Base Sepolia, WayforthEscrow contract, agent identity trust scoring.",
+    },
+    {
+        "version": "0.6.5",
+        "title": "Provider portal, WRI alerts, managed service probes",
+        "date": "Mon, 20 Apr 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.5",
+        "description": "Provider self-service portal, WRI score alerts with webhook delivery, 30-minute managed service health probes.",
+    },
+    {
+        "version": "0.6.4",
+        "title": "Agent orchestration, cross-rail billing, USDC renewal reminders",
+        "date": "Mon, 13 Apr 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.4",
+        "description": "Agent-native orchestration endpoints, cross-rail billing conversion, USDC subscription renewal reminder emails.",
+    },
+    {
+        "version": "0.6.3",
+        "title": "WayforthRank v2, Solvr services, managed service catalog expansion",
+        "date": "Mon, 06 Apr 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.3",
+        "description": "WRI scoring engine v2 with LLM ranker fallback, Solvr on-chain intelligence services, 40+ new catalog entries.",
+    },
+    {
+        "version": "0.6.2",
+        "title": "Rate limiting per tier, webhook retry loop, search analytics",
+        "date": "Mon, 30 Mar 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.2",
+        "description": "Per-tier RPM rate limits via SlowAPI, exponential-backoff webhook retry loop, search analytics table.",
+    },
+    {
+        "version": "0.6.1",
+        "title": "USDC payment rail, monthly topup reset, credits per call",
+        "date": "Mon, 23 Mar 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.1",
+        "description": "USDC subscription payment rail, automatic monthly topup reset, per-call credit deduction model.",
+    },
+    {
+        "version": "0.6.0",
+        "title": "Stripe billing, tier system, API key management",
+        "date": "Mon, 16 Mar 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.0",
+        "description": "Stripe subscription billing, 6-tier plan system (free/builder/starter/pro/growth/enterprise), API key CRUD endpoints.",
+    },
+    {
+        "version": "0.5.0",
+        "title": "Initial public release: search, execute, 270+ services",
+        "date": "Mon, 02 Mar 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.5.0",
+        "description": "Public launch with semantic search across 270+ verified APIs, managed execution adapters for 11 providers, WayforthRank v1.",
+    },
+]
+
+
+@app.get("/changelog.xml", include_in_schema=False)
+async def changelog_rss():
+    items = ""
+    for e in _CHANGELOG_ENTRIES[:10]:
+        items += (
+            f"    <item>\n"
+            f"      <title>v{e['version']} — {e['title']}</title>\n"
+            f"      <link>{e['link']}</link>\n"
+            f"      <guid>{e['link']}</guid>\n"
+            f"      <pubDate>{e['date']}</pubDate>\n"
+            f"      <description><![CDATA[{e['description']}]]></description>\n"
+            f"    </item>\n"
+        )
+    rss = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<rss version="2.0">\n'
+        '  <channel>\n'
+        '    <title>Wayforth API Changelog</title>\n'
+        '    <link>https://wayforth.io/changelog</link>\n'
+        '    <description>Release notes for the Wayforth API</description>\n'
+        '    <language>en-us</language>\n'
+        f'{items}'
+        '  </channel>\n'
+        '</rss>\n'
+    )
+    return Response(content=rss, media_type="application/rss+xml")
