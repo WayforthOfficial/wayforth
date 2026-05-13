@@ -499,12 +499,14 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
         service_id,
     )
 
-    # Calculate routing fee
+    # Calculate routing fee (1.5% flat, all tracks)
     routing_fee_pct = ROUTING_FEE
     routing_fee_usd = round(amount_usd * routing_fee_pct, 8)
     service_receives_usd = round(amount_usd - routing_fee_usd, 8)
-    wayf_burn_allocation = round(routing_fee_usd * 0.30, 8)  # 30% to $WAYF burn
-    wayforth_revenue = round(routing_fee_usd * 0.70, 8)      # 70% to Wayforth
+    # Fee split per whitepaper v6: accrued pre-TGE, activates at TGE
+    staking_pool_allocation = round(routing_fee_usd * 0.10, 8)  # 10% → staking pool (pre-TGE: accrued)
+    wayf_burn_allocation    = round(routing_fee_usd * 0.10, 8)  # 10% → $WAYF burn  (pre-TGE: accrued)
+    wayforth_revenue        = round(routing_fee_usd * 0.80, 8)  # 80% → operations
 
     service_name = service["name"] if service else service_id
     x402_supported = service["x402_supported"] if service else False
