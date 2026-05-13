@@ -360,9 +360,7 @@ async def provider_overview(request: Request, db=Depends(get_db)):
         "SELECT pricing_usdc FROM services WHERE slug = $1 LIMIT 1", slug
     )
     price_per_call = float(pricing_row["pricing_usdc"] or 0) if pricing_row else 0.0
-    estimated_earnings_usdc = round(
-        (calls_this_month + calls_last_month) * price_per_call, 4
-    )
+    estimated_earnings_usdc = round(calls_this_month * price_per_call * 0.985, 4)
 
     # Category rank
     category = svc_row["category"] if svc_row else None
