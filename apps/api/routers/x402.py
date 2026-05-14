@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from core.rate_limit import limiter, _check_x402_rate_limit, _X402_RPM
@@ -270,3 +270,122 @@ async def x402_execute(request):
     response = JSONResponse(content=resp_body)
     response.headers["X-PAYMENT-RESPONSE"] = "confirmed"
     return response
+
+
+# ── /x402/search ─────────────────────────────────────────────────────────────
+
+_X402_SEARCH_PRICE  = "0.002"          # $0.002 USDC per query
+_X402_SEARCH_MICRO  = 2000             # micro-USDC (6 decimals)
+_USDC_BASE_MAINNET  = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+
+
+def _search_payment_terms(wayforth_wallet: str) -> dict:
+    return {
+        "x402Version": "1",
+        "accepts": [{
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "maxAmountRequired": _X402_SEARCH_MICRO,
+            "asset": _USDC_BASE_MAINNET,
+            "payTo": wayforth_wallet,
+            "maxTimeoutSeconds": 300,
+            "description": "Wayforth API Search · $0.002 USDC per query",
+        }],
+        "service": "wayforth_search",
+        "estimated_response_ms": 200,
+    }
+
+
+@router.get("/x402/search")
+@limiter.limit("120/minute")
+async def x402_search(
+    request: Request,
+    q: str = Query(min_length=1, max_length=500, description="Natural language search query"),
+):
+    """x402 pay-per-call search. No API key — $0.002 USDC per query on Base.
+
+    No X-PAYMENT header → 402 with payment terms.
+    Valid X-PAYMENT header → ranked service results.
+    """
+    import hashlib as _hs
+    import html as _html
+    from fastapi import HTTPException
+
+    wayforth_wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
+    if not wayforth_wallet:
+        raise HTTPException(status_code=503, detail={
+            "error": "x402 payments not configured on this instance",
+        })
+
+    payment_header = request.headers.get("X-PAYMENT", "")
+    if not payment_header:
+        return JSONResponse(status_code=402, content=_search_payment_terms(wayforth_wallet))
+
+    # Verify payment (5 s timeout; accept optimistically on timeout)
+    payer_address = None
+    try:
+        verify = await asyncio.wait_for(
+            _verify_x402_payment(payment_header, wayforth_wallet, _X402_SEARCH_PRICE),
+            timeout=5.0,
+        )
+        if not verify.get("valid"):
+            terms = _search_payment_terms(wayforth_wallet)
+            terms["error"] = f"Payment of ${_X402_SEARCH_PRICE} USDC required. Please retry."
+            return JSONResponse(status_code=402, content=terms)
+        payer_address = verify.get("from_address")
+    except asyncio.TimeoutError:
+        logger.warning("x402/search payment verification timeout — accepting optimistically")
+
+    # Execute search
+    from main import app as _app
+    from ranker_client import rank_services
+
+    q_clean = _html.escape(q.strip().lower())
+
+    try:
+        async with _app.state.pool.acquire() as _db:
+            rows = await _db.fetch(
+                """
+                SELECT id, name, slug, description, endpoint_url, category,
+                       coverage_tier, pricing_usdc, x402_supported,
+                       wri_score, wri_version
+                FROM services
+                WHERE source != 'demo'
+                ORDER BY created_at DESC
+                """,
+            )
+            services = [dict(r) for r in rows]
+            ranked = await rank_services(q_clean, services, db=_db)
+    except Exception as _e:
+        logger.error("x402/search error: %s", _e)
+        raise HTTPException(status_code=503, detail={"error": "Search temporarily unavailable"})
+
+    top = ranked[:5]
+    results = [
+        {
+            "name": s.get("name"),
+            "slug": s.get("slug"),
+            "description": s.get("description"),
+            "wri": s.get("wri_score"),
+            "coverage_tier": s.get("coverage_tier"),
+            "category": s.get("category"),
+            "pricing": {"per_call_usd": s.get("pricing_usdc")},
+            "x402_supported": bool(s.get("x402_supported")),
+            "wayforth_id": (
+                f"wayforth://{s.get('slug', '')}/"
+                f"{_hs.sha256(s.get('endpoint_url', '').encode()).hexdigest()[:8]}"
+            ),
+        }
+        for s in top
+    ]
+
+    resp = JSONResponse(content={
+        "query": q_clean,
+        "results": results,
+        "total_results": len(top),
+        "payment_confirmed": True,
+        "paid_via": "x402",
+        "amount_usdc": _X402_SEARCH_PRICE,
+    })
+    resp.headers["X-PAYMENT-RESPONSE"] = "confirmed"
+    return resp
