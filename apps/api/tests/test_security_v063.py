@@ -366,20 +366,57 @@ async def test_T225_x402_replay_same_header_rejected(c):
 # ═════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_T230_anon_search_rate_limit_triggers_429(c):
-    """Unauthenticated /search must 429 after the anon limit (~30/min)."""
-    # Send 40 anon requests as fast as possible; expect at least one 429 in there.
-    saw_429 = False
-    for _ in range(40):
-        r = await c.get("/search", params={"q": "test", "limit": 1})
+@pytest.mark.no_api_key
+async def test_T230_anon_search_daily_limit_enforced(c):
+    """Unauthenticated /search must 429 within the first 10 requests.
+
+    Anonymous callers are capped at `_ANON_DAILY_LIMIT` (3) searches per IP
+    per day in `core.auth.check_auth`. Sending 10 requests from the same IP
+    therefore MUST yield at least one 429 — either at request 4 (counter
+    starting fresh) or at request 1 (counter already maxed from prior
+    activity on this IP today). If all 10 succeed, the anon rate-limit
+    code is either disabled, dead-coded, or misconfigured.
+    """
+    statuses = []
+    for _ in range(10):
+        try:
+            r = await c.get("/search", params={"q": "anon-rate-limit-probe", "limit": 1})
+        except httpx.RequestError:
+            pytest.skip("Network error during anon rate-limit probe")
+        statuses.append(r.status_code)
         if r.status_code == 429:
-            saw_429 = True
             break
         if r.status_code >= 500:
-            pytest.skip(f"Search 5xx — cannot test rate limiting")
-    # We accept either: 429 observed, or all 40 succeeded (limit is higher than expected)
-    # but if all 40 succeeded and the documented limit is 30/min, that's a bug — log via assert
-    assert saw_429 or True, "Rate limit did not trigger in 40 requests; check anon limit config"
+            pytest.skip(f"/search 5xx (status={r.status_code}) — cannot test rate limiting")
+    assert 429 in statuses, (
+        f"Anonymous /search returned no 429 in 10 requests "
+        f"(statuses: {statuses}). Anonymous rate limiting is not enforced."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.no_api_key
+async def test_T230b_anon_query_blocked_by_tier_gate(c):
+    """Unauthenticated /query must 401/403 — tier gate blocks before rate limit.
+
+    Anonymous (and free-tier) callers must not reach the rate-limit code on
+    /query because WayforthQL is `starter+`. If this returns 200/429, the
+    `require_tier("wayforthql")` gate is broken — which would also mean
+    free-tier users could access paid features.
+    """
+    try:
+        r = await c.post("/query", json={"query": "rate-limit-tier-gate-probe", "limit": 1})
+    except httpx.RequestError:
+        pytest.skip("Network error during /query tier-gate probe")
+    if r.status_code >= 500:
+        pytest.skip(f"/query 5xx (status={r.status_code})")
+    # Anon path: check_auth returns authenticated=False; require_tier(None or "free",
+    # "wayforthql") raises 403. Some deployments may 401 if auth is preprocessed.
+    # 429 is also acceptable if the anon daily limit on check_auth fires first
+    # (since check_auth runs before require_tier in the dependency chain).
+    assert r.status_code in (401, 403, 429), (
+        f"/query anon must be rejected with 401/403/429, got {r.status_code}: {r.text[:200]}"
+    )
 
 
 @pytest.mark.asyncio
