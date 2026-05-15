@@ -253,6 +253,22 @@ async def admin_overview(request: Request, db=Depends(get_db)):
         """)
     except: signups = []
 
+    try:
+        calls_30d = await db.fetchval("""
+            SELECT COUNT(*) FROM credit_transactions
+            WHERE type = 'execution'
+              AND created_at > NOW() - INTERVAL '30 days'
+        """) or 0
+    except: calls_30d = 0
+
+    try:
+        revenue_30d_usd = await db.fetchval("""
+            SELECT COALESCE(SUM(amount_usd), 0) FROM package_purchases
+            WHERE payment_status = 'completed'
+              AND purchased_at > NOW() - INTERVAL '30 days'
+        """) or 0.0
+    except: revenue_30d_usd = 0.0
+
     return {
         "stats": {
             "total_services": total_services,
@@ -263,6 +279,8 @@ async def admin_overview(request: Request, db=Depends(get_db)):
             "searches_7d": searches_7d,
             "pending_tier3": pending_tier3,
             "total_agents": total_agents,
+            "calls_30d": int(calls_30d),
+            "revenue_30d_usd": round(float(revenue_30d_usd), 2),
         },
         "daily_searches": [{"date": str(r['date']), "count": r['count']} for r in daily],
         "daily_signups": [{"date": str(r['date']), "count": r['count']} for r in signups],
@@ -327,6 +345,8 @@ async def admin_users_list(
         if plan:
             u["monthly_quota"] = plan["calls_included"]
         u["monthly_calls_count"] = u.get("monthly_calls_count") or 0
+        u["plan"] = u.get("package_tier") or tier
+        u["calls_remaining"] = u.get("credits_balance") or 0
         return u
 
     return {

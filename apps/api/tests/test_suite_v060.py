@@ -242,7 +242,6 @@ _AUTH_CASES = [
     ("POST",   "/billing/deduct",     {"json": {"amount_usd": 0.001, "service_id": "test"}}),
     ("POST",   "/pay",                {"json": {"service_id": "DeepL", "amount_usd": 0.001}}),
     ("GET",    "/call/keys",          {}),
-    ("GET",    "/account/wayf-points", {}),
     ("POST",   "/run",                {"json": {"intent": "translate hi"}}),
     ("GET",    "/account/agents",     {}),
 ]
@@ -270,7 +269,6 @@ async def test_T022_malformed_key_returns_401(c, method, path, kw):
         f"T022: {method} {path} with malformed key → expected 401, got {r.status_code}"
 
 _ADMIN_PATHS = [
-    ("GET", "/admin/wayf-points/totals"),
     ("GET", "/admin/health"),
     ("GET", "/admin/stats"),
 ]
@@ -288,8 +286,8 @@ async def test_T024_admin_endpoint_no_key(c, method, path):
         f"T024: {path} no key → expected 401/403, got {r.status_code}"
 
 async def test_T025_free_tier_gating_response_shape(c):
-    # Test with invalid key to confirm 401 shape; real free-tier gate tested via known endpoint
-    r = rec(await c.get("/account/wayf-points", headers={"X-Wayforth-API-Key": "wf_live_badinvalid"}))
+    # Confirm 401 response shape on an auth-gated endpoint with a bad key
+    r = rec(await c.get("/billing/balance", headers={"X-Wayforth-API-Key": "wf_live_badinvalid"}))
     assert r.status_code == 401
     d = r.json()
     assert "error" in str(d).lower() or "detail" in d, \
@@ -688,64 +686,7 @@ async def test_T082_analytics_searches_non_negative(c):
         _warnings.append("T082: searches this_month = 0 after test run — expected > 0")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECTION 10 — $WAYF POINTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def test_T090_wayf_points_reachable(c):
-    r = rec(await c.get("/account/wayf-points", headers=_uh()))
-    if r.status_code == 403:
-        pytest.skip("Account tier too low for wayf-points (needs builder+)")
-    assert r.status_code == 200, f"/account/wayf-points: {r.status_code} — {r.text[:200]}"
-    assert r.json().get("points_balance", -1) >= 0
-
-async def test_T091_wayf_rate_formula_consistent(c):
-    r = rec(await c.get("/account/wayf-points", headers=_uh()))
-    if r.status_code == 403:
-        pytest.skip("Tier too low")
-    assert r.status_code == 200
-    d = r.json()
-    pts  = d.get("points_balance", 0)
-    wayf = d.get("wayf_balance", 0.0)
-    rate = d.get("current_rate", {}).get("points_per_wayf", 10)
-    if pts > 0 and rate > 0:
-        # Allow 5% or 1 WAYF tolerance (awards may span multiple rate tiers)
-        tolerance = max(1.0, pts / rate * 0.05)
-        expected  = pts / rate
-        assert abs(wayf - expected) <= tolerance, \
-            f"wayf_balance={wayf} inconsistent with points={pts} / rate={rate} (expected ≈{expected:.4f})"
-
-async def test_T092_wayf_disclaimer_present(c):
-    r = rec(await c.get("/account/wayf-points", headers=_uh()))
-    if r.status_code == 403:
-        pytest.skip("Tier too low")
-    assert r.status_code == 200
-    d = r.json()
-    assert "disclaimer" in d,            "disclaimer missing from wayf-points"
-    assert len(d["disclaimer"]) > 50,    f"disclaimer suspiciously short: {d['disclaimer']!r}"
-
-async def test_T093_wayf_no_proportional_model(c):
-    r = rec(await c.get("/account/wayf-points", headers=_uh()))
-    if r.status_code == 403:
-        pytest.skip("Tier too low")
-    assert r.status_code == 200
-    d = r.json()
-    # These fields belong to the old proportional model — must not appear
-    for bad in ("tge_estimate", "your_share_pct", "estimated_wayf", "total_all_users_points"):
-        assert bad not in d, \
-            f"Old proportional field '{bad}' still present in /account/wayf-points"
-
-async def test_T094_wayf_rate_valid_tier(c):
-    r = rec(await c.get("/account/wayf-points", headers=_uh()))
-    if r.status_code == 403:
-        pytest.skip("Tier too low")
-    assert r.status_code == 200
-    rate = r.json().get("current_rate", {}).get("points_per_wayf")
-    valid = {10, 20, 30, 40, 50, 60, 70, 80, 90, 100}
-    assert rate in valid, \
-        f"points_per_wayf={rate!r} is not a valid tier value (must be one of {sorted(valid)})"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 11 — WEBHOOKS
+# SECTION 10 — WEBHOOKS
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def test_T100_stripe_webhook_no_signature(c):
@@ -797,6 +738,8 @@ async def test_T111_provider_rejects_user_key(c):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def test_T120_admin_get_user_with_admin_key(c):
+    if not ADMIN_KEY:
+        pytest.skip("ADMIN_KEY not set in environment")
     list_r = rec(await c.get("/admin-api/users", headers=_ah()))
     assert list_r.status_code == 200, \
         f"/admin-api/users list failed: {list_r.status_code} — {list_r.text[:200]}"
@@ -812,14 +755,6 @@ async def test_T121_admin_user_detail_rejects_user_key(c):
     r = rec(await c.get("/admin-api/users/some-fake-uuid-0000", headers=_uh()))
     assert r.status_code in (401, 403), \
         f"Admin endpoint with user key → expected 401/403, got {r.status_code}"
-
-async def test_T122_admin_wayf_totals(c):
-    r = rec(await c.get("/admin/wayf-points/totals", headers=_ah()))
-    assert r.status_code == 200
-    d = r.json()
-    assert "total_users_earning" in d, f"'total_users_earning' missing: {list(d.keys())}"
-    assert "pool_remaining"      in d, f"'pool_remaining' missing: {list(d.keys())}"
-    assert "current_rate"        in d, f"'current_rate' missing: {list(d.keys())}"
 
 async def test_T123_admin_no_internal_markup_fields(c):
     list_r = await c.get("/admin-api/users", headers=_ah())
@@ -1127,15 +1062,6 @@ async def test_T155_account_usage_history(c):
     d = r.json()
     assert "history" in d, f"missing history: {d.keys()}"
     assert isinstance(d["history"], list), "history should be a list"
-
-
-@pytest.mark.asyncio
-async def test_T156_account_wayf_points_history(c):
-    """GET /account/wayf-points/history returns 200 with total_points field."""
-    r = rec(await c.get("/account/wayf-points/history", headers=_uh()))
-    assert r.status_code == 200, f"wayf-points history should be 200, got {r.status_code}: {r.text[:200]}"
-    d = r.json()
-    assert "total_points" in d, f"missing total_points: {d.keys()}"
 
 
 @pytest.mark.asyncio

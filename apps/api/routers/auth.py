@@ -31,11 +31,11 @@ TIER_LIMITS = {
 }
 
 PACKAGES = {
-    "builder":    {"credits": 6_000,   "price_usd": 12,  "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Builder"},
-    "starter":    {"credits": 21_000,  "price_usd": 29,  "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Starter"},
-    "pro":        {"credits": 72_000,  "price_usd": 99,  "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Pro"},
-    "growth":     {"credits": 240_000, "price_usd": 299, "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Growth"},
-    "enterprise": {"credits": -1,      "price_usd": None,"wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Enterprise"},
+    "builder":    {"credits": 6_000,   "price_usd": 12,  "fee_bps": 150, "label": "Builder"},
+    "starter":    {"credits": 21_000,  "price_usd": 29,  "fee_bps": 150, "label": "Starter"},
+    "pro":        {"credits": 72_000,  "price_usd": 99,  "fee_bps": 150, "label": "Pro"},
+    "growth":     {"credits": 240_000, "price_usd": 299, "fee_bps": 150, "label": "Growth"},
+    "enterprise": {"credits": -1,      "price_usd": None,"fee_bps": 150, "label": "Enterprise"},
 }
 
 CREDIT_COSTS = {
@@ -317,17 +317,48 @@ async def regenerate_api_key(request: Request, db=Depends(get_db)):
 @router.get("/auth/me")
 @limiter.limit("30/minute")
 async def auth_me(request: Request, db=Depends(get_db)):
-    """Return the caller's Wayforth API key prefix, email, and tier from a Supabase JWT.
+    """Return the caller's API key, email, and tier.
 
-    Authorization: Bearer <supabase_jwt>
+    Accepts either:
+      - Authorization: Bearer <supabase_jwt>
+      - X-Wayforth-API-Key: <api_key>
     """
+    # Fast path: API key header
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if raw_key:
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        row = await db.fetchrow("""
+            SELECT u.email, k.key_prefix, k.encrypted_key, k.tier,
+                   uc.package_tier, uc.credits_balance, uc.lifetime_credits
+            FROM api_keys k
+            JOIN users u ON u.id = k.user_id
+            LEFT JOIN user_credits uc ON uc.user_id = k.user_id
+            WHERE k.key_hash = $1 AND k.active = true
+            ORDER BY (k.encrypted_key IS NOT NULL) DESC, k.created_at DESC
+            LIMIT 1
+        """, key_hash)
+        if not row:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
+        response = JSONResponse(content={
+            "email": row["email"],
+            "api_key": raw_key,
+            "tier": tier,
+            "credits_remaining": row["credits_balance"] or 0,
+        })
+        response.headers["Cache-Control"] = "no-store, no-cache"
+        return response
+
+    # JWT path
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authorization: Bearer <token> required")
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization: Bearer <token> or X-Wayforth-API-Key required",
+        )
 
     token = auth_header.removeprefix("Bearer ").strip()
 
-    # RS256 cryptographic verification via Supabase JWKS. Signature, expiry, and audience checked.
     try:
         claims = verify_supabase_jwt(token)
         supabase_sub = claims.get("sub", "")
@@ -368,8 +399,6 @@ async def auth_me(request: Request, db=Depends(get_db)):
 
     tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
 
-    # api_key is returned here intentionally so the frontend can display it once on login.
-    # It is transmitted over HTTPS only. Cache-Control: no-store prevents proxy/browser caching.
     response = JSONResponse(content={
         "email": row["email"],
         "api_key": api_key,

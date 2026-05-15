@@ -519,74 +519,6 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     }
 
 
-@router.get("/account/wayf-points/history")
-@limiter.limit("30/minute")
-async def account_wayf_points_history(request: Request, db=Depends(get_db)):
-    """WAYF points earning history — last 50 daily buckets. All tiers."""
-    from wayf_points import get_current_rate
-    raw_key, key_hash = _account_auth_key(request)
-    key_record = await db.fetchrow(
-        "SELECT k.user_id, k.tier FROM api_keys k WHERE k.key_hash = $1 AND k.active = true",
-        key_hash,
-    )
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    user_id = key_record["user_id"]
-    tier = key_record["tier"] or "free"
-
-    rows = await db.fetch("""
-        SELECT
-            DATE(created_at AT TIME ZONE 'UTC') AS day,
-            SUM(points)                         AS points_earned,
-            MAX(rate_at_award)                  AS rate
-        FROM wayf_points_log
-        WHERE user_id = $1::uuid
-        GROUP BY DATE(created_at AT TIME ZONE 'UTC')
-        ORDER BY day DESC
-        LIMIT 50
-    """, user_id)
-
-    if rows:
-        oldest_day = min(r["day"] for r in rows)
-        call_rows = await db.fetch("""
-            SELECT
-                DATE(created_at AT TIME ZONE 'UTC') AS day,
-                COUNT(*) AS call_count
-            FROM credit_transactions
-            WHERE user_id = $1::uuid
-              AND type IN ('execution', 'cross_rail')
-              AND DATE(created_at AT TIME ZONE 'UTC') >= $2
-            GROUP BY DATE(created_at AT TIME ZONE 'UTC')
-        """, user_id, oldest_day)
-        calls_by_day = {r["day"]: r["call_count"] for r in call_rows}
-    else:
-        calls_by_day = {}
-
-    wp_row = await db.fetchrow(
-        "SELECT points_earned_total FROM wayf_points WHERE user_id = $1::uuid", user_id
-    )
-    total_points = int(wp_row["points_earned_total"]) if wp_row else 0
-
-    rate_info = await get_current_rate(db)
-    current_rate_val = rate_info["points_per_wayf"]
-    current_rate_str = f"{current_rate_val} pts = 1 WAYF"
-
-    return {
-        "history": [
-            {
-                "date": str(r["day"]),
-                "calls_made": calls_by_day.get(r["day"], 0),
-                "points_earned": int(r["points_earned"]),
-                "rate": f"{r['rate']} pts = 1 WAYF" if r["rate"] else current_rate_str,
-            }
-            for r in rows
-        ],
-        "total_points": total_points,
-        "current_rate": current_rate_str,
-        "tier": tier,
-    }
-
-
 @router.get("/account/usage/history")
 @limiter.limit("30/minute")
 async def account_usage_history(request: Request, db=Depends(get_db)):
@@ -1027,6 +959,18 @@ _MONTH_NAMES = [
 ]
 
 
+@router.get("/billing/invoice/{year_month}")
+@limiter.limit("10/minute")
+async def get_invoice_alias(year_month: str, request: Request, db=Depends(get_db)):
+    """Alias for /billing/invoice/{year}/{month} accepting YYYY-MM format."""
+    try:
+        year_s, month_s = year_month.split("-")
+        year, month = int(year_s), int(month_s)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Use YYYY-MM format")
+    return await get_invoice(year, month, request, db)
+
+
 @router.get("/billing/invoice/{year}/{month}")
 @limiter.limit("10/minute")
 async def get_invoice(year: int, month: int, request: Request, db=Depends(get_db)):
@@ -1099,4 +1043,105 @@ async def get_invoice(year: int, month: int, request: Request, db=Depends(get_db
             }
         ],
         "issued_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/account/alerts")
+@limiter.limit("30/minute")
+async def account_alerts(request: Request, db=Depends(get_db)):
+    """Credit alert flags derived from the billing forecast."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_record = await db.fetchrow("""
+        SELECT k.id, k.user_id, k.tier, k.monthly_calls_count, k.monthly_calls_reset_at
+        FROM api_keys k
+        WHERE k.key_hash = $1 AND k.active = true
+    """, hashlib.sha256(api_key.encode()).hexdigest())
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    credits = await db.fetchrow(
+        "SELECT credits_balance, package_tier FROM user_credits WHERE user_id = $1",
+        key_record["user_id"],
+    )
+    balance = credits["credits_balance"] if credits else 0
+    pkg_tier = credits["package_tier"] if credits else "free"
+    tier = _credits_to_tier(balance, pkg_tier)
+
+    calls_remaining = await compute_calls_remaining(db, str(key_record["id"]))
+    plan_def = PLANS.get(tier, PLANS["free"])
+    calls_included = plan_def["calls_included"]
+
+    threshold_80 = calls_included > 0 and calls_remaining <= math.floor(calls_included * 0.20)
+    threshold_95 = calls_included > 0 and calls_remaining <= math.floor(calls_included * 0.05)
+
+    will_exhaust = False
+    days_remaining = None
+    monthly_count = key_record.get("monthly_calls_count") or 0
+    monthly_reset_at = key_record.get("monthly_calls_reset_at")
+    if monthly_reset_at and monthly_count > 0:
+        now_utc = datetime.now(timezone.utc)
+        period_start = monthly_reset_at.replace(tzinfo=timezone.utc) - timedelta(days=30)
+        days_elapsed = max(0, (now_utc - period_start).days)
+        days_until_reset = max(0, (monthly_reset_at.replace(tzinfo=timezone.utc) - now_utc).days)
+        if days_elapsed >= 3:
+            daily_avg = monthly_count / days_elapsed
+            if daily_avg > 0:
+                days_remaining = int(calls_remaining / daily_avg)
+                will_exhaust = days_remaining < days_until_reset
+
+    return {
+        "will_exhaust_before_reset": will_exhaust,
+        "days_remaining": days_remaining,
+        "threshold_80_pct": threshold_80,
+        "threshold_95_pct": threshold_95,
+        "calls_remaining": calls_remaining,
+        "calls_included": calls_included,
+    }
+
+
+@router.get("/account/org")
+@limiter.limit("30/minute")
+async def account_org(request: Request, db=Depends(get_db)):
+    """Alias for /org/members — returns the caller's org and member list."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    key_record = await db.fetchrow(
+        "SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true", key_hash
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    user_id = str(key_record["user_id"])
+    org = await db.fetchrow("""
+        SELECT o.* FROM organizations o
+        JOIN org_members m ON m.org_id = o.id
+        WHERE m.user_id = $1::uuid
+        ORDER BY m.joined_at
+        LIMIT 1
+    """, user_id)
+    if not org:
+        return {"org_id": None, "org_name": None, "members": []}
+
+    rows = await db.fetch("""
+        SELECT u.id, u.email, m.role, m.joined_at,
+               ak.tier AS plan,
+               ak.monthly_calls_count,
+               COALESCE(uc.credits_balance, 0) AS credits_balance
+        FROM org_members m
+        JOIN users u ON u.id = m.user_id
+        LEFT JOIN api_keys ak ON ak.user_id = u.id AND ak.active = true
+        LEFT JOIN user_credits uc ON uc.user_id = u.id
+        WHERE m.org_id = $1
+        ORDER BY m.joined_at
+    """, org["id"])
+    return {
+        "org_id": str(org["id"]),
+        "org_name": org["name"],
+        "members": [dict(r) for r in rows],
     }

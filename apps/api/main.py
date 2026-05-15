@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.6.8"
+VERSION = "0.6.10"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -412,47 +412,6 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS provider_sessions_token_idx ON provider_sessions(token)
             """)
             await _mconn.execute("""
-                CREATE TABLE IF NOT EXISTS wayf_points (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    user_id UUID REFERENCES users(id) ON DELETE CASCADE UNIQUE,
-                    api_key_id UUID REFERENCES api_keys(id),
-                    points_balance INTEGER NOT NULL DEFAULT 0,
-                    points_earned_total INTEGER NOT NULL DEFAULT 0,
-                    points_earned_this_month INTEGER NOT NULL DEFAULT 0,
-                    monthly_points_reset_at TIMESTAMPTZ,
-                    wallet_address TEXT,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            await _mconn.execute("""
-                CREATE TABLE IF NOT EXISTS wayf_points_log (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    user_id UUID REFERENCES users(id),
-                    api_key_id UUID REFERENCES api_keys(id),
-                    points INTEGER NOT NULL,
-                    reason TEXT NOT NULL,
-                    source TEXT NOT NULL CHECK (source IN ('subscription','execution','daily_bonus','milestone')),
-                    metadata JSONB DEFAULT '{}',
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            await _mconn.execute("""
-                CREATE INDEX IF NOT EXISTS wayf_points_user_idx ON wayf_points(user_id)
-            """)
-            await _mconn.execute("""
-                CREATE INDEX IF NOT EXISTS wayf_points_log_user_created_idx
-                ON wayf_points_log(user_id, created_at)
-            """)
-            await _mconn.execute("""
-                ALTER TABLE wayf_points
-                    ADD COLUMN IF NOT EXISTS wayf_balance DECIMAL(18,6) NOT NULL DEFAULT 0
-            """)
-            await _mconn.execute("""
-                ALTER TABLE wayf_points_log
-                    ADD COLUMN IF NOT EXISTS rate_at_award INTEGER
-            """)
-            await _mconn.execute("""
                 ALTER TABLE api_keys
                     ADD COLUMN IF NOT EXISTS calls_count INTEGER NOT NULL DEFAULT 0,
                     ADD COLUMN IF NOT EXISTS monthly_calls_count INTEGER NOT NULL DEFAULT 0,
@@ -544,6 +503,18 @@ async def lifespan(app: FastAPI):
             await _mconn.execute(
                 "ALTER TABLE providers ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT FALSE"
             )
+            # v0.6.9 migrations
+            await _mconn.execute("""
+                ALTER TABLE users
+                    ADD COLUMN IF NOT EXISTS founding_member          BOOLEAN     NOT NULL DEFAULT true,
+                    ADD COLUMN IF NOT EXISTS founding_bonus_granted_at TIMESTAMPTZ
+            """)
+            await _mconn.execute("""
+                DROP TABLE IF EXISTS wayf_points_log
+            """)
+            await _mconn.execute("""
+                DROP TABLE IF EXISTS wayf_points
+            """)
     except Exception as e:
         import traceback
         print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
@@ -617,7 +588,10 @@ app.add_middleware(
         "https://www.wayforth.io",
         "https://gateway.wayforth.io",
         "https://mcp.wayforth.io",
+        "https://id-preview--1f7c5e7e-c191-4274-b4a6-f6e732da08d9.lovable.app",
+        "https://intent-exchange.lovable.app",
     ],
+    allow_origin_regex=r"https://[^.]+\.lovable\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS", "DELETE", "PUT"],
     allow_headers=["*"],
@@ -761,7 +735,7 @@ async def check_auth(request: Request) -> dict:
 # ── Include routers ───────────────────────────────────────────────────────────
 
 from routers import (
-    search, execute, billing, webhooks, provider, admin, x402, auth, agent, wayf
+    search, execute, billing, webhooks, provider, admin, x402, auth, agent
 )
 from routers.org import router as org_router
 
@@ -774,7 +748,6 @@ app.include_router(admin.router)
 app.include_router(x402.router)
 app.include_router(auth.router)
 app.include_router(agent.router)
-app.include_router(wayf.router)
 app.include_router(org_router)
 
 
@@ -986,6 +959,25 @@ async def get_chain_info():
 # ── Changelog RSS feed ────────────────────────────────────────────────────────
 
 _CHANGELOG_ENTRIES = [
+    {
+        "version": "0.6.10",
+        "title": "Ecosystem",
+        "date": "Fri, 15 May 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.10",
+        "description": (
+            "Automatic refunds: if an API call fails due to a service error, credits are restored instantly. "
+            "No disputes. No support tickets. "
+            "x402 native endpoint live — Wayforth is now discoverable on x402scan and Agentic.Market. "
+            "133 end-to-end tests passing."
+        ),
+    },
+    {
+        "version": "0.6.9",
+        "title": "WAYF token removed, Founding Developer Program, x402 search endpoint",
+        "date": "Wed, 13 May 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.9",
+        "description": "WAYF points system removed entirely. Founding Developer Program: users who join during v0.6.x receive 500 bonus calls on first paid subscription. GET /x402/search added as x402-native pay-per-call endpoint at $0.002 USDC per query.",
+    },
     {
         "version": "0.6.8",
         "title": "Platform: usage alerts, dunning emails, forecasting, favorites, referrals, org accounts",
