@@ -117,21 +117,26 @@
           return;
         }
 
-        const esc = s => s?.toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') ?? '';
+        const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+          ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         const rankColors = ['rank-1', 'rank-2', 'rank-3'];
-        body.innerHTML = lb.leaderboard.map((s, i) => `
+        body.innerHTML = lb.leaderboard.map((s, i) => {
+          const tier = Number(s.coverage_tier) || 0;
+          return `
           <tr>
-            <td class="rank ${rankColors[i] || ''}">${s.rank}</td>
+            <td class="rank ${rankColors[i] || ''}">${Number(s.rank) || (i + 1)}</td>
             <td class="service-name">${esc(s.name)}</td>
-            <td><span class="tier-badge tier-${s.coverage_tier}">Tier ${s.coverage_tier}</span></td>
+            <td><span class="tier-badge tier-${tier}">Tier ${tier}</span></td>
             <td><span class="category">${esc(s.category)}</span></td>
-            <td class="searches">${s.search_count}</td>
-            <td class="score">${s.payment_count}</td>
-          </tr>
-        `).join('');
+            <td class="searches">${Number(s.search_count) || 0}</td>
+            <td class="score">${Number(s.payment_count) || 0}</td>
+          </tr>`;
+        }).join('');
       } catch(e) {
+        const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+          ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         document.getElementById('leaderboard-body').innerHTML =
-          `<tr><td colspan="6" class="loading">Error loading data: ${e.message}</td></tr>`;
+          `<tr><td colspan="6" class="loading">Error loading data: ${esc(e.message)}</td></tr>`;
       }
     }
 

@@ -104,7 +104,7 @@ async def admin_services(request: Request, key: str = "", db=Depends(get_db)):
         SELECT
             category,
             COUNT(*) as total,
-            COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2,
+            COUNT(*) FILTER (WHERE coverage_tier >= 2 AND consecutive_failures < 3) as tier2,
             COUNT(*) FILTER (WHERE coverage_tier >= 1) as tier1,
             COUNT(*) FILTER (
                 WHERE endpoint_url NOT ILIKE '%github.com%'

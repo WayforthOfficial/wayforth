@@ -115,6 +115,9 @@ const API = '/health-report';
 let countdown = 60;
 let timer;
 
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
 function statusClass(svc) {
   const f = svc.consecutive_failures || 0;
   if (f === 0) return 'up';
@@ -159,11 +162,11 @@ function render(data) {
     const dc = dotClass(st);
     const stLabel = st === 'up' ? '<span class="status-up">Operational</span>' : st === 'degraded' ? '<span class="status-degraded">Degraded</span>' : '<span class="status-down">Failing</span>';
     return `<tr>
-      <td><span class="dot ${dc}"></span>${s.name}</td>
+      <td><span class="dot ${dc}"></span>${esc(s.name)}</td>
       <td><span class="tier-chip">Tier 2</span></td>
       <td>${stLabel}</td>
-      <td class="mono">${s.consecutive_failures || 0} / 3</td>
-      <td class="mono">${formatTime(s.last_checked)}</td>
+      <td class="mono">${Number(s.consecutive_failures) || 0} / 3</td>
+      <td class="mono">${esc(formatTime(s.last_checked))}</td>
     </tr>`;
   }).join('');
 
@@ -183,7 +186,7 @@ async function load() {
     const data = await res.json();
     render(data);
   } catch (e) {
-    document.getElementById('table-wrap').innerHTML = `<div class="loading" style="color:#f87171">Failed to load health data: ${e.message}</div>`;
+    document.getElementById('table-wrap').innerHTML = `<div class="loading" style="color:#f87171">Failed to load health data: ${esc(e.message)}</div>`;
   }
 }
 

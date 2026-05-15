@@ -8,6 +8,7 @@ All tests hit the live Railway deployment.
 
 import asyncio
 import os
+import uuid
 from typing import Optional
 import pytest
 import pytest_asyncio
@@ -15,9 +16,24 @@ import httpx
 
 # ── Connection config ─────────────────────────────────────────────────────────
 
-BASE_URL  = "https://gateway.wayforth.io"
-API_KEY   = "REDACTED_KEY_2"
+BASE_URL  = os.environ.get("WAYFORTH_TEST_BASE_URL", "https://gateway.wayforth.io")
+# Test API key must be supplied via env. The previous hardcoded literal was a
+# real developer-tier key that leaked into git history; rotate + supply a new
+# key per environment via WAYFORTH_TEST_API_KEY. When unset, auth-required
+# tests will skip individually via the `requires_api_key` autouse fixture below.
+API_KEY   = os.environ.get("WAYFORTH_TEST_API_KEY", "")
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
+
+
+@pytest.fixture(autouse=True)
+def _requires_api_key(request):
+    """Skip tests that need a real API key when WAYFORTH_TEST_API_KEY is unset.
+
+    Tests that explicitly verify "no key returns 401" should not need this gate;
+    mark them with @pytest.mark.no_api_key to opt out.
+    """
+    if not API_KEY and "no_api_key" not in {m.name for m in request.node.iter_markers()}:
+        pytest.skip("WAYFORTH_TEST_API_KEY not set — skipping auth-required test")
 
 # ── Fields that must NEVER appear in any API response ─────────────────────────
 
@@ -551,68 +567,161 @@ async def test_T055_execute_credit_gate(c):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 7 — BYOK KEY MANAGEMENT
+#
+# These tests previously formed an order-dependent chain (T060 add → T061 list
+# → T063 delete → T064 gone). They have been refactored to use per-test
+# UUID-suffixed slugs with auto-cleanup via the `byok_slug` /
+# `registered_byok` fixtures, so each test is fully independent and can run
+# in any order or in isolation.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SLUG_MAIN = "wayforth-test-byok-v040"
-_SLUG_DUP  = "wayforth-test-byok-v040-dup"
+# Clearly-fake sentinel string sent as the third-party-service API key in
+# BYOK CRUD tests. Not a Wayforth credential; the API only stores it
+# encrypted. Named explicitly so future entropy scans see "test placeholder".
+BYOK_FAKE_KEY = "sk_test_wayforth_byok_v040_sentinel"
 
-async def test_T060_byok_add(c):
-    # Cleanup stale from previous run
-    await c.delete(f"/call/keys/{_SLUG_MAIN}", headers=_uh())
+
+def _extract_byok_slugs(resp: httpx.Response) -> set[str]:
+    """Pull service_slug values out of /call/keys responses, tolerant of shape changes."""
+    payload = resp.json()
+    keys = (
+        payload.get("service_keys")
+        or payload.get("keys")
+        or payload.get("services", [])
+    )
+    return {k.get("service_slug") or k.get("slug", "") for k in keys}
+
+
+@pytest_asyncio.fixture
+async def byok_slug(c):
+    """A unique, never-before-used BYOK slug. Auto-cleaned after the test.
+
+    Tests that need a registered BYOK record (not just a slug) should use the
+    `registered_byok` fixture instead.
+    """
+    slug = f"wf-byok-test-{uuid.uuid4().hex[:10]}"
+    yield slug
+    try:
+        await c.delete(f"/call/keys/{slug}", headers=_uh())
+    except Exception:
+        pass
+
+
+@pytest_asyncio.fixture
+async def registered_byok(c, byok_slug):
+    """A BYOK slug that has already been registered with a fake API key."""
+    r = await c.post("/call/keys/add", headers=_uh(), json={
+        "service_slug": byok_slug,
+        "service_name": "Test BYOK (auto)",
+        "api_key": BYOK_FAKE_KEY,
+    })
+    if r.status_code not in (200, 201):
+        pytest.skip(f"BYOK register failed in fixture: {r.status_code} {r.text[:160]}")
+    return byok_slug
+
+
+async def test_T060_byok_add_returns_success(c, byok_slug):
+    """POST /call/keys/add with a fresh slug + fake key returns 200/201.
+
+    Guards against regression in BYOK record creation. Uses a unique slug to
+    avoid colliding with prior runs.
+    """
     r = rec(await c.post("/call/keys/add", headers=_uh(), json={
-        "service_slug":  _SLUG_MAIN,
-        "service_name":  "Test BYOK v040",
-        "api_key":       "sk_test_wayforth_byok_v040_sentinel",
+        "service_slug": byok_slug,
+        "service_name": "Test BYOK v040",
+        "api_key":      BYOK_FAKE_KEY,
     }))
     assert r.status_code in (200, 201), \
         f"BYOK add failed: {r.status_code} — {r.text}"
 
-async def test_T061_byok_in_list(c):
-    r = rec(await c.get("/call/keys", headers=_uh()))
-    assert r.status_code == 200
-    keys = r.json().get("service_keys", r.json().get("keys", r.json().get("services", [])))
-    slugs = {k.get("service_slug", k.get("slug", "")) for k in keys}
-    assert _SLUG_MAIN in slugs, \
-        f"Added key '{_SLUG_MAIN}' not found in /call/keys: {slugs}"
 
-async def test_T062_byok_key_not_plaintext(c):
+async def test_T061_byok_list_includes_registered_slug(c, registered_byok):
+    """GET /call/keys returns the slug we just registered.
+
+    Guards: list endpoint must surface freshly-added records to the same user.
+    """
     r = rec(await c.get("/call/keys", headers=_uh()))
     assert r.status_code == 200
-    assert "sk_test_wayforth_byok_v040_sentinel" not in r.text, \
+    slugs = _extract_byok_slugs(r)
+    assert registered_byok in slugs, \
+        f"Registered key {registered_byok!r} not in /call/keys: {slugs}"
+
+
+async def test_T062_byok_list_never_returns_plaintext_key(c, registered_byok):
+    """GET /call/keys must never return the plaintext third-party API key.
+
+    Guards: the encrypted_key column must never be projected to the response,
+    and the in-DB encryption must actually be applied (not a no-op).
+    """
+    r = rec(await c.get("/call/keys", headers=_uh()))
+    assert r.status_code == 200
+    assert BYOK_FAKE_KEY not in r.text, \
         "BYOK API key value leaked in plaintext in /call/keys response"
 
-async def test_T063_byok_delete(c):
-    r = rec(await c.delete(f"/call/keys/{_SLUG_MAIN}", headers=_uh()))
+
+async def test_T063_byok_delete_returns_success(c, registered_byok):
+    """DELETE /call/keys/{slug} on an existing record returns 200.
+
+    Guards: the delete endpoint must accept slugs the caller owns.
+    """
+    r = rec(await c.delete(f"/call/keys/{registered_byok}", headers=_uh()))
     assert r.status_code == 200, f"BYOK delete failed: {r.status_code} — {r.text}"
 
-async def test_T064_byok_gone_after_delete(c):
+
+async def test_T064_byok_deleted_slug_not_active_in_list(c, registered_byok):
+    """After DELETE, the slug must not appear as active in /call/keys.
+
+    Guards: delete must flip `active` (soft delete) or remove the row, so the
+    listing endpoint stops surfacing it. Prevents "deleted but still usable"
+    drift.
+    """
+    del_resp = await c.delete(f"/call/keys/{registered_byok}", headers=_uh())
+    assert del_resp.status_code == 200, f"setup delete failed: {del_resp.status_code}"
     r = rec(await c.get("/call/keys", headers=_uh()))
     assert r.status_code == 200
-    keys = r.json().get("service_keys", r.json().get("keys", r.json().get("services", [])))
+    payload = r.json()
+    keys = (
+        payload.get("service_keys")
+        or payload.get("keys")
+        or payload.get("services", [])
+    )
     active_slugs = {
-        k.get("service_slug", k.get("slug", ""))
+        (k.get("service_slug") or k.get("slug", ""))
         for k in keys
         if k.get("active", True) is not False
     }
-    assert _SLUG_MAIN not in active_slugs, \
-        f"Deleted BYOK key '{_SLUG_MAIN}' still active in /call/keys"
+    assert registered_byok not in active_slugs, \
+        f"Deleted BYOK key {registered_byok!r} still active in /call/keys"
 
-async def test_T065_byok_duplicate_handled(c):
-    await c.delete(f"/call/keys/{_SLUG_DUP}", headers=_uh())
-    await c.post("/call/keys/add", headers=_uh(), json={
-        "service_slug": _SLUG_DUP, "service_name": "Dup", "api_key": "sk_first",
+
+async def test_T065_byok_duplicate_slug_handled_gracefully(c, byok_slug):
+    """Registering the same slug twice must 200/201 (upsert) or 409 — never 500.
+
+    Guards: the ON CONFLICT clause in the BYOK insert must actually fire
+    instead of bubbling a 500 to the client.
+    """
+    first = await c.post("/call/keys/add", headers=_uh(), json={
+        "service_slug": byok_slug, "service_name": "Dup", "api_key": "sk_first",
     })
+    assert first.status_code in (200, 201), \
+        f"first BYOK add failed: {first.status_code} {first.text[:160]}"
     r = rec(await c.post("/call/keys/add", headers=_uh(), json={
-        "service_slug": _SLUG_DUP, "service_name": "Dup", "api_key": "sk_second",
+        "service_slug": byok_slug, "service_name": "Dup", "api_key": "sk_second",
     }))
     assert r.status_code in (200, 201, 409), \
-        f"Duplicate BYOK slug: expected 200/409, got {r.status_code}: {r.text}"
+        f"Duplicate BYOK slug: expected 200/201/409, got {r.status_code}: {r.text}"
     assert r.status_code != 500
-    await c.delete(f"/call/keys/{_SLUG_DUP}", headers=_uh())
 
-async def test_T066_byok_empty_api_key(c):
+
+async def test_T066_byok_empty_api_key_rejected(c, byok_slug):
+    """POST /call/keys/add with empty api_key must return 400/422 — never 500.
+
+    Guards: input validation rejects empty string before any DB/encryption
+    work. An empty key would otherwise round-trip into the DB and fail
+    silently at use-time.
+    """
     r = rec(await c.post("/call/keys/add", headers=_uh(), json={
-        "service_slug": "test-empty-byok",
+        "service_slug": byok_slug,
         "service_name": "Test",
         "api_key": "",
     }))

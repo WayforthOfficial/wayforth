@@ -200,7 +200,7 @@ async def admin_overview(request: Request, db=Depends(get_db)):
     except: total_services = 0
 
     try:
-        tier2 = await db.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2") or 0
+        tier2 = await db.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3") or 0
     except: tier2 = 0
 
     try:

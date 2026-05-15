@@ -1,8 +1,10 @@
 """routers/x402.py — x402 pay-per-call endpoint."""
 
 import asyncio
+import hashlib as _hl
 import logging
 import os
+import time as _time
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
@@ -12,28 +14,55 @@ from routers.agent import _upsert_x402_identity
 
 logger = logging.getLogger("wayforth")
 
+# Replay prevention: store payment header hashes for 5 minutes.
+# NOTE: this dict is per-process. In a multi-worker / multi-instance deploy a
+# determined attacker could replay a payment by hitting a different worker.
+# Move to Postgres or Redis once cross-instance replay protection is required.
+# Hard cap on entries to bound memory if the prune ever fails.
+_x402_seen: dict[str, float] = {}
+_X402_NONCE_TTL = 300  # seconds
+_X402_SEEN_MAX = 50_000
+
 router = APIRouter()
 
 
 async def _verify_x402_payment(payment_header: str, payto: str, expected_price_str: str) -> dict:
     """Decode and verify an EIP-3009 X-PAYMENT authorization header.
 
-    Returns {valid, from_address, amount_usdc}. Trusts the header if CDP is not configured.
+    Returns {valid, from_address, amount_usdc}. When CDP signing keys are not
+    configured (dev/staging without a wallet), we still parse the header and
+    require it to be a well-formed JSON envelope with the expected payee +
+    amount — we just skip the on-chain attestation step.
     """
     cdp_key_name = os.environ.get("CDP_API_KEY_NAME", "")
     cdp_private_key = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "")
-    if not cdp_key_name or not cdp_private_key:
-        return {"valid": True, "from_address": None, "amount_usdc": expected_price_str}
+    cdp_configured = bool(cdp_key_name and cdp_private_key)
 
     try:
         import base64 as _b64, json as _json
-        # Payment header is base64-encoded JSON with EIP-3009 auth fields
-        decoded = _json.loads(_b64.b64decode(payment_header + "==").decode("utf-8", errors="ignore"))
+        # Payment header is base64-encoded JSON with EIP-3009 auth fields.
+        # Use validate=False to accept urlsafe variants; require successful decode.
+        raw = _b64.b64decode(payment_header + "==", validate=False)
+        decoded = _json.loads(raw.decode("utf-8"))
+        if not isinstance(decoded, dict):
+            raise ValueError("payment header is not a JSON object")
         from_address = decoded.get("from") or decoded.get("authorization", {}).get("from", "")
+        to_address = (decoded.get("to") or decoded.get("authorization", {}).get("to") or "").lower()
         # Amount is in micro-USDC; convert to USDC string for comparison
-        from services.x402_pricing import to_micro_usdc, X402_PRICES_USDC
+        from services.x402_pricing import to_micro_usdc
         expected_micro = int(to_micro_usdc(expected_price_str))
         received_micro = int(decoded.get("value", decoded.get("authorization", {}).get("value", 0)))
+        # Validate payee matches: prevents accepting payments to attacker-controlled wallets.
+        if payto and to_address and to_address != payto.lower():
+            logger.warning("x402 payee mismatch: expected=%s received=%s", payto, to_address)
+            return {
+                "valid": False,
+                "from_address": from_address,
+                "amount_usdc": str(received_micro / 1_000_000),
+                "expected_micro": expected_micro,
+                "received_micro": received_micro,
+                "error": "payee_mismatch",
+            }
         # Allow 2% tolerance for gas variance
         within_tolerance = received_micro >= int(expected_micro * 0.98)
         return {
@@ -44,8 +73,16 @@ async def _verify_x402_payment(payment_header: str, payto: str, expected_price_s
             "received_micro": received_micro,
         }
     except Exception as _e:
+        # Previously this branch fell-open as {valid: True}. That allowed any
+        # malformed/garbage X-PAYMENT header to bypass payment entirely. Fail
+        # closed: an unparseable header is not a valid payment.
         logger.warning("x402 payment header decode failed: %s", _e)
-        return {"valid": True, "from_address": None, "amount_usdc": expected_price_str}
+        return {
+            "valid": False,
+            "from_address": None,
+            "amount_usdc": "0",
+            "error": "decode_failed",
+        }
 
 
 async def _verify_payment_async(payment_header: str, service_slug: str):
@@ -157,6 +194,26 @@ async def x402_execute(request):
                 "maxTimeoutSeconds": 300,
             }],
         })
+
+    # Replay prevention: reject payment headers seen within the last 5 minutes.
+    _ph_hash = _hl.sha256(payment_header.encode()).hexdigest()
+    _now = _time.time()
+    # Prune expired entries by removing keys; previous `update` form re-added
+    # the same keys and never actually removed anything.
+    expired = [k for k, v in _x402_seen.items() if _now - v >= _X402_NONCE_TTL]
+    for k in expired:
+        _x402_seen.pop(k, None)
+    # Hard cap so a flood of unique payments can't OOM the worker if prune is
+    # somehow bypassed; oldest entries get evicted first.
+    if len(_x402_seen) > _X402_SEEN_MAX:
+        for k in sorted(_x402_seen, key=_x402_seen.get)[: len(_x402_seen) - _X402_SEEN_MAX]:
+            _x402_seen.pop(k, None)
+    if _ph_hash in _x402_seen:
+        return JSONResponse(status_code=400, content={
+            "error": "replay_rejected",
+            "message": "This payment has already been processed. Each payment header can only be used once.",
+        })
+    _x402_seen[_ph_hash] = _now
 
     # Verify payment with 5s timeout; accept optimistically on timeout
     payer_address = None

@@ -55,6 +55,8 @@
   <script>
     const WAYFORTH_API = 'https://gateway.wayforth.io';
     const chat = document.getElementById('chat');
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
     // Initial greeting
     addMessage('assistant', 'Hello! I can help you find agent-payable services in the Wayforth catalog. What does your agent need? Try asking for "fast inference", "translation", "stock data", or anything else.');
@@ -95,24 +97,26 @@
         }
 
         const topResult = data.results[0];
-        let html = `<div>Found <strong>${data.results.length} services</strong> for "${q}":</div>`;
+        let html = `<div>Found <strong>${Number(data.results.length) || 0} services</strong> for "${esc(q)}":</div>`;
 
         data.results.forEach(s => {
-          const tierBadge = s.coverage_tier >= 2 ? ' · <span style="color:#10B981">✓ Tier 2</span>' : '';
-          const price = (s.pricing?.per_call_usd) || s.pricing_usdc;
+          const tier = Number(s.coverage_tier) || 0;
+          const tierBadge = tier >= 2 ? ' · <span style="color:#10B981">✓ Tier 2</span>' : '';
+          const price = Number(s.pricing?.per_call_usd ?? s.pricing_usdc) || 0;
           html += `
             <div class="service-card">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span class="name">${s.name}</span>
-                <span class="score">Score: ${s.score}</span>
+                <span class="name">${esc(s.name)}</span>
+                <span class="score">Score: ${esc(s.score)}</span>
               </div>
-              <div class="reason">${s.reason}</div>
-              <div class="meta">Tier ${s.coverage_tier} · ${s.category} · ${price ? '$'+price+'/req' : 'Free'}${tierBadge}</div>
+              <div class="reason">${esc(s.reason)}</div>
+              <div class="meta">Tier ${tier} · ${esc(s.category)} · ${price ? '$'+price+'/req' : 'Free'}${tierBadge}</div>
             </div>`;
         });
 
+        const safeServiceId = String(topResult.service_id || '').replace(/[^A-Za-z0-9_.\-]/g, '').slice(0, 16);
         html += `<div style="color:#64748B;font-size:12px;margin-top:8px">
-          To pay for <strong>${topResult.name}</strong>, call <code style="color:#4F46E5">wayforth_pay("${(topResult.service_id||'').slice(0,16)}...", amount_usd)</code>
+          To pay for <strong>${esc(topResult.name)}</strong>, call <code style="color:#4F46E5">wayforth_pay("${esc(safeServiceId)}...", amount_usd)</code>
         </div>`;
 
         addMessage('assistant', html, true);

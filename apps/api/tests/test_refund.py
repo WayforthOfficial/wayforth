@@ -15,8 +15,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-BASE_URL = "https://gateway.wayforth.io"
-API_KEY  = "REDACTED_KEY_2"
+BASE_URL = os.environ.get("WAYFORTH_TEST_BASE_URL", "https://gateway.wayforth.io")
+API_KEY  = os.environ.get("WAYFORTH_TEST_API_KEY", "")
+
+
+@pytest.fixture(autouse=True)
+def _requires_api_key(request):
+    if not API_KEY and "no_api_key" not in {m.name for m in request.node.iter_markers()}:
+        pytest.skip("WAYFORTH_TEST_API_KEY not set — skipping auth-required test")
 
 _SLUG_5XX  = "wf-refund-test-5xx"
 _SLUG_4XX  = "wf-refund-test-4xx"

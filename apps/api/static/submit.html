@@ -128,6 +128,8 @@
 
   <script>
     const API = 'https://gateway.wayforth.io';
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
     async function submitService() {
       const btn = document.getElementById('submit-btn');
@@ -160,15 +162,15 @@
         });
         const d = await r.json();
         if (r.ok) {
-          result.innerHTML = `<span style="color:#34D399">✓ ${d.message}</span>`;
+          result.innerHTML = `<span style="color:#34D399">✓ ${esc(d.message)}</span>`;
           btn.textContent = 'Submitted!';
         } else {
-          result.innerHTML = `<span style="color:#F87171">Error: ${d.detail}</span>`;
+          result.innerHTML = `<span style="color:#F87171">Error: ${esc(d.detail)}</span>`;
           btn.disabled = false;
           btn.textContent = 'List My Service';
         }
       } catch(e) {
-        result.innerHTML = `<span style="color:#F87171">Error: ${e.message}</span>`;
+        result.innerHTML = `<span style="color:#F87171">Error: ${esc(e.message)}</span>`;
         btn.disabled = false;
         btn.textContent = 'List My Service';
       }
