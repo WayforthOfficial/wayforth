@@ -315,7 +315,7 @@ async def regenerate_api_key(request: Request, db=Depends(get_db)):
 
 
 @router.get("/auth/me")
-@limiter.limit("30/minute")
+@limiter.limit("10/minute")
 async def auth_me(request: Request, db=Depends(get_db)):
     """Return the caller's API key, email, and tier.
 

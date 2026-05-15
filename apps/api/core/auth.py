@@ -194,6 +194,8 @@ async def check_auth(request: Request) -> dict:
 
 async def _resolve_user(db, api_key: str):
     """Return (user_id, api_key_id, tier) for a valid active API key, or raise 401."""
+    if not api_key.startswith("wf_live_") or not (40 <= len(api_key) <= 60):
+        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
     key_record = await db.fetchrow(
         "SELECT id, user_id, tier FROM api_keys WHERE key_hash=$1 AND active=true",
         hashlib.sha256(api_key.encode()).hexdigest(),

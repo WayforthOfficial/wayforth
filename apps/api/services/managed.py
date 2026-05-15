@@ -2,6 +2,8 @@ import asyncio
 import base64
 import json as _json
 import logging
+import os as _os
+import time as _time
 import httpx
 
 _httpx_log = logging.getLogger("httpx")
@@ -59,6 +61,11 @@ SERVICE_DISPLAY_NAMES = {
     "stability":   "Stability AI",
     "resend":      "Resend Email",
 }
+
+
+def _active_managed_count() -> int:
+    """Count SERVICE_CONFIGS entries where the env var is set (i.e. key is configured)."""
+    return sum(1 for cfg in SERVICE_CONFIGS.values() if _os.environ.get(cfg["key_var"]))
 
 
 async def call_groq(params: dict, api_key: str) -> dict:
@@ -427,7 +434,21 @@ async def call_tavily(params: dict, api_key: str) -> dict:
     }
 
 
+# AlphaVantage free tier: 5 calls/minute. Track timestamps to queue instead of fail.
+_av_call_times: list[float] = []
+_AV_WINDOW_SEC = 60
+_AV_LIMIT = 5
+_AV_BACKOFF_SEC = 15
+
+
 async def call_alphavantage(params: dict, api_key: str) -> dict:
+    global _av_call_times
+    now = _time.time()
+    _av_call_times = [t for t in _av_call_times if now - t < _AV_WINDOW_SEC]
+    if len(_av_call_times) >= _AV_LIMIT:
+        await asyncio.sleep(_AV_BACKOFF_SEC)
+    _av_call_times.append(_time.time())
+
     symbol = params.get("symbol", "").upper()
     if not symbol:
         raise Exception("params.symbol is required (e.g. 'AAPL')")

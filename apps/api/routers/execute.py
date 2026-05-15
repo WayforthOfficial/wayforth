@@ -412,7 +412,14 @@ async def add_service_key(request: Request, db=Depends(get_db)):
     if endpoint_url and not endpoint_url.startswith("https://"):
         raise HTTPException(status_code=400, detail={"error": "endpoint_url must start with https://"})
 
-    preview = raw_key[:4] + "****" + raw_key[-4:] if len(raw_key) >= 8 else "****"
+    # For an 8-char key, "first 4 + last 4" reconstructs the whole key. Require
+    # 16+ chars before showing both ends; shorter keys get a fully-masked preview.
+    if len(raw_key) >= 16:
+        preview = raw_key[:4] + "****" + raw_key[-4:]
+    elif len(raw_key) >= 8:
+        preview = raw_key[:2] + "****"
+    else:
+        preview = "****"
 
     try:
         f = get_fernet()
