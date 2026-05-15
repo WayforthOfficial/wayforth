@@ -96,6 +96,13 @@
   <script>
     const API = 'https://gateway.wayforth.io';
 
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const safeUrl = u => {
+      try { const p = new URL(u); return (p.protocol === 'https:' || p.protocol === 'http:') ? p.href : '#'; }
+      catch { return '#'; }
+    };
+
     async function loadStats() {
       try {
         const [statsRes, lbRes] = await Promise.all([
@@ -106,9 +113,9 @@
         const lb = await lbRes.json();
         const queryCount = lb.total_queries ?? 0;
         document.getElementById('stats').innerHTML =
-          `<span>${d.total_services.toLocaleString()}</span> services indexed · ` +
-          `<span>${d.by_tier['2']}</span> Tier 2 executable today · ` +
-          `<span>${queryCount}</span> searches today · ` +
+          `<span>${Number(d.total_services).toLocaleString()}</span> services indexed · ` +
+          `<span>${Number(d.by_tier['2']) || 0}</span> Tier 2 executable today · ` +
+          `<span>${Number(queryCount) || 0}</span> searches today · ` +
           `Semantic ranking by Claude Haiku`;
         window._leaderboard = lb.leaderboard;
       } catch(e) { document.getElementById('stats').textContent = ''; }
@@ -138,20 +145,24 @@
           return;
         }
 
-        results.innerHTML = d.results.map(s => `
+        results.innerHTML = d.results.map(s => {
+          const tier = Number(s.coverage_tier) || 0;
+          const price = Number(s.pricing?.per_call_usd ?? s.pricing_usdc) || 0;
+          const url = safeUrl(s.endpoint_url);
+          return `
           <div class="result-card">
             <div class="result-header">
-              <span class="result-name">${s.name}</span>
-              <span class="result-score">score ${s.score}</span>
+              <span class="result-name">${esc(s.name)}</span>
+              <span class="result-score">score ${esc(s.score)}</span>
             </div>
-            <div class="result-reason">${s.reason}</div>
+            <div class="result-reason">${esc(s.reason)}</div>
             <div class="result-meta">
-              <span class="tier-badge tier-${s.coverage_tier}">Tier ${s.coverage_tier}</span>
-              <span>${(s.pricing?.per_call_usd || s.pricing_usdc) ? '$' + (s.pricing?.per_call_usd || s.pricing_usdc) + '/req' : 'Free'}</span>
-              <a href="${s.endpoint_url}" target="_blank" class="result-endpoint">${s.endpoint_url}</a>
+              <span class="tier-badge tier-${tier}">Tier ${tier}</span>
+              <span>${price ? '$' + price + '/req' : 'Free'}</span>
+              <a href="${esc(url)}" target="_blank" rel="noopener noreferrer" class="result-endpoint">${esc(s.endpoint_url)}</a>
             </div>
           </div>
-        `).join('');
+        `;}).join('');
 
         if (window._leaderboard?.length) {
           const top3 = window._leaderboard.slice(0, 3);
@@ -162,14 +173,14 @@
               </div>
               ${top3.map((s, i) => `
                 <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #1E293B;">
-                  <span style="color:#94A3B8;font-size:13px;">${i+1}. ${s.name}</span>
-                  <span style="color:#4F46E5;font-size:12px;font-weight:600;">${s.query_count} searches</span>
+                  <span style="color:#94A3B8;font-size:13px;">${i+1}. ${esc(s.name)}</span>
+                  <span style="color:#4F46E5;font-size:12px;font-weight:600;">${Number(s.query_count) || 0} searches</span>
                 </div>
               `).join('')}
             </div>`;
         }
       } catch(e) {
-        results.innerHTML = `<div class="error">Error: ${e.message}</div>`;
+        results.innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
       } finally {
         btn.disabled = false;
         btn.textContent = 'Search';
@@ -204,10 +215,10 @@
         });
         const d = await r.json();
         result.innerHTML = r.ok
-          ? `<span style="color:#34D399">✓ ${d.message}</span>`
-          : `<span style="color:#F87171">Error: ${d.detail}</span>`;
+          ? `<span style="color:#34D399">✓ ${esc(d.message)}</span>`
+          : `<span style="color:#F87171">Error: ${esc(d.detail)}</span>`;
       } catch(e) {
-        result.innerHTML = `<span style="color:#F87171">Error: ${e.message}</span>`;
+        result.innerHTML = `<span style="color:#F87171">Error: ${esc(e.message)}</span>`;
       } finally {
         btn.disabled = false;
         btn.textContent = 'Submit Service';

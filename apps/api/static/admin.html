@@ -382,6 +382,14 @@ function confirm(title, body, onOk, btnLabel = 'Confirm', btnClass = 'btn-red') 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmt(n) { return Number(n || 0).toLocaleString(); }
 function fmtDate(d) { if (!d) return '—'; return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
+// HTML-escape arbitrary string for safe interpolation into innerHTML.
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// JS-string-escape for values placed inside single-quoted onclick="fn('${...}')" handlers.
+// Backslashes are escaped first, then quotes/newlines, then HTML-encode for attribute context.
+const jsEsc = s => esc(String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, '\\n'));
+// Validator for slug-like identifiers (catalog slugs, UUIDs); returns '' on bad input.
+const safeId = s => /^[A-Za-z0-9_.\-]{1,128}$/.test(String(s ?? '')) ? String(s) : '';
 function statusBadge(active, label = ['Active', 'Suspended']) {
   return active
     ? `<span class="badge badge-green"><span class="dot dot-green"></span>${label[0]}</span>`
@@ -418,9 +426,9 @@ async function dashboard() {
     ['Pending KYB', fmt(s.pending_tier3), 'tier 3'],
   ].map(([label, val, sub]) => `
     <div class="stat-card">
-      <div class="stat-label">${label}</div>
-      <div class="stat-value">${val}</div>
-      ${sub ? `<div class="stat-sub">${sub}</div>` : ''}
+      <div class="stat-label">${esc(label)}</div>
+      <div class="stat-value">${esc(val)}</div>
+      ${sub ? `<div class="stat-sub">${esc(sub)}</div>` : ''}
     </div>`).join('');
 
   renderSparkline('dash-chart-search', d.daily_searches);
@@ -433,11 +441,11 @@ function renderSparkline(id, data) {
   const max = Math.max(...data.map(d => d.count), 1);
   const bars = data.map(d => {
     const h = Math.max(4, Math.round(d.count / max * 80));
-    return `<div title="${d.date}: ${d.count}" style="flex:1;height:${h}px;background:#4F46E5;border-radius:2px 2px 0 0;opacity:0.8;min-width:4px"></div>`;
+    return `<div title="${esc(d.date)}: ${Number(d.count) || 0}" style="flex:1;height:${Number(h) || 4}px;background:#4F46E5;border-radius:2px 2px 0 0;opacity:0.8;min-width:4px"></div>`;
   }).join('');
   el.innerHTML = `<div style="display:flex;align-items:flex-end;gap:3px;height:80px;padding:0 4px">${bars}</div>
     <div style="display:flex;justify-content:space-between;font-size:11px;color:#475569;margin-top:8px;padding:0 4px">
-      <span>${data[0]?.date || ''}</span><span>${data[data.length-1]?.date || ''}</span>
+      <span>${esc(data[0]?.date || '')}</span><span>${esc(data[data.length-1]?.date || '')}</span>
     </div>`;
 }
 
@@ -487,14 +495,14 @@ async function loadUsers(offset = _usersPage * 50) {
 
   tbody.innerHTML = d.users.map(u => `
     <tr>
-      <td><div style="font-weight:500">${u.email}</div><div class="mono">${u.key_prefix ? u.key_prefix + '…' : '—'}</div></td>
-      <td>${tierBadge(u.tier === 'free' ? 1 : u.tier === 'builder' ? 1 : u.tier === 'starter' ? 2 : 3)}&nbsp;<span class="badge badge-gray">${u.tier || 'free'}</span></td>
+      <td><div style="font-weight:500">${esc(u.email)}</div><div class="mono">${esc(u.key_prefix ? u.key_prefix + '…' : '—')}</div></td>
+      <td>${tierBadge(u.tier === 'free' ? 1 : u.tier === 'builder' ? 1 : u.tier === 'starter' ? 2 : 3)}&nbsp;<span class="badge badge-gray">${esc(u.tier || 'free')}</span></td>
       <td>${fmt(u.monthly_calls_count)}</td>
       <td>${fmt(u.credits_balance)}</td>
-      <td class="text-muted">${fmtDate(u.created_at)}</td>
+      <td class="text-muted">${esc(fmtDate(u.created_at))}</td>
       <td>${statusBadge(u.subscription_status !== 'suspended')}</td>
       <td><div class="actions">
-        <button class="btn btn-sm btn-outline" onclick="viewUser('${u.id}','${u.email}')">View</button>
+        <button class="btn btn-sm btn-outline" onclick="viewUser('${jsEsc(u.id)}','${jsEsc(u.email)}')">View</button>
       </div></td>
     </tr>`).join('');
 
@@ -525,7 +533,7 @@ async function providers() {
       <div class="card-header">
         <div class="card-title">All Providers</div>
         <div class="toolbar">
-          <input class="search-input" id="prov-search" placeholder="Filter by email…" value="${_providersQ}" oninput="providersFilter()">
+          <input class="search-input" id="prov-search" placeholder="Filter by email…" value="${esc(_providersQ)}" oninput="providersFilter()">
           <select class="filter-select" id="prov-sort" onchange="providersSort()">
             <option value="newest" ${_providersSort==='newest'?'selected':''}>Newest</option>
             <option value="most_services" ${_providersSort==='most_services'?'selected':''}>Most Services</option>
@@ -571,18 +579,18 @@ async function loadProviders(offset = 0) {
 
   tbody.innerHTML = d.providers.map(p => `
     <tr>
-      <td style="font-weight:500">${p.email}</td>
-      <td class="text-muted">${p.company_name || '—'}</td>
+      <td style="font-weight:500">${esc(p.email)}</td>
+      <td class="text-muted">${esc(p.company_name || '—')}</td>
       <td>${fmt(p.service_count)}</td>
       <td>${fmt(p.total_calls)}</td>
       <td>${p.verified ? '<span class="badge badge-green">✓ Yes</span>' : '<span class="badge badge-gray">No</span>'}</td>
-      <td class="text-muted">${fmtDate(p.created_at)}</td>
+      <td class="text-muted">${esc(fmtDate(p.created_at))}</td>
       <td>${statusBadge(!p.suspended)}</td>
       <td><div class="actions">
-        <button class="btn btn-sm btn-outline" onclick="providerDetail('${p.id}')">View</button>
+        <button class="btn btn-sm btn-outline" onclick="providerDetail('${jsEsc(p.id)}')">View</button>
         ${p.suspended
-          ? `<button class="btn btn-sm btn-green" onclick="reinstateProvider('${p.id}','${p.email}')">Reinstate</button>`
-          : `<button class="btn btn-sm btn-red" onclick="suspendProvider('${p.id}','${p.email}')">Suspend</button>`}
+          ? `<button class="btn btn-sm btn-green" onclick="reinstateProvider('${jsEsc(p.id)}','${jsEsc(p.email)}')">Reinstate</button>`
+          : `<button class="btn btn-sm btn-red" onclick="suspendProvider('${jsEsc(p.id)}','${jsEsc(p.email)}')">Suspend</button>`}
       </div></td>
     </tr>`).join('');
 
@@ -627,26 +635,26 @@ async function providerDetail(id) {
     <div class="card" style="margin-bottom:24px">
       <div class="card-header">
         <div>
-          <div class="card-title">${p.company_name || p.email}</div>
-          <div class="text-muted text-sm" style="margin-top:2px">${p.email}</div>
+          <div class="card-title">${esc(p.company_name || p.email)}</div>
+          <div class="text-muted text-sm" style="margin-top:2px">${esc(p.email)}</div>
         </div>
         <div class="actions">
           ${p.suspended
-            ? `<button class="btn btn-green" onclick="reinstateProviderDetail('${p.id}','${p.email}')">Reinstate</button>`
-            : `<button class="btn btn-red"   onclick="suspendProviderDetail('${p.id}','${p.email}')">Suspend</button>`}
+            ? `<button class="btn btn-green" onclick="reinstateProviderDetail('${jsEsc(p.id)}','${jsEsc(p.email)}')">Reinstate</button>`
+            : `<button class="btn btn-red"   onclick="suspendProviderDetail('${jsEsc(p.id)}','${jsEsc(p.email)}')">Suspend</button>`}
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0;border-top:1px solid #334155">
         ${[
           ['Status', p.suspended ? '<span class="badge badge-red">Suspended</span>' : '<span class="badge badge-green">Active</span>'],
           ['Verified', p.verified ? '<span class="badge badge-green">✓ Yes</span>' : '<span class="badge badge-gray">No</span>'],
-          ['Tier', `<span class="badge badge-purple">${p.tier || 'observer'}</span>`],
-          ['Joined', fmtDate(p.created_at)],
-          ['Last Login', fmtDate(p.last_login_at)],
+          ['Tier', `<span class="badge badge-purple">${esc(p.tier || 'observer')}</span>`],
+          ['Joined', esc(fmtDate(p.created_at))],
+          ['Last Login', esc(fmtDate(p.last_login_at))],
           ['Services', fmt(d.services.length)],
         ].map(([label, val]) => `
           <div style="padding:16px 20px;border-right:1px solid #1e293b">
-            <div class="stat-label">${label}</div>
+            <div class="stat-label">${esc(label)}</div>
             <div style="margin-top:6px;font-size:13px">${val}</div>
           </div>`).join('')}
       </div>
@@ -664,19 +672,19 @@ async function providerDetail(id) {
             ? `<tr><td colspan="8" class="empty-state">No services registered</td></tr>`
             : d.services.map(s => `
             <tr>
-              <td class="mono">${s.slug}</td>
-              <td style="font-weight:500">${s.name}</td>
-              <td class="text-muted">${s.category || '—'}</td>
+              <td class="mono">${esc(s.slug)}</td>
+              <td style="font-weight:500">${esc(s.name)}</td>
+              <td class="text-muted">${esc(s.category || '—')}</td>
               <td>${tierBadge(s.tier)}</td>
               <td>${s.verified ? '<span class="badge badge-green">✓</span>' : '<span class="badge badge-gray">No</span>'}</td>
               <td>${fmt(s.calls)}</td>
               <td class="mono">${s.price ? '$' + Number(s.price).toFixed(4) : '—'}</td>
               <td><div class="actions">
                 ${s.tier < 2
-                  ? `<button class="btn btn-sm btn-green" onclick="verifySvc('${s.slug}', this)">Verify</button>`
-                  : `<button class="btn btn-sm btn-yellow" onclick="demoteSvc('${s.slug}', this)">Demote</button>`}
-                <button class="btn btn-sm btn-outline" onclick="openEditSvc('${s.slug}','${s.name}','${s.category}','${s.tier}','${s.price}','false')">Edit</button>
-                <button class="btn btn-sm btn-red" onclick="deleteSvcConfirm('${s.slug}', () => providerDetail('${p.id}'))">Delete</button>
+                  ? `<button class="btn btn-sm btn-green" onclick="verifySvc('${jsEsc(safeId(s.slug))}', this)">Verify</button>`
+                  : `<button class="btn btn-sm btn-yellow" onclick="demoteSvc('${jsEsc(safeId(s.slug))}', this)">Demote</button>`}
+                <button class="btn btn-sm btn-outline" onclick="openEditSvc('${jsEsc(safeId(s.slug))}','${jsEsc(s.name)}','${jsEsc(s.category)}','${Number(s.tier) || 1}','${Number(s.price) || 0}','false')">Edit</button>
+                <button class="btn btn-sm btn-red" onclick="deleteSvcConfirm('${jsEsc(safeId(s.slug))}', () => providerDetail('${jsEsc(p.id)}'))">Delete</button>
               </div></td>
             </tr>`).join('')}
         </tbody>
@@ -789,21 +797,21 @@ async function loadServices(offset = _svcsOffset) {
 
   tbody.innerHTML = d.services.map(s => `
     <tr>
-      <td><input type="checkbox" class="svc-check" value="${s.slug}" onchange="toggleSelect(this)" ${_svcsSelected.has(s.slug)?'checked':''}></td>
-      <td class="mono">${s.slug || '—'}</td>
-      <td style="font-weight:500;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.name}</td>
-      <td class="text-muted">${s.category || '—'}</td>
+      <td><input type="checkbox" class="svc-check" value="${esc(s.slug)}" onchange="toggleSelect(this)" ${_svcsSelected.has(s.slug)?'checked':''}></td>
+      <td class="mono">${esc(s.slug || '—')}</td>
+      <td style="font-weight:500;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s.name)}</td>
+      <td class="text-muted">${esc(s.category || '—')}</td>
       <td>${tierBadge(s.tier)}</td>
       <td>${s.tier >= 2 ? '<span class="badge badge-green">✓</span>' : '<span class="badge badge-gray">—</span>'}</td>
       <td>${s.x402_supported ? '<span class="badge badge-purple">x402</span>' : '<span class="text-muted">—</span>'}</td>
       <td>${fmt(s.calls)}</td>
-      <td class="text-muted text-sm" style="max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.provider || '—'}</td>
+      <td class="text-muted text-sm" style="max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s.provider || '—')}</td>
       <td><div class="actions">
         ${s.tier < 2
-          ? `<button class="btn btn-sm btn-green" onclick="verifySvc('${s.slug}',this)">Verify</button>`
-          : `<button class="btn btn-sm btn-yellow" onclick="demoteSvc('${s.slug}',this)">Demote</button>`}
-        <button class="btn btn-sm btn-outline" onclick="openEditSvc('${s.slug}','${(s.name||'').replace(/'/g,"\\'")}','${s.category||''}','${s.tier||1}','${s.price||0}','${s.x402_supported?'true':'false'}')">Edit</button>
-        <button class="btn btn-sm btn-red" onclick="deleteSvcConfirm('${s.slug}', loadServices)">Delete</button>
+          ? `<button class="btn btn-sm btn-green" onclick="verifySvc('${jsEsc(safeId(s.slug))}',this)">Verify</button>`
+          : `<button class="btn btn-sm btn-yellow" onclick="demoteSvc('${jsEsc(safeId(s.slug))}',this)">Demote</button>`}
+        <button class="btn btn-sm btn-outline" onclick="openEditSvc('${jsEsc(safeId(s.slug))}','${jsEsc(s.name||'')}','${jsEsc(s.category||'')}','${Number(s.tier) || 1}','${Number(s.price) || 0}','${s.x402_supported?'true':'false'}')">Edit</button>
+        <button class="btn btn-sm btn-red" onclick="deleteSvcConfirm('${jsEsc(safeId(s.slug))}', loadServices)">Delete</button>
       </div></td>
     </tr>`).join('');
 
@@ -936,7 +944,7 @@ async function stats() {
         ['Searches 24h', fmt(s.searches_24h)],
         ['Searches 7d', fmt(s.searches_7d)],
         ['Agents', fmt(s.total_agents)],
-      ].map(([l,v]) => `<div class="stat-card"><div class="stat-label">${l}</div><div class="stat-value">${v}</div></div>`).join('')}
+      ].map(([l,v]) => `<div class="stat-card"><div class="stat-label">${esc(l)}</div><div class="stat-value">${esc(v)}</div></div>`).join('')}
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
       <div class="card">
@@ -976,7 +984,7 @@ async function health() {
     <div class="stats-grid" style="margin-bottom:20px">
       <div class="stat-card"><div class="stat-label">API</div><div class="stat-value" style="font-size:20px">${statusData ? '✓ Online' : '✗ Error'}</div></div>
       <div class="stat-card"><div class="stat-label">Database</div><div class="stat-value" style="font-size:20px">${dbOk ? '✓ Ok' : '✗ Error'}</div></div>
-      <div class="stat-card"><div class="stat-label">Version</div><div class="stat-value" style="font-size:20px">${statusData?.version || '—'}</div></div>
+      <div class="stat-card"><div class="stat-label">Version</div><div class="stat-value" style="font-size:20px">${esc(statusData?.version || '—')}</div></div>
     </div>
     ${overData ? `
     <div class="card">

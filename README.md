@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/wayforth-mcp)](https://pypi.org/project/wayforth-mcp/)
 [![smithery badge](https://smithery.ai/badge/support-9ef4/Wayforth)](https://smithery.ai/servers/support-9ef4/Wayforth)
 
-**v0.6.10 — Ecosystem** · Search engine and payment rail for AI agents.
+**v0.6.11 — Security Hardening** · Search engine and payment rail for AI agents.
 
 3,000+ verified API endpoints across 19 categories. Pay via card or crypto. One MCP install.
 

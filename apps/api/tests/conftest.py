@@ -1,7 +1,7 @@
 """conftest.py — session-finish summary hook + availability guard."""
 import httpx
 import pytest
-from tests.test_suite_v060 import BASE_URL, _500_errors, _forbidden_hits, _warnings
+from tests.test_suite_v060 import API_KEY, BASE_URL, _500_errors, _forbidden_hits, _warnings
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -15,10 +15,33 @@ def service_up():
         pytest.skip(f"Service unreachable ({type(exc).__name__}: {exc}) — skipping suite")
 
 
+@pytest.fixture(autouse=True)
+def _global_requires_api_key(request):
+    """Skip auth-required tests across all test modules when WAYFORTH_TEST_API_KEY is unset.
+
+    Tests that explicitly probe behavior without a key (e.g. "no key → 401") should
+    opt out with @pytest.mark.no_api_key. The v063 security suite uses this marker
+    on tests that intentionally verify unauthenticated 401 responses.
+    """
+    if API_KEY:
+        return
+    markers = {m.name for m in request.node.iter_markers()}
+    if "no_api_key" in markers:
+        return
+    # Skip if the test module is one of the auth-required suites.
+    module_path = str(request.node.fspath)
+    auth_required_modules = (
+        "test_suite_v060.py", "test_suite_v062.py", "test_suite_v0610.py",
+        "test_suite_v052.py", "test_refund.py",
+    )
+    if any(m in module_path for m in auth_required_modules):
+        pytest.skip("WAYFORTH_TEST_API_KEY not set — skipping auth-required test")
+
+
 def pytest_sessionfinish(session, exitstatus):
     print("\n")
     print("═" * 62)
-    print("  WAYFORTH v0.6.10  END-TO-END TEST SUITE  SUMMARY")
+    print("  WAYFORTH v0.6.11  END-TO-END TEST SUITE  SUMMARY")
     print("═" * 62)
 
     passed = session.testscollected - session.testsfailed - getattr(session, "testsskipped", 0)

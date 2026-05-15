@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.6.10"
+VERSION = "0.6.11"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -60,7 +60,7 @@ from core.credits import (
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier, _get_redis
-from services.managed import SERVICE_CONFIGS
+from services.managed import SERVICE_CONFIGS, _active_managed_count
 from services.param_mapper import MANAGED_TO_CATALOG
 from services.wayforthrank import compute_wri
 
@@ -527,6 +527,12 @@ async def lifespan(app: FastAPI):
                 ON credit_transactions(user_id, created_at)
                 WHERE type = 'execution' AND amount < 0
             """)
+            # v0.6.10 — remove first-party labs summarizer from public catalog
+            await _mconn.execute("""
+                DELETE FROM services
+                WHERE slug = 'wayforth_labs_summarizer'
+                   OR (endpoint_url ILIKE '%labs-production%' AND name ILIKE '%summarizer%')
+            """)
     except Exception as e:
         import traceback
         print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
@@ -646,6 +652,11 @@ async def check_auth(request: Request) -> dict:
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
 
     if raw_key:
+        if not raw_key.startswith("wf_live_") or not (40 <= len(raw_key) <= 60):
+            raise _AuthError(401, {
+                "error": "invalid_key",
+                "message": "Invalid API key format.",
+            })
         pool = request.app.state.pool
         if not pool:
             raise HTTPException(status_code=503, detail="Database unavailable")
@@ -857,6 +868,57 @@ async def security_policy():
     return PlainTextResponse(_SECURITY_TXT, media_type="text/plain; charset=utf-8")
 
 
+_SECURITY_POLICY_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wayforth Security Policy</title>
+  <style>
+    body{font-family:system-ui,sans-serif;max-width:720px;margin:3rem auto;padding:0 1rem;color:#1a1a1a}
+    h1{font-size:1.75rem;margin-bottom:.5rem}
+    h2{font-size:1.1rem;margin-top:2rem;color:#444}
+    a{color:#2563eb}
+    code{background:#f3f4f6;padding:.1em .3em;border-radius:3px}
+    .badge{display:inline-block;background:#d1fae5;color:#065f46;padding:.2em .6em;border-radius:.4em;font-size:.85rem;font-weight:600}
+  </style>
+</head>
+<body>
+  <h1>Wayforth Security Policy</h1>
+  <p><span class="badge">DEPLOYED</span></p>
+  <h2>Reporting a Vulnerability</h2>
+  <p>Email <a href="mailto:security@wayforth.io">security@wayforth.io</a> with a description of the issue,
+  steps to reproduce, and potential impact. We aim to acknowledge reports within 48 hours and provide
+  a remediation timeline within 5 business days.</p>
+  <h2>Scope</h2>
+  <ul>
+    <li>Wayforth API (<code>gateway.wayforth.io</code>)</li>
+    <li>Wayforth Dashboard (<code>wayforth.io</code>)</li>
+    <li>Wayforth MCP Server (<code>pypi.org/project/wayforth-mcp</code>)</li>
+  </ul>
+  <h2>Out of Scope</h2>
+  <ul>
+    <li>Third-party services accessed via the Wayforth catalog</li>
+    <li>Denial-of-service attacks</li>
+    <li>Social engineering</li>
+  </ul>
+  <h2>Disclosure Policy</h2>
+  <p>We follow coordinated disclosure. Please allow us reasonable time to patch before publishing details.
+  We do not currently offer a bug bounty program but will acknowledge contributors in our changelog.</p>
+  <h2>Contact</h2>
+  <p>Contact: <a href="mailto:security@wayforth.io">security@wayforth.io</a><br>
+  Policy: <a href="https://wayforth.io/security">https://wayforth.io/security</a></p>
+</body>
+</html>"""
+
+
+@app.get("/security-policy", include_in_schema=False)
+async def security_policy_html():
+    """Full security disclosure policy as HTML."""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_SECURITY_POLICY_HTML)
+
+
 @app.get("/health")
 @limiter.limit("60/minute")
 async def health(request: Request):
@@ -868,7 +930,7 @@ async def health(request: Request):
             "version": VERSION,
             "db_status": "unavailable",
             "catalog": {"total": 0, "tier2": 0},
-            "managed_services": len(SERVICE_CONFIGS),
+            "managed_services": _active_managed_count(),
         }
     try:
         async with pool.acquire(timeout=4.0) as conn:
@@ -889,7 +951,7 @@ async def health(request: Request):
             "total": total,
             "tier2": tier2,
         },
-        "managed_services": len(SERVICE_CONFIGS),
+        "managed_services": _active_managed_count(),
     }
 
 
@@ -915,11 +977,11 @@ async def system_status(db=Depends(get_db)):
             "total": stats["total_services"],
             "tier2": stats["tier2_services"],
             "tier3": stats["tier3_services"],
-            "managed": len(SERVICE_CONFIGS),
+            "managed": _active_managed_count(),
         },
-        "managed_services": len(SERVICE_CONFIGS),
+        "managed_services": _active_managed_count(),
         "searches_24h": searches,
-        "mcp_tools": 16,
+        "mcp_tools": _active_managed_count(),
         "pypi_version": VERSION,
         "api": "operational",
         "database": "operational",
@@ -936,7 +998,7 @@ async def system_status(db=Depends(get_db)):
             "testnet_active": True,
             "mainnet_active": False,
             "services_in_catalog": stats["total_services"],
-            "managed_services_x402": len(SERVICE_CONFIGS),
+            "managed_services_x402": _active_managed_count(),
         },
         "pricing": {
             "routing_fee": "1.5%",
@@ -988,6 +1050,17 @@ async def get_chain_info():
 # ── Changelog RSS feed ────────────────────────────────────────────────────────
 
 _CHANGELOG_ENTRIES = [
+    {
+        "version": "0.6.11",
+        "title": "Security Hardening",
+        "date": "Fri, 15 May 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.11",
+        "description": (
+            "Security hardening: x402 payment verification fail-closed, replay protection fixed, "
+            "48 new security regression tests, Dockerfile pinned, XSS escaping in static HTML, "
+            "non-root Docker user."
+        ),
+    },
     {
         "version": "0.6.10",
         "title": "Ecosystem",

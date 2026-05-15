@@ -1,0 +1,5 @@
+# Aikido SAST suppressions.
+# See SECURITY.md "Vendored Third-Party Code" for rationale.
+
+# Foundry forge-std — vendored upstream, build-time only, not reachable at runtime.
+contracts/base/lib/forge-std/

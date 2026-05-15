@@ -130,7 +130,7 @@ async def admin_stats(request: Request, key: str = ""):
             # --- catalog ---
             total_services = await conn.fetchval("SELECT COUNT(*) FROM services") or 0
             tier2_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM services WHERE coverage_tier >= 2"
+                "SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3"
             ) or 0
             x402_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM services WHERE x402_supported=true"
