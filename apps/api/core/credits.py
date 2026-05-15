@@ -369,6 +369,71 @@ async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
                     pass
 
 
+# Per-user cooldown for spend anomaly alerts — avoids repeated fires within 1 hour
+_spend_anomaly_cooldown: dict[str, float] = {}
+_ANOMALY_COOLDOWN_SEC = 3600
+
+
+async def _check_spend_anomaly(pool, user_id: str) -> None:
+    """Fire wayf.spend_anomaly webhook + email if 1-hour spend > 3× 7-day daily average.
+    Does not block the account. Silenced for 1 hour after each fire per user.
+    """
+    import time as _t
+    now = _t.time()
+    if now - _spend_anomaly_cooldown.get(user_id, 0) < _ANOMALY_COOLDOWN_SEC:
+        return
+    try:
+        async with pool.acquire() as conn:
+            spend_1h: float = await conn.fetchval("""
+                SELECT COALESCE(SUM(ABS(amount)), 0)
+                FROM credit_transactions
+                WHERE user_id = $1::uuid AND type = 'execution' AND amount < 0
+                  AND created_at > NOW() - INTERVAL '1 hour'
+            """, user_id) or 0
+            daily_avg_7d: float = await conn.fetchval("""
+                SELECT COALESCE(SUM(ABS(amount)), 0) / 7.0
+                FROM credit_transactions
+                WHERE user_id = $1::uuid AND type = 'execution' AND amount < 0
+                  AND created_at > NOW() - INTERVAL '7 days'
+            """, user_id) or 0.0
+            if daily_avg_7d < 6 or spend_1h <= 3 * daily_avg_7d:
+                return
+            _spend_anomaly_cooldown[user_id] = now
+            user_row = await conn.fetchrow(
+                "SELECT u.email FROM users u "
+                "JOIN api_keys k ON k.user_id = u.id "
+                "WHERE u.id = $1::uuid AND k.active = true LIMIT 1",
+                user_id,
+            )
+            user_email = user_row["email"] if user_row else None
+    except Exception as _e:
+        logger.warning("_check_spend_anomaly error: %s", _e)
+        return
+
+    ratio = round(spend_1h / daily_avg_7d, 2)
+    logger.warning("SPEND_ANOMALY user=%s spend_1h=%d daily_avg=%.1f ratio=%.2f", user_id, spend_1h, daily_avg_7d, ratio)
+    asyncio.create_task(_dispatch_webhooks(user_id, "wayf.spend_anomaly", {
+        "user_id": user_id,
+        "spend_1h_credits": int(spend_1h),
+        "daily_avg_7d_credits": round(daily_avg_7d, 1),
+        "ratio": ratio,
+        "threshold": 3.0,
+        "action": "alert_only",
+    }))
+    if user_email:
+        asyncio.create_task(asyncio.to_thread(
+            _send_spend_anomaly_email_sync, user_email, int(spend_1h), round(daily_avg_7d, 1)
+        ))
+
+
+def _send_spend_anomaly_email_sync(to_email: str, spend_1h: int, daily_avg: float) -> None:
+    try:
+        from notifications import send_spend_anomaly_email
+        send_spend_anomaly_email(to_email, spend_1h, daily_avg)
+    except Exception as _e:
+        logger.warning("send_spend_anomaly_email error: %s", _e)
+
+
 async def _webhook_retry_loop() -> None:
     """Background task: retry pending webhook deliveries with exponential backoff.
 
