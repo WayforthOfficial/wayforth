@@ -134,6 +134,7 @@ def missing_param_hint(missing: list[str]) -> str:
 _STRONG_INFERENCE_SIGNALS: frozenset[str] = frozenset([
     "inference", "fast inference", "llm", "groq", "together",
     "together ai", "generate text", "language model", "prompt",
+    "run inference", "llm inference", "run model", "run llm", "model inference",
 ])
 
 INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
@@ -146,12 +147,15 @@ INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
         "into english", "into spanish", "into french",
     ],
     "inference": [
-        "inference", "fast inference", "summarize", "summarise", "explain",
+        "inference", "fast inference", "run inference", "llm inference",
+        "run model", "run llm", "model inference",
+        "summarize", "summarise", "explain",
         "write", "generate text", "rewrite", "paraphrase", "chat",
         "llm", "gpt", "ask", "complete", "draft", "language model",
     ],
     "research": [
-        "research", "perplexity", "deep dive", "in-depth",
+        "research", "research this", "find research",
+        "perplexity", "deep dive", "in-depth",
         "fact check", "comprehensive answer", "explain in detail",
         "what does", "how does", "why does", "investigate",
         "background on", "overview of", "question and answer", "q&a",
@@ -259,6 +263,37 @@ _LANGUAGE_CODES: dict[str, str] = {
 }
 
 
+_CITY_ALIASES: dict[str, str] = {
+    "nyc":       "New York",
+    "new york city": "New York",
+    "la":        "Los Angeles",
+    "l.a.":      "Los Angeles",
+    "sf":        "San Francisco",
+    "san fran":  "San Francisco",
+    "dc":        "Washington DC",
+    "washington d.c.": "Washington DC",
+    "ldn":       "London",
+    "chi":       "Chicago",
+    "windy city": "Chicago",
+    "mia":       "Miami",
+    "las":       "Las Vegas",
+    "sin city":  "Las Vegas",
+    "phx":       "Phoenix",
+    "pdx":       "Portland",
+    "dfw":       "Dallas",
+    "atl":       "Atlanta",
+    "bos":       "Boston",
+    "sea":       "Seattle",
+    "den":       "Denver",
+    "msp":       "Minneapolis",
+}
+
+
+def _normalize_city(city: str) -> str:
+    """Replace common city abbreviations/aliases with full names."""
+    return _CITY_ALIASES.get(city.lower().strip(), city)
+
+
 def extract_params_from_intent(intent: str) -> dict:
     """Best-effort extraction of structured params from a plain-English intent string.
 
@@ -294,7 +329,7 @@ def extract_params_from_intent(intent: str) -> dict:
         re.IGNORECASE,
     )
     if m:
-        city = m.group(1).strip()
+        city = _normalize_city(m.group(1).strip())
         if city:
             return {"city": city}
 

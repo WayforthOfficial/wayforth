@@ -198,6 +198,22 @@ async def search_services(
     except Exception as _re:
         logger.error("search ranker error: %s", _re)
         raise HTTPException(status_code=503, detail={"error": "ranker_unavailable"})
+
+    # Category relevance adjustment — only when caller did not supply an explicit
+    # category filter (they've already narrowed the result set in that case).
+    if not category and ranked:
+        from services.param_mapper import detect_category_hint, INTENT_CATEGORY_MAP
+        _detected = detect_category_hint(q)
+        if _detected:
+            _compat = set(INTENT_CATEGORY_MAP.get(_detected, [_detected]))
+            for _s in ranked:
+                _svc_cat = _s.get("category") or ""
+                if _svc_cat in _compat:
+                    _s["score"] = (_s.get("score") or 0) + 15
+                else:
+                    _s["score"] = (_s.get("score") or 0) - 20
+            ranked.sort(key=lambda _s: (_s.get("score") or 0), reverse=True)
+
     top = ranked[:limit]
 
     fallback_used = False
