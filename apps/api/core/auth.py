@@ -84,10 +84,22 @@ async def check_auth(request: Request) -> dict:
     Authenticated (X-Wayforth-API-Key present):
       - Validates key, checks monthly quota, increments usage.
       - Returns authenticated=True with tier/key_id.
+      - The route handler is expected to additionally call
+        `core.tier_gates.check_rate_limit(key_id, tier)` for the
+        per-tier sliding-window per-minute / per-hour limits.
 
     Anonymous (no key):
-      - Enforces 3 searches/IP/day via in-memory dict.
+      - Enforces a strict 3 searches/IP/day cap here.
       - Returns authenticated=False with anonymous_count.
+      - Route handlers may additionally call
+        `core.tier_gates.check_anon_rate_limit(ip)` for a per-minute
+        cap (`_ANON_RPM`, currently 15). In practice the 3/day wall
+        fires long before 15/min on /search, so the per-minute limit
+        only matters as a defense-in-depth layer for code paths that
+        bypass the daily wall.
+      - `/query` (WayforthQL) is starter-tier-only via `require_tier`,
+        so anonymous callers get 403 before any rate-limit check on
+        that route — no anon rate limit is needed there.
     """
     from core.rate_limit import get_real_ip
     from core.credits import _downgrade_expired_usdc
