@@ -38,7 +38,7 @@ async def test_T162_auth_surface_split(c):
         )
 
     # Protected — no key must return 401
-    for path in ("/account/usage/history", "/account/wayf-points/history"):
+    for path in ("/account/usage/history",):
         r = await c.get(path)
         assert r.status_code == 401, (
             f"{path} must require auth, got {r.status_code}: {r.text[:200]}"

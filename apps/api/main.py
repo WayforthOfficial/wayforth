@@ -515,6 +515,13 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 DROP TABLE IF EXISTS wayf_points
             """)
+            # v0.6.10 migrations
+            await _mconn.execute("""
+                UPDATE services
+                SET category = 'search'
+                WHERE category = 'agents'
+                  AND (name ILIKE '%tavily%' OR name ILIKE '%brave%' OR name ILIKE '%exa%')
+            """)
     except Exception as e:
         import traceback
         print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
