@@ -1,5 +1,6 @@
 """routers/admin/__init__.py — assembles combined admin router."""
 
+import hashlib
 import logging
 import secrets
 
@@ -23,7 +24,20 @@ async def admin_stats(request: Request, key: str = ""):
     from main import app, ADMIN_KEY
     admin_key_header = request.headers.get("X-Admin-Key", "")
     provided_key = admin_key_header or key
-    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+    authed = ADMIN_KEY and provided_key and secrets.compare_digest(provided_key, ADMIN_KEY)
+    if not authed:
+        token = request.headers.get("X-Admin-Token", "")
+        if token:
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            async with app.state.pool.acquire() as _c:
+                row = await _c.fetchrow(
+                    "SELECT s.expires_at, u.is_active FROM admin_sessions s "
+                    "JOIN admin_users u ON u.id = s.admin_user_id "
+                    "WHERE s.token_hash = $1 AND s.expires_at > NOW()",
+                    token_hash,
+                )
+            authed = bool(row and row["is_active"])
+    if not authed:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         async with app.state.pool.acquire() as conn:

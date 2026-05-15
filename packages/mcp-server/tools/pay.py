@@ -30,7 +30,6 @@ async def wayforth_pay(
       - Non-custodial — Wayforth never holds your funds
 
     Routing fee: 1.5% on all tracks
-    30% of fee allocated to $WAYF burn
 
     Args:
         service_id: Service to pay (from wayforth_search results)
@@ -75,7 +74,6 @@ async def wayforth_pay(
     payment_track = data.get("payment_track", "unknown")
     service_name = data.get("service_name", service_id)
     routing_fee = data.get("routing_fee_usd", 0)
-    burn = data.get("wayf_burn_allocation_usd", 0)
 
     if payment_track == "card":
         credits_left = data.get("credits_remaining", 0)
@@ -84,7 +82,6 @@ async def wayforth_pay(
             f"Card payment processed — {service_name}\n\n"
             f"Amount: ${amount_usd}\n"
             f"Routing fee (1.5%): ${routing_fee}\n"
-            f"$WAYF burn allocation: ${burn}\n"
             f"Credits deducted: {data.get('credits_deducted', 0)}\n"
             f"Credits remaining: {credits_left}\n"
             f"Reference: {tx_ref}"
@@ -95,7 +92,6 @@ async def wayforth_pay(
             f"Crypto calldata ready — {service_name}\n\n"
             f"Amount: ${amount_usd} USDC\n"
             f"Routing fee (1.5%): ${routing_fee}\n"
-            f"$WAYF burn allocation: ${burn}\n"
             f"Network: Base Sepolia\n\n"
             f"Step 1 — Approve USDC:\n{data.get('approve_calldata', '')}\n\n"
             f"Step 2 — Route payment:\n{data.get('payment_calldata', '')}\n\n"

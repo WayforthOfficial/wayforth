@@ -363,6 +363,33 @@ async def search_suggestions(request: Request, db=Depends(get_db)):
     return {"suggestions": curated, "source": "curated"}
 
 
+_POPULAR_BLOCKLIST = (
+    "or 1=1", "1=1", "<script", "alert(", "javascript:",
+    "rate limit", " test", "admin", "' or ", "\" or ",
+    "drop table", "select *", "union select", "xss",
+    "inject", "curl ", "wget ", "eval(",
+)
+
+_POPULAR_CURATED = [
+    "fast inference for coding",
+    "translate text to Spanish",
+    "real-time stock data",
+    "web search for agents",
+    "generate images from text",
+    "speech to text transcription",
+    "embed documents for RAG",
+    "crypto market prices",
+]
+
+
+def _is_clean_query(q: str) -> bool:
+    """Return False if the query looks like a test string or injection attempt."""
+    lower = q.strip().lower()
+    if not lower or len(lower) < 4:
+        return False
+    return not any(blocked in lower for blocked in _POPULAR_BLOCKLIST)
+
+
 @router.get("/search/popular")
 @limiter.limit("30/minute")
 async def popular_searches(request: Request, limit: int = 8, db=Depends(get_db)):
@@ -371,27 +398,23 @@ async def popular_searches(request: Request, limit: int = 8, db=Depends(get_db))
         SELECT query, COUNT(*) as count
         FROM search_analytics
         WHERE created_at > NOW() - INTERVAL '7 days'
-        AND query IS NOT NULL
-        AND LENGTH(query) > 3
+          AND query IS NOT NULL
+          AND LENGTH(query) > 3
+          AND LENGTH(query) < 120
+          AND query NOT ILIKE '%test%'
+          AND query NOT ILIKE '%admin%'
+          AND query NOT ILIKE '%<script%'
+          AND query NOT ILIKE '%alert(%'
+          AND query NOT ILIKE '%or 1=1%'
+          AND query NOT ILIKE '%rate limit%'
         GROUP BY query
         ORDER BY count DESC
         LIMIT $1
-    """, limit)
-    if not rows or len(rows) < 4:
-        return {
-            "queries": [
-                "fast inference for coding",
-                "translate text to Spanish",
-                "real-time stock data",
-                "web search for agents",
-                "generate images from text",
-                "speech to text transcription",
-                "embed documents for RAG",
-                "crypto market prices",
-            ],
-            "source": "curated",
-        }
-    return {"queries": [r['query'] for r in rows], "source": "live", "period": "7d"}
+    """, limit * 3)  # over-fetch so Python filter has room to discard
+    clean = [r["query"] for r in rows if _is_clean_query(r["query"])][:limit]
+    if len(clean) < 4:
+        return {"queries": _POPULAR_CURATED, "source": "curated"}
+    return {"queries": clean, "source": "live", "period": "7d"}
 
 
 @router.get("/pricing/json")

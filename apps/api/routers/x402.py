@@ -141,20 +141,21 @@ async def x402_execute(request):
 
     payment_header = request.headers.get("X-PAYMENT", "")
 
+    _execute_resource = f"https://gateway.wayforth.io/x402/execute"
     if not payment_header:
         return JSONResponse(status_code=402, content={
-            "x402Version": "1",
+            "x402Version": 1,
+            "error": "Payment required",
             "accepts": [{
                 "scheme": "exact",
                 "network": "eip155:8453",
-                "maxAmountRequired": micro,
+                "maxAmountRequired": str(micro),
                 "asset": USDC_BASE_ADDRESS,
                 "payTo": wayforth_wallet,
+                "resource": _execute_resource,
+                "description": f"{display_name} via Wayforth — ${price_str} USDC",
                 "maxTimeoutSeconds": 300,
-                "description": f"{display_name} via Wayforth · ${price_str} USDC",
             }],
-            "service": service_slug,
-            "estimated_response_ms": 500,
         })
 
     # Verify payment with 5s timeout; accept optimistically on timeout
@@ -166,19 +167,19 @@ async def x402_execute(request):
         )
         if not verify_result.get("valid"):
             received = verify_result.get("received_micro", 0)
-            expected = verify_result.get("expected_micro", int(micro))
             received_usdc = f"${received / 1_000_000:.3f}"
             return JSONResponse(status_code=402, content={
-                "x402Version": "1",
+                "x402Version": 1,
                 "error": f"Payment of ${price_str} USDC required, received {received_usdc} USDC. Please retry.",
                 "accepts": [{
                     "scheme": "exact",
                     "network": "eip155:8453",
-                    "maxAmountRequired": micro,
+                    "maxAmountRequired": str(micro),
                     "asset": USDC_BASE_ADDRESS,
                     "payTo": wayforth_wallet,
+                    "resource": _execute_resource,
+                    "description": f"{display_name} via Wayforth — ${price_str} USDC",
                     "maxTimeoutSeconds": 300,
-                    "description": f"{display_name} via Wayforth · ${price_str} USDC",
                 }],
             })
         payer_address = verify_result.get("from_address")
@@ -277,35 +278,132 @@ async def x402_execute(request):
 _X402_SEARCH_PRICE  = "0.002"          # $0.002 USDC per query
 _X402_SEARCH_MICRO  = 2000             # micro-USDC (6 decimals)
 _USDC_BASE_MAINNET  = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+_SEARCH_RESOURCE_URL = "https://gateway.wayforth.io/x402/search"
 
 
-def _search_payment_terms(wayforth_wallet: str) -> dict:
+def _search_payment_required(wayforth_wallet: str, error: str = "Payment required") -> dict:
+    """Build a v2-compliant PaymentRequired payload for /x402/search."""
     return {
-        "x402Version": "1",
+        "x402Version": 2,
+        "error": error,
+        "resource": {
+            "url": _SEARCH_RESOURCE_URL,
+            "description": "Wayforth API Search — $0.002 USDC per query on Base",
+            "mimeType": "application/json",
+        },
         "accepts": [{
             "scheme": "exact",
             "network": "eip155:8453",
-            "maxAmountRequired": _X402_SEARCH_MICRO,
+            "amount": str(_X402_SEARCH_MICRO),
             "asset": _USDC_BASE_MAINNET,
             "payTo": wayforth_wallet,
             "maxTimeoutSeconds": 300,
-            "description": "Wayforth API Search · $0.002 USDC per query",
         }],
-        "service": "wayforth_search",
-        "estimated_response_ms": 200,
+        "extensions": {
+            "bazaar": {
+                "info": {
+                    "name": "Wayforth API Search",
+                    "description": (
+                        "Search 3,000+ APIs for AI agents. "
+                        "Ranked by verified payment signal — not ads."
+                    ),
+                    "category": "search",
+                    "version": "1.0.0",
+                    "output": {
+                        "description": (
+                            "Ranked list of APIs matching the search query, "
+                            "with WRI scores, pricing, and available payment rails."
+                        ),
+                        "mimeType": "application/json",
+                        "example": {
+                            "results": [{
+                                "name": "Groq",
+                                "wri": 82,
+                                "price_per_call": 0.00001,
+                                "payment_rails": ["card", "usdc", "x402"],
+                                "category": "inference",
+                            }],
+                        },
+                    },
+                },
+                "schema": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "properties": {
+                        "results": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name":          {"type": "string"},
+                                    "wri":           {"type": "number"},
+                                    "price_per_call":{"type": "number"},
+                                    "payment_rails": {"type": "array", "items": {"type": "string"}},
+                                    "category":      {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                },
+                "outputExample": {
+                    "results": [{
+                        "name": "Groq",
+                        "wri": 82,
+                        "price_per_call": 0.00001,
+                        "payment_rails": ["card", "usdc", "x402"],
+                        "category": "inference",
+                    }],
+                },
+            },
+        },
     }
+
+
+def _search_402_response(wayforth_wallet: str, error: str = "Payment required") -> JSONResponse:
+    """Return a v2-compliant 402 with PAYMENT-REQUIRED header (base64 encoded)."""
+    import base64 as _b64
+    import json as _json
+    payload = _search_payment_required(wayforth_wallet, error)
+    encoded = _b64.b64encode(_json.dumps(payload, separators=(",", ":")).encode()).decode()
+    resp = JSONResponse(status_code=402, content=payload)
+    resp.headers["PAYMENT-REQUIRED"] = encoded
+    return resp
+
+
+@router.get("/.well-known/x402")
+async def x402_well_known():
+    """x402 v2 discovery document — lists only x402-enabled endpoints."""
+    return JSONResponse(content={
+        "x402Version": 2,
+        "endpoints": [{
+            "path": "/x402/search",
+            "method": "GET",
+            "description": "Wayforth API Search — $0.002 USDC per query on Base",
+            "resource": {
+                "url": _SEARCH_RESOURCE_URL,
+                "mimeType": "application/json",
+            },
+            "accepts": [{
+                "scheme": "exact",
+                "network": "eip155:8453",
+                "amount": str(_X402_SEARCH_MICRO),
+                "asset": _USDC_BASE_MAINNET,
+                "maxTimeoutSeconds": 300,
+            }],
+        }],
+    })
 
 
 @router.get("/x402/search")
 @limiter.limit("120/minute")
 async def x402_search(
     request: Request,
-    q: str = Query(min_length=1, max_length=500, description="Natural language search query"),
+    q: str | None = Query(default=None, max_length=500, description="Natural language search query"),
 ):
-    """x402 pay-per-call search. No API key — $0.002 USDC per query on Base.
+    """x402 v2 pay-per-call search. No API key — $0.002 USDC per query on Base.
 
-    No X-PAYMENT header → 402 with payment terms.
-    Valid X-PAYMENT header → ranked service results.
+    No PAYMENT-SIGNATURE header (or no ?q=) → 402 with v2 PaymentRequired.
+    Valid payment header + ?q= → ranked service results.
     """
     import hashlib as _hs
     import html as _html
@@ -317,9 +415,11 @@ async def x402_search(
             "error": "x402 payments not configured on this instance",
         })
 
-    payment_header = request.headers.get("X-PAYMENT", "")
-    if not payment_header:
-        return JSONResponse(status_code=402, content=_search_payment_terms(wayforth_wallet))
+    # v2 uses PAYMENT-SIGNATURE; also accept X-PAYMENT for v1 client compat
+    payment_header = request.headers.get("PAYMENT-SIGNATURE", "") or request.headers.get("X-PAYMENT", "")
+    # Return 402 when no payment header OR no query (e.g. x402scan/Agentic.Market probe)
+    if not payment_header or not q:
+        return _search_402_response(wayforth_wallet)
 
     # Verify payment (5 s timeout; accept optimistically on timeout)
     payer_address = None
@@ -329,9 +429,10 @@ async def x402_search(
             timeout=5.0,
         )
         if not verify.get("valid"):
-            terms = _search_payment_terms(wayforth_wallet)
-            terms["error"] = f"Payment of ${_X402_SEARCH_PRICE} USDC required. Please retry."
-            return JSONResponse(status_code=402, content=terms)
+            return _search_402_response(
+                wayforth_wallet,
+                f"Payment of ${_X402_SEARCH_PRICE} USDC required. Please retry.",
+            )
         payer_address = verify.get("from_address")
     except asyncio.TimeoutError:
         logger.warning("x402/search payment verification timeout — accepting optimistically")

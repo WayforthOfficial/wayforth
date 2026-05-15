@@ -6,6 +6,7 @@ import json as _json
 import logging
 import math
 import os
+import re
 import secrets
 import time as _time_mod
 from datetime import datetime, timezone
@@ -77,44 +78,66 @@ def _run_cache_set(key: tuple, value: dict) -> None:
     _RUN_CACHE[key] = (_time_mod.monotonic() + _RUN_CACHE_TTL, value)
 
 
-async def _award_execution_points(pool, user_id: str, api_key_id: str, tier: str) -> None:
-    """Fire-and-forget: award WAYF points for a successful execution."""
-    from wayf_points import (
-        EXECUTIONS_PER_POINT, DAILY_BONUS_POINTS, award_points, check_milestones
-    )
-    try:
-        async with pool.acquire() as conn:
-            calls_count = await conn.fetchval(
-                "SELECT calls_count FROM api_keys WHERE id = $1::uuid", api_key_id
-            ) or 0
+# ── Refund helpers ────────────────────────────────────────────────────────────
 
-            if calls_count > 0 and calls_count % EXECUTIONS_PER_POINT == 0:
-                await award_points(
-                    conn, user_id, api_key_id, tier, 1,
-                    f"Every {EXECUTIONS_PER_POINT} executions",
-                    "execution",
-                    {"total_calls": calls_count},
-                )
+def _classify_error(error_msg: str) -> str:
+    """Classify a service error as 'service_failure' (refund) or 'client_error' (no refund).
 
-            had_daily = await conn.fetchval(
-                """SELECT 1 FROM wayf_points_log
-                   WHERE user_id = $1::uuid
-                   AND source = 'daily_bonus'
-                   AND created_at >= date_trunc('day', NOW())
-                   LIMIT 1""",
-                user_id,
-            )
-            if not had_daily:
-                await award_points(
-                    conn, user_id, api_key_id, tier,
-                    DAILY_BONUS_POINTS,
-                    "First execution of the day",
-                    "daily_bonus",
-                )
+    Timeouts and 5xx responses are service failures — refund the caller.
+    4xx responses are client/agent errors — caller sent bad params, no refund.
+    """
+    msg_lower = error_msg.lower()
+    if "timeout" in msg_lower or "timed out" in msg_lower:
+        return "service_failure"
+    m = re.search(r'\b([45]\d{2})\b', error_msg)
+    if m:
+        code = int(m.group(1))
+        return "client_error" if 400 <= code < 500 else "service_failure"
+    return "service_failure"  # unknown exception → treat as service failure
 
-            await check_milestones(conn, user_id, api_key_id, tier, calls_count)
-    except Exception as _e:
-        logger.warning("_award_execution_points error: %s", _e)
+
+async def _do_refund(
+    db,
+    user_id,
+    credit_cost: int,
+    service_slug: str,
+    error_msg: str,
+    endpoint: str,
+    balance_after: int,
+) -> int:
+    """Restore credits, log the refund transaction, and fire wayf.call_refunded webhook.
+
+    Returns the new credits balance.
+    """
+    async with db.transaction():
+        row = await db.fetchrow(
+            "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
+            "WHERE user_id = $2::uuid RETURNING credits_balance",
+            credit_cost, user_id,
+        )
+        new_balance = row["credits_balance"] if row else balance_after + credit_cost
+        await db.execute(
+            """
+            INSERT INTO credit_transactions
+            (user_id, amount, balance_after, type, description, api_endpoint, service_id)
+            VALUES ($1::uuid, $2, $3, 'refund', $4, $5, $6)
+            """,
+            user_id, credit_cost, new_balance,
+            f"service_failure: {service_slug} — {error_msg[:100]}",
+            endpoint, service_slug,
+        )
+    from core.credits import _dispatch_webhooks
+    from main import app as _app
+    asyncio.create_task(_dispatch_webhooks(
+        str(user_id), "wayf.call_refunded", {
+            "service_slug": service_slug,
+            "credits_restored": credit_cost,
+            "reason": "service_failure",
+            "error": error_msg[:200],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    ))
+    return new_balance
 
 
 _STREAMING_SLUGS = {"groq", "together"}
@@ -503,14 +526,7 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
     routing_fee_pct = ROUTING_FEE
     routing_fee_usd = round(amount_usd * routing_fee_pct, 8)
     service_receives_usd = round(amount_usd - routing_fee_usd, 8)
-    # Fee split: TGE is day zero, no retroactive accrual
-    IS_TGE_LIVE = os.environ.get("IS_TGE_LIVE", "false").lower() == "true"
-    if IS_TGE_LIVE:
-        staking_pool_allocation = round(routing_fee_usd * 0.10, 8)
-        wayf_burn_allocation    = round(routing_fee_usd * 0.10, 8)
-        wayforth_revenue        = round(routing_fee_usd * 0.80, 8)
-    else:
-        wayforth_revenue = routing_fee_usd
+    wayforth_revenue = routing_fee_usd
 
     service_name = service["name"] if service else service_id
     x402_supported = service["x402_supported"] if service else False
@@ -855,6 +871,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
         import httpx as _httpx
         start = _time.time()
         call_headers = {"Authorization": f"Bearer {byok_key}", **extra_headers}
+        upstream_status: int | None = None
         error_msg = None
         raw_result = None
         try:
@@ -863,6 +880,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
                     resp = await _client.request(req_method, req_endpoint, headers=call_headers, params=params)
                 else:
                     resp = await _client.request(req_method, req_endpoint, headers=call_headers, json=params)
+            upstream_status = resp.status_code
             raw_result = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
             if resp.status_code >= 400:
                 error_msg = f"Upstream {resp.status_code}: {str(raw_result)[:200]}"
@@ -874,26 +892,21 @@ async def execute_service(request: Request, db=Depends(get_db)):
         execution_ms = round((_time.time() - start) * 1000)
 
         if error_msg:
-            async with db.transaction():
-                refund_row = await db.fetchrow(
-                    "UPDATE user_credits SET credits_balance = credits_balance + 1, updated_at = NOW() "
-                    "WHERE user_id = $1::uuid RETURNING credits_balance",
-                    user_id,
-                )
-                refunded_balance = refund_row["credits_balance"] if refund_row else balance_after
-                await db.execute("""
-                    INSERT INTO credit_transactions
-                    (user_id, amount, balance_after, type, description, api_endpoint, service_id)
-                    VALUES ($1::uuid, $2, $3, 'execution_refund', $4, '/execute', $5)
-                """, user_id, 1, refunded_balance,
-                    f"Refund: {service_slug} BYOK failed - {error_msg[:100]}", service_slug)
-            raise HTTPException(status_code=503, detail={
-                "status": "error",
-                "service": service_slug,
-                "error": error_msg,
-                "credits_deducted": 0,
-                "credits_remaining": refunded_balance,
-            })
+            is_service_failure = upstream_status is None or upstream_status >= 500
+            if is_service_failure:
+                new_bal = await _do_refund(db, user_id, 1, service_slug, error_msg, "/execute", balance_after)
+                raise HTTPException(status_code=503, detail={
+                    "error": "Service unavailable",
+                    "refunded": True,
+                    "credits_restored": 1,
+                    "calls_remaining": new_bal,
+                })
+            else:
+                raise HTTPException(status_code=400, detail={
+                    "error": error_msg,
+                    "refunded": False,
+                    "credits_restored": 0,
+                })
 
         from main import app
         asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), service_slug))
@@ -1000,26 +1013,20 @@ async def execute_service(request: Request, db=Depends(get_db)):
     execution_ms = round((_time.time() - start) * 1000)
 
     if error_msg:
-        async with db.transaction():
-            refund_row = await db.fetchrow(
-                "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
-                "WHERE user_id = $2::uuid RETURNING credits_balance",
-                credit_cost, user_id,
-            )
-            refunded_balance = refund_row["credits_balance"] if refund_row else balance_after
-            await db.execute("""
-                INSERT INTO credit_transactions
-                (user_id, amount, balance_after, type, description, api_endpoint, service_id)
-                VALUES ($1::uuid, $2, $3, 'execution_refund', $4, '/execute', $5)
-            """, user_id, credit_cost, refunded_balance,
-                f"Refund: {service_slug} failed - {error_msg[:100]}", service_slug)
-        raise HTTPException(status_code=503, detail={
-            "status": "error",
-            "service": service_slug,
-            "error": error_msg,
-            "credits_deducted": 0,
-            "credits_remaining": refunded_balance,
-        })
+        if _classify_error(error_msg) == "service_failure":
+            new_bal = await _do_refund(db, user_id, credit_cost, service_slug, error_msg, "/execute", balance_after)
+            raise HTTPException(status_code=503, detail={
+                "error": "Service unavailable",
+                "refunded": True,
+                "credits_restored": credit_cost,
+                "calls_remaining": new_bal,
+            })
+        else:
+            raise HTTPException(status_code=400, detail={
+                "error": error_msg,
+                "refunded": False,
+                "credits_restored": 0,
+            })
 
     from core.credits import _dispatch_webhooks
     from main import app
@@ -1037,12 +1044,6 @@ async def execute_service(request: Request, db=Depends(get_db)):
     )
     if _api_key_id:
         await _increment_calls(app.state.pool, str(_api_key_id))
-
-    # Award WAYF points asynchronously (fire-and-forget)
-    if _api_key_id and user_id:
-        asyncio.create_task(_award_execution_points(
-            app.state.pool, str(user_id), str(_api_key_id), _tier
-        ))
 
     return {
         "status": "ok",
@@ -1101,22 +1102,16 @@ async def _execute_one(call: dict, pool, user_id: str, api_key_id: str) -> dict:
     execution_ms = round((_time_mod.time() - t0) * 1000)
 
     if error_msg:
-        async with pool.acquire() as refund_db:
-            async with refund_db.transaction():
-                refund_row = await refund_db.fetchrow(
-                    "UPDATE user_credits SET credits_balance = credits_balance + $1, "
-                    "updated_at = NOW() WHERE user_id = $2::uuid RETURNING credits_balance",
-                    credit_cost, user_id,
-                )
-                refunded_bal = refund_row["credits_balance"] if refund_row else balance_after
-                await refund_db.execute("""
-                    INSERT INTO credit_transactions
-                    (user_id, amount, balance_after, type, description, api_endpoint, service_id)
-                    VALUES ($1::uuid, $2, $3, 'execution_refund', $4, '/execute/batch', $5)
-                """, user_id, credit_cost, refunded_bal,
-                    f"Refund: {slug} failed — {error_msg[:100]}", slug)
-        return {"slug": slug, "status": "error", "error": error_msg,
-                "result": None, "execution_ms": execution_ms}
+        if _classify_error(error_msg) == "service_failure":
+            async with pool.acquire() as refund_db:
+                new_bal = await _do_refund(refund_db, user_id, credit_cost, slug, error_msg, "/execute/batch", balance_after)
+            return {"slug": slug, "status": "error", "error": error_msg,
+                    "refunded": True, "credits_restored": credit_cost,
+                    "result": None, "execution_ms": execution_ms}
+        else:
+            return {"slug": slug, "status": "error", "error": error_msg,
+                    "refunded": False, "credits_restored": 0,
+                    "result": None, "execution_ms": execution_ms}
 
     return {"slug": slug, "status": "ok", "result": result, "execution_ms": execution_ms}
 
@@ -1470,12 +1465,6 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
         if _inc:
             _calls_remaining = _inc
 
-    # Award WAYF points asynchronously for /run
-    if _api_key_id and user_id:
-        asyncio.create_task(_award_execution_points(
-            app.state.pool, str(user_id), str(_api_key_id), _tier
-        ))
-
     # ── Streaming path (inference LLM intents only) ───────────────────────────
     if stream:
         if selected_slug not in _STREAMING_SLUGS:
@@ -1555,31 +1544,28 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
     execution_ms = round((_time.time() - exec_start) * 1000)
 
     if error_msg:
-        async with db.transaction():
-            _refund = await db.fetchrow(
-                "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
-                "WHERE user_id = $2::uuid RETURNING credits_balance",
-                credit_cost, user_id,
-            )
-            refunded_balance = _refund["credits_balance"] if _refund else balance_after
-            await db.execute("""
-                INSERT INTO credit_transactions
-                (user_id, amount, balance_after, type, description, api_endpoint, service_id)
-                VALUES ($1::uuid, $2, $3, 'execution_refund', $4, '/run', $5)
-            """, user_id, credit_cost, refunded_balance,
-                f"Refund: {selected_slug} failed — {error_msg[:100]}", selected_slug)
-        fallback_slug = SERVICE_ALTERNATIVES.get(selected_slug)
-        detail: dict = {
-            "error": "service_unavailable",
-            "service": selected_slug,
-            "message": f"{SERVICE_DISPLAY_NAMES.get(selected_slug, selected_slug)} is temporarily unavailable.",
-        }
-        if fallback_slug:
-            detail["fallback"] = {
-                "slug": fallback_slug,
-                "message": f"Try {SERVICE_DISPLAY_NAMES.get(fallback_slug, fallback_slug)} as an alternative.",
+        if _classify_error(error_msg) == "service_failure":
+            new_bal = await _do_refund(db, user_id, credit_cost, selected_slug, error_msg, "/run", balance_after)
+            fallback_slug = SERVICE_ALTERNATIVES.get(selected_slug)
+            detail: dict = {
+                "error": "Service unavailable",
+                "refunded": True,
+                "credits_restored": credit_cost,
+                "calls_remaining": new_bal,
+                "service": selected_slug,
             }
-        raise HTTPException(status_code=503, detail=detail)
+            if fallback_slug:
+                detail["fallback"] = {
+                    "slug": fallback_slug,
+                    "message": f"Try {SERVICE_DISPLAY_NAMES.get(fallback_slug, fallback_slug)} as an alternative.",
+                }
+            raise HTTPException(status_code=503, detail=detail)
+        else:
+            raise HTTPException(status_code=400, detail={
+                "error": error_msg,
+                "refunded": False,
+                "credits_restored": 0,
+            })
 
     asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), selected_slug))
     asyncio.create_task(
