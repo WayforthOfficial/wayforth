@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from core.auth import _resolve_user, _validate_agent_id, get_fernet
 from core.credits import (
     CREDITS_PER_CALL,
+    _check_spend_anomaly,
     _increment_calls,
     _maybe_dispatch_credits_low,
     check_and_deduct_credits,
@@ -141,6 +142,39 @@ async def _do_refund(
 
 
 _STREAMING_SLUGS = {"groq", "together"}
+
+
+async def _try_execute_managed(
+    slug: str, params: dict, key: str
+) -> tuple[object, str | None, int]:
+    """Execute a managed adapter. Returns (result, error_msg, execution_ms).
+    Non-assemblyai services retry once on timeout.
+    """
+    adapter = ADAPTERS[slug]
+    result = None
+    error_msg = None
+    t0 = _time_mod.time()
+    if slug == "assemblyai":
+        try:
+            result = await asyncio.wait_for(adapter(params, key), timeout=35.0)
+        except asyncio.TimeoutError:
+            error_msg = "Service timeout"
+        except Exception as _e:
+            error_msg = str(_e)[:300]
+    else:
+        for _attempt in range(2):
+            try:
+                result = await asyncio.wait_for(adapter(params, key), timeout=10.0)
+                break
+            except asyncio.TimeoutError:
+                if _attempt == 0:
+                    continue
+                error_msg = "Service timeout"
+            except Exception as _e:
+                error_msg = str(_e)[:300]
+                break
+    return result, error_msg, round((_time_mod.time() - t0) * 1000)
+
 
 # Per-key concurrent SSE stream cap. SSE connections hold a worker open for the
 # full upstream response duration; an unbounded number per key would let one
@@ -1012,21 +1046,48 @@ async def execute_service(request: Request, db=Depends(get_db)):
 
     execution_ms = round((_time.time() - start) * 1000)
 
-    if error_msg:
-        if _classify_error(error_msg) == "service_failure":
-            new_bal = await _do_refund(db, user_id, credit_cost, service_slug, error_msg, "/execute", balance_after)
+    _execute_fallback_from: str | None = None
+    if error_msg and _classify_error(error_msg) == "service_failure":
+        new_bal = await _do_refund(db, user_id, credit_cost, service_slug, error_msg, "/execute", balance_after)
+        # Try one automatic fallback for managed-key calls
+        _fb_slug = SERVICE_ALTERNATIVES.get(service_slug)
+        if key_source == "managed" and _fb_slug and _fb_slug in SERVICE_CONFIGS:
+            _fb_cfg = SERVICE_CONFIGS[_fb_slug]
+            _fb_api_key = os.environ.get(_fb_cfg["key_var"], "")
+            if _fb_api_key:
+                _fb_mapped, _fb_miss = map_params(_fb_slug, params)
+                if not _fb_miss:
+                    _fb_cost = _fb_cfg["credits"]
+                    _fb_ok, _fb_bal = await check_and_deduct_credits(
+                        db, str(user_id), _fb_cost, "/execute",
+                        service_id=_fb_slug, tx_type="execution",
+                        agent_id=agent_id, api_key_id=str(_api_key_id),
+                    )
+                    if _fb_ok:
+                        result, _fb_err, execution_ms = await _try_execute_managed(_fb_slug, _fb_mapped, _fb_api_key)
+                        if _fb_err and _classify_error(_fb_err) == "service_failure":
+                            await _do_refund(db, user_id, _fb_cost, _fb_slug, _fb_err, "/execute", _fb_bal)
+                            result = None
+                        elif _fb_err:
+                            raise HTTPException(status_code=400, detail={"error": _fb_err, "refunded": False, "credits_restored": 0})
+                        else:
+                            _execute_fallback_from = service_slug
+                            service_slug = _fb_slug
+                            credit_cost = _fb_cost
+                            balance_after = _fb_bal
+        if result is None:
             raise HTTPException(status_code=503, detail={
                 "error": "Service unavailable",
                 "refunded": True,
                 "credits_restored": credit_cost,
                 "calls_remaining": new_bal,
             })
-        else:
-            raise HTTPException(status_code=400, detail={
-                "error": error_msg,
-                "refunded": False,
-                "credits_restored": 0,
-            })
+    elif error_msg:
+        raise HTTPException(status_code=400, detail={
+            "error": error_msg,
+            "refunded": False,
+            "credits_restored": 0,
+        })
 
     from core.credits import _dispatch_webhooks
     from main import app
@@ -1042,10 +1103,11 @@ async def execute_service(request: Request, db=Depends(get_db)):
     asyncio.create_task(
         _maybe_dispatch_credits_low(app.state.pool, str(user_id), api_key_header, balance_after)
     )
+    asyncio.create_task(_check_spend_anomaly(app.state.pool, str(user_id)))
     if _api_key_id:
         await _increment_calls(app.state.pool, str(_api_key_id))
 
-    return {
+    resp = {
         "status": "ok",
         "service": service_slug,
         "result": result,
@@ -1054,6 +1116,10 @@ async def execute_service(request: Request, db=Depends(get_db)):
         "managed_services_available": len(SERVICE_CONFIGS),
         "priority": _tier in ("pro", "growth"),
     }
+    if _execute_fallback_from:
+        resp["fallback_from"] = _execute_fallback_from
+        resp["fallback_reason"] = "service_unavailable"
+    return resp
 
 
 # ── /execute/batch — parallel multi-service execution ────────────────────────
@@ -1444,6 +1510,28 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
 
     svc_key = os.environ.get(config["key_var"], "")
 
+    # Build up-to-2 fallback candidates for automatic retry on 5xx (non-streaming only)
+    _run_fallback_candidates: list[tuple[str, dict, dict, int, str]] = []
+    if not stream:
+        for _fc_svc in ranked:
+            if len(_run_fallback_candidates) >= 2:
+                break
+            _fc_cat = _fc_svc.get("slug") or ""
+            _fc_ms = CATALOG_TO_MANAGED.get(_fc_cat)
+            if not _fc_ms or _fc_ms == selected_slug or _fc_ms not in SERVICE_CONFIGS:
+                continue
+            _fc_key = os.environ.get(SERVICE_CONFIGS[_fc_ms]["key_var"], "")
+            if not _fc_key:
+                continue
+            if _compatible_cats and _fc_svc.get("category") not in _compatible_cats:
+                continue
+            _fc_mapped, _fc_miss = map_params(_fc_ms, input_dict)
+            if _fc_miss:
+                continue
+            _fc_cfg = SERVICE_CONFIGS[_fc_ms]
+            _fc_cost = 100 if (_fc_ms == "stability" and _fc_mapped.get("quality") == "ultra") else _fc_cfg["credits"]
+            _run_fallback_candidates.append((_fc_ms, _fc_svc, _fc_mapped, _fc_cost, _fc_key))
+
     success, balance_after = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/run",
         service_id=selected_slug, tx_type="execution",
@@ -1516,64 +1604,56 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
             "X-Accel-Buffering": "no",
         })
 
-    adapter = ADAPTERS[selected_slug]
-    result = None
-    error_msg = None
-    exec_start = _time.time()
+    # ── Non-streaming execution with automatic fallback (max 2 retries) ─────────
+    _fallback_from: str | None = None
+    result, error_msg, execution_ms = await _try_execute_managed(selected_slug, mapped_params, svc_key)
 
-    if selected_slug == "assemblyai":
-        try:
-            result = await asyncio.wait_for(adapter(mapped_params, svc_key), timeout=35.0)
-        except asyncio.TimeoutError:
-            error_msg = "Service timeout"
-        except Exception as _e:
-            error_msg = str(_e)[:300]
-    else:
-        for _attempt in range(2):
-            try:
-                result = await asyncio.wait_for(adapter(mapped_params, svc_key), timeout=10.0)
-                break
-            except asyncio.TimeoutError:
-                if _attempt == 0:
-                    continue
-                error_msg = "Service timeout"
-            except Exception as _e:
-                error_msg = str(_e)[:300]
-                break
-
-    execution_ms = round((_time.time() - exec_start) * 1000)
-
-    if error_msg:
-        if _classify_error(error_msg) == "service_failure":
-            new_bal = await _do_refund(db, user_id, credit_cost, selected_slug, error_msg, "/run", balance_after)
-            fallback_slug = SERVICE_ALTERNATIVES.get(selected_slug)
-            detail: dict = {
+    if error_msg and _classify_error(error_msg) == "service_failure":
+        _fallback_from = selected_slug
+        _all_failed_bal = await _do_refund(db, user_id, credit_cost, selected_slug, error_msg, "/run", balance_after)
+        for _fc_slug, _fc_svc, _fc_params, _fc_cost, _fc_key in _run_fallback_candidates:
+            _fc_ok, _fc_bal = await check_and_deduct_credits(
+                db, str(user_id), _fc_cost, "/run",
+                service_id=_fc_slug, tx_type="execution",
+                agent_id=agent_id, api_key_id=str(_api_key_id),
+            )
+            if not _fc_ok:
+                continue
+            result, error_msg, execution_ms = await _try_execute_managed(_fc_slug, _fc_params, _fc_key)
+            if error_msg and _classify_error(error_msg) == "service_failure":
+                _all_failed_bal = await _do_refund(db, user_id, _fc_cost, _fc_slug, error_msg, "/run", _fc_bal)
+                continue
+            if error_msg:
+                raise HTTPException(status_code=400, detail={"error": error_msg, "refunded": False, "credits_restored": 0})
+            # Fallback succeeded — adopt its service context
+            selected_slug = _fc_slug
+            selected_svc = _fc_svc
+            mapped_params = _fc_params
+            credit_cost = _fc_cost
+            balance_after = _fc_bal
+            break
+        else:
+            raise HTTPException(status_code=503, detail={
                 "error": "Service unavailable",
                 "refunded": True,
                 "credits_restored": credit_cost,
-                "calls_remaining": new_bal,
-                "service": selected_slug,
-            }
-            if fallback_slug:
-                detail["fallback"] = {
-                    "slug": fallback_slug,
-                    "message": f"Try {SERVICE_DISPLAY_NAMES.get(fallback_slug, fallback_slug)} as an alternative.",
-                }
-            raise HTTPException(status_code=503, detail=detail)
-        else:
-            raise HTTPException(status_code=400, detail={
-                "error": error_msg,
-                "refunded": False,
-                "credits_restored": 0,
+                "calls_remaining": _all_failed_bal,
+                "service": _fallback_from,
             })
+    elif error_msg:
+        raise HTTPException(status_code=400, detail={
+            "error": error_msg,
+            "refunded": False,
+            "credits_restored": 0,
+        })
 
     asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), selected_slug))
     asyncio.create_task(
         _maybe_dispatch_credits_low(app.state.pool, str(user_id), api_key_header, balance_after)
     )
+    asyncio.create_task(_check_spend_anomaly(app.state.pool, str(user_id)))
 
     wri = selected_svc.get("wri_score")
-    # Apply service health WRI adjustment
     try:
         _health = await db.fetchrow(
             "SELECT avg_response_ms, error_rate FROM service_health WHERE slug = $1",
@@ -1609,5 +1689,8 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
         "execution_ms": execution_ms,
         "priority": _tier in ("pro", "growth"),
     }
+    if _fallback_from:
+        _run_result["fallback_from"] = _fallback_from
+        _run_result["fallback_reason"] = "service_unavailable"
     _run_cache_set(_cache_key, _run_result)
     return _run_result

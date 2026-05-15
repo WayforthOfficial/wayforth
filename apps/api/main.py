@@ -522,6 +522,11 @@ async def lifespan(app: FastAPI):
                 WHERE category = 'agents'
                   AND (name ILIKE '%tavily%' OR name ILIKE '%brave%' OR name ILIKE '%exa%')
             """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS credit_transactions_spend_anomaly_idx
+                ON credit_transactions(user_id, created_at)
+                WHERE type = 'execution' AND amount < 0
+            """)
     except Exception as e:
         import traceback
         print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
@@ -830,9 +835,26 @@ Disallow: /provider/
 Allow: /
 """
 
+_SECURITY_TXT = """\
+Contact: mailto:security@wayforth.io
+Policy: https://wayforth.io/security
+Preferred-Languages: en
+"""
+
 @app.get("/robots.txt", include_in_schema=False)
 async def robots_txt():
     return PlainTextResponse(_ROBOTS_TXT)
+
+
+@app.get("/.well-known/security.txt", include_in_schema=False)
+async def well_known_security_txt():
+    return PlainTextResponse(_SECURITY_TXT, media_type="text/plain; charset=utf-8")
+
+
+@app.get("/security", tags=["System"])
+async def security_policy():
+    """Security disclosure policy — contact and reporting URL."""
+    return PlainTextResponse(_SECURITY_TXT, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/health")

@@ -31,11 +31,15 @@ SERVICE_CONFIGS = {
     "resend":      {"key_var": "RESEND_API_KEY",        "credits": 3,   "real_cost_per_call": 0.001},
 }
 
-# Suggested alternatives when a service env key is missing
+# Fallback alternatives — used when a service fails with 5xx (bidirectional pairs)
 SERVICE_ALTERNATIVES = {
-    "together":   "groq",
-    "perplexity": "tavily",
-    "brave":      "serper",
+    "groq":        "together",
+    "together":    "groq",
+    "perplexity":  "tavily",
+    "tavily":      "serper",
+    "brave":       "serper",
+    "serper":      "brave",
+    "newsapi":     "serper",
 }
 
 SERVICE_DISPLAY_NAMES = {

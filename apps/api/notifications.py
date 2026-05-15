@@ -306,3 +306,38 @@ def send_account_downgraded_email(to_email: str, plan_name: str) -> bool:
     except Exception as e:
         logger.warning("send_account_downgraded_email failed: %s", e)
         return False
+
+
+def send_spend_anomaly_email(to_email: str, spend_1h_credits: int, daily_avg_credits: float) -> bool:
+    if not resend.api_key or not to_email:
+        return False
+    ratio = round(spend_1h_credits / daily_avg_credits, 1) if daily_avg_credits else 0
+    try:
+        resend.Emails.send({
+            "from": FROM_EMAIL,
+            "to": to_email,
+            "subject": "Wayforth: unusual spending activity detected on your account",
+            "html": f"""
+            <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0F172A;color:#E2E8F0;padding:40px;border-radius:12px;">
+                <h1 style="color:#4F46E5;margin:0 0 8px">Wayforth</h1>
+                <h2 style="color:#F59E0B;margin:0 0 16px">Unusual spending alert</h2>
+                <p>We detected unusually high API usage on your account in the past hour.</p>
+                <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0;border-left:4px solid #F59E0B;">
+                    <p style="color:#94A3B8;font-size:12px;margin:0 0 4px;text-transform:uppercase;letter-spacing:.05em">Past hour</p>
+                    <p style="font-size:22px;font-weight:bold;margin:0 0 16px">{spend_1h_credits:,} credits used</p>
+                    <p style="color:#94A3B8;font-size:12px;margin:0 0 4px;text-transform:uppercase;letter-spacing:.05em">7-day daily average</p>
+                    <p style="font-size:16px;margin:0">{daily_avg_credits:.1f} credits/day &nbsp;<span style="color:#F59E0B">({ratio}× over baseline)</span></p>
+                </div>
+                <p>Your account is <strong>not blocked</strong>. This is an informational alert only.</p>
+                <p>If this usage was expected, no action is needed. If it looks suspicious, consider rotating your API key from your dashboard.</p>
+                <p style="margin-top:24px">
+                    <a href="https://wayforth.io/dashboard" style="background:#4F46E5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Review usage →</a>
+                </p>
+                <p style="margin-top:32px;color:#64748B;font-size:13px">Wayforth · <a href="https://wayforth.io" style="color:#4F46E5">wayforth.io</a></p>
+            </div>
+            """,
+        })
+        return True
+    except Exception as e:
+        logger.warning("send_spend_anomaly_email failed: %s", e)
+        return False
