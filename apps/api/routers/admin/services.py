@@ -1,5 +1,6 @@
 """routers/admin/services.py — /admin/health, /admin/services, /admin/catalog/*, /admin/api-health, /admin/signals, /admin/revenue, /admin/subscriptions/debug."""
 
+import hashlib
 import logging
 import os
 import secrets
@@ -12,6 +13,26 @@ from fastapi.responses import JSONResponse
 from core.db import get_db
 from core.rate_limit import limiter
 from services.managed import SERVICE_CONFIGS
+
+
+async def _admin_ok(request: Request, db, key: str = "") -> bool:
+    """Accept either static ADMIN_KEY or a valid X-Admin-Token session."""
+    from main import ADMIN_KEY
+    provided = request.headers.get("X-Admin-Key", "") or key
+    if ADMIN_KEY and provided and secrets.compare_digest(provided, ADMIN_KEY):
+        return True
+    token = request.headers.get("X-Admin-Token", "")
+    if token:
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        row = await db.fetchrow(
+            "SELECT s.expires_at, u.is_active FROM admin_sessions s "
+            "JOIN admin_users u ON u.id = s.admin_user_id "
+            "WHERE s.token_hash = $1 AND s.expires_at > NOW()",
+            token_hash,
+        )
+        if row and row["is_active"]:
+            return True
+    return False
 
 logger = logging.getLogger("wayforth")
 
@@ -42,8 +63,7 @@ _CATALOG_SUGGESTED: dict = {
 @router.get("/admin/health")
 @limiter.limit("5/minute")
 async def admin_health(request: Request, key: str = "", db=Depends(get_db)):
-    from main import ADMIN_KEY
-    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
+    if not await _admin_ok(request, db, key):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     checks = {}
@@ -78,8 +98,7 @@ async def admin_health(request: Request, key: str = "", db=Depends(get_db)):
 @router.get("/admin/services")
 @limiter.limit("10/minute")
 async def admin_services(request: Request, key: str = "", db=Depends(get_db)):
-    from main import ADMIN_KEY
-    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
+    if not await _admin_ok(request, db, key):
         raise HTTPException(status_code=401, detail="Unauthorized")
     rows = await db.fetch("""
         SELECT

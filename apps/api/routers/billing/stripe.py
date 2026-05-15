@@ -31,11 +31,11 @@ STRIPE_MOCK = (
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 PACKAGES = {
-    "builder":    {"credits": 6_000,   "price_usd": 12,  "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Builder"},
-    "starter":    {"credits": 21_000,  "price_usd": 29,  "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Starter"},
-    "pro":        {"credits": 72_000,  "price_usd": 99,  "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Pro"},
-    "growth":     {"credits": 240_000, "price_usd": 299, "wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Growth"},
-    "enterprise": {"credits": -1,      "price_usd": None,"wayf_bonus_pct": 0.05, "fee_bps": 150, "label": "Enterprise"},
+    "builder":    {"credits": 6_000,   "price_usd": 12,  "fee_bps": 150, "label": "Builder"},
+    "starter":    {"credits": 21_000,  "price_usd": 29,  "fee_bps": 150, "label": "Starter"},
+    "pro":        {"credits": 72_000,  "price_usd": 99,  "fee_bps": 150, "label": "Pro"},
+    "growth":     {"credits": 240_000, "price_usd": 299, "fee_bps": 150, "label": "Growth"},
+    "enterprise": {"credits": -1,      "price_usd": None,"fee_bps": 150, "label": "Enterprise"},
 }
 
 STRIPE_PACKAGES = {
@@ -501,23 +501,6 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
                 SET stripe_subscription_id = $1, subscription_status = 'active'
                 WHERE user_id = $2::uuid
             """, sub_id, user_id)
-
-        # Award subscription points
-        from wayf_points import award_points, SUBSCRIPTION_POINTS
-        tier_for_points = package.split("_")[0] if package else "free"
-        pts = SUBSCRIPTION_POINTS.get(tier_for_points, 0)
-        if pts > 0:
-            api_key_id_row = await db.fetchval(
-                "SELECT id FROM api_keys WHERE user_id = $1::uuid ORDER BY created_at DESC LIMIT 1",
-                user_id,
-            )
-            await award_points(
-                db, user_id, str(api_key_id_row) if api_key_id_row else user_id,
-                tier_for_points, pts,
-                f"{tier_for_points.title()} plan — monthly payment",
-                "subscription",
-                {"package": package, "credits": credits},
-            )
 
         return {"status": "credited", "credits_added": credits, "new_balance": new_balance}
 
