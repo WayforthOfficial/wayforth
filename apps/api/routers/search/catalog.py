@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
+from core.auth import _resolve_user
 from core.db import get_db
 from core.rate_limit import limiter
 from services.managed import SERVICE_CONFIGS, SERVICE_DISPLAY_NAMES
@@ -282,8 +283,12 @@ async def service_slug_health(request: Request, slug: str, db=Depends(get_db)):
 
 @router.get("/health-report")
 @limiter.limit("10/minute")
-async def health_report(request: Request):
+async def health_report(request: Request, db=Depends(get_db)):
     from main import app
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+    await _resolve_user(db, api_key)
 
     try:
         async with app.state.pool.acquire() as conn:
@@ -317,6 +322,7 @@ async def health_report(request: Request):
 @router.get("/leaderboard/x402")
 @limiter.limit("20/minute")
 async def leaderboard_x402(request: Request, limit: int = 20, db=Depends(get_db)):
+    limit = min(limit, 50)  # cap to prevent full-catalog extraction
     rows = await db.fetch("""
         SELECT
             s.name,
@@ -361,6 +367,11 @@ async def leaderboard_x402(request: Request, limit: int = 20, db=Depends(get_db)
 
         price = svc.get('pricing_usdc')
         svc['price_display'] = f"${price:.7f}/req".rstrip('0').rstrip('.') + '/req' if price and price > 0 else "Free"
+
+        # Strip operational fields not needed by public callers
+        svc.pop('consecutive_failures', None)
+        svc.pop('last_tested_at', None)
+        svc.pop('endpoint_url', None)
 
         results.append(svc)
 

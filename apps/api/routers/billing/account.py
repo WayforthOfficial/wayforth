@@ -193,9 +193,10 @@ async def dashboard(request: Request, db=Depends(get_db)):
     recent = await db.fetch("""
         SELECT query, created_at, top_result_id
         FROM search_analytics
-        WHERE created_at > NOW() - INTERVAL '7 days'
+        WHERE user_id = $1
+          AND created_at > NOW() - INTERVAL '7 days'
         ORDER BY created_at DESC LIMIT 10
-    """)
+    """, key['user_id'])
 
     _fee = round(ROUTING_FEE * 100, 4)
     LIMITS = {

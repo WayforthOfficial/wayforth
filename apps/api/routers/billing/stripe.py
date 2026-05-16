@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from core.auth import _resolve_user
 from core.credits import _dispatch_webhooks
 from core.db import get_db
 from core.rate_limit import limiter, get_real_ip
@@ -92,10 +93,14 @@ async def _probe_new_service(service_id: str, endpoint_url: str):
 
 @router.post("/submit")
 @limiter.limit("5/minute")
-async def submit_service(request: Request, req: SubmitRequest):
+async def submit_service(request: Request, req: SubmitRequest, db=Depends(get_db)):
     from main import app
     import asyncpg
     from notifications import send_submission_confirmation
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+    await _resolve_user(db, api_key)
     if not req.endpoint_url.startswith("https://"):
         raise HTTPException(status_code=400, detail="endpoint_url must start with https://")
     if req.category not in ("inference", "data", "translation"):
