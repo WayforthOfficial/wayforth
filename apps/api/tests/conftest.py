@@ -41,7 +41,7 @@ def _global_requires_api_key(request):
 def pytest_sessionfinish(session, exitstatus):
     print("\n")
     print("═" * 62)
-    print("  WAYFORTH v0.6.11  END-TO-END TEST SUITE  SUMMARY")
+    print("  WAYFORTH v0.6.12  END-TO-END TEST SUITE  SUMMARY")
     print("═" * 62)
 
     passed = session.testscollected - session.testsfailed - getattr(session, "testsskipped", 0)

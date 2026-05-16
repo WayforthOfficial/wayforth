@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,6 +19,22 @@ from core.tier_gates import require_tier
 logger = logging.getLogger("wayforth")
 
 router = APIRouter()
+
+# ── Registration guards ───────────────────────────────────────────────────────
+
+_UUID4_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+)
+
+_RESERVED_PREFIXES = {
+    'admin', 'founder', 'founders', 'billing', 'legal', 'info', 'contact',
+    'hello', 'noreply', 'no-reply', 'no_reply', 'team', 'dev', 'support',
+    'security', 'abuse', 'postmaster', 'hostmaster', 'webmaster', 'root',
+    'system',
+}
+
+_BLOCKED_DOMAINS = {'wayforth.io'}
+
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -221,6 +238,20 @@ async def register_user(request: Request, db=Depends(get_db)):
 
     if not email or not supabase_id:
         raise HTTPException(status_code=400, detail="email and supabase_id required")
+
+    # Guard a: block @wayforth.io (and any other reserved domains)
+    domain = email.split('@')[-1].lower() if '@' in email else ''
+    if domain in _BLOCKED_DOMAINS:
+        raise HTTPException(status_code=403, detail="invalid_email_domain")
+
+    # Guard b: supabase_id must be a valid UUID v4
+    if not _UUID4_RE.match(supabase_id.lower()):
+        raise HTTPException(status_code=400, detail="invalid_supabase_id")
+
+    # Guard c: block reserved local-part prefixes
+    local = email.split('@')[0].lower()
+    if local in _RESERVED_PREFIXES:
+        raise HTTPException(status_code=403, detail="reserved_email")
 
     existing = await db.fetchrow("SELECT id FROM users WHERE email = $1", email)
     if existing:

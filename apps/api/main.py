@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.6.11"
+VERSION = "0.6.12"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -1050,6 +1050,23 @@ async def get_chain_info():
 # ── Changelog RSS feed ────────────────────────────────────────────────────────
 
 _CHANGELOG_ENTRIES = [
+    {
+        "version": "0.6.12",
+        "title": "Security Patch",
+        "date": "Thu, 15 May 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.12",
+        "description": (
+            "/auth/register: blocked @wayforth.io registrations, fake UUID rejection, reserved prefix blocklist. "
+            "/dashboard: search history scoped to authenticated user only. "
+            "/memory: namespace keyed on user_id, not client-controlled agent_id. "
+            "/search/popular: returns category counts only, never raw query strings. "
+            "/submit: authentication required. "
+            "/leaderboard/x402: capped at 50 results, sensitive fields stripped. "
+            "/health-report: authentication required. "
+            "/search: endpoint_url stripped from unauthenticated responses. "
+            "188 tests passing, 0 failures."
+        ),
+    },
     {
         "version": "0.6.11",
         "title": "Security Hardening",
