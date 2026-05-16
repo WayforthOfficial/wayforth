@@ -342,6 +342,9 @@ async def search_services(
         response["usage_this_month"] = auth["usage_this_month"]
         response["monthly_quota"] = auth["monthly_quota"]
     else:
+        # Strip endpoint_url from unauthenticated responses — service_id (hashed) is sufficient
+        for result in response.get("results", []):
+            result.pop("endpoint_url", None)
         remaining = _ANON_DAILY_LIMIT - auth["anonymous_count"]
         response["anonymous_searches_remaining"] = remaining
         if remaining > 0:
@@ -409,28 +412,25 @@ def _is_clean_query(q: str) -> bool:
 @router.get("/search/popular")
 @limiter.limit("30/minute")
 async def popular_searches(request: Request, limit: int = 8, db=Depends(get_db)):
-    """Real queries from the last 7 days. Powers homepage suggestion chips."""
+    """Aggregated category counts from the last 7 days. Never exposes raw query strings."""
     rows = await db.fetch("""
-        SELECT query, COUNT(*) as count
-        FROM search_analytics
-        WHERE created_at > NOW() - INTERVAL '7 days'
-          AND query IS NOT NULL
-          AND LENGTH(query) > 3
-          AND LENGTH(query) < 120
-          AND query NOT ILIKE '%test%'
-          AND query NOT ILIKE '%admin%'
-          AND query NOT ILIKE '%<script%'
-          AND query NOT ILIKE '%alert(%'
-          AND query NOT ILIKE '%or 1=1%'
-          AND query NOT ILIKE '%rate limit%'
-        GROUP BY query
+        SELECT s.category, COUNT(*) AS count
+        FROM search_analytics sa
+        JOIN services s ON s.id = sa.top_result_id
+        WHERE sa.created_at > NOW() - INTERVAL '7 days'
+          AND sa.top_result_id IS NOT NULL
+          AND s.category IS NOT NULL
+        GROUP BY s.category
         ORDER BY count DESC
         LIMIT $1
-    """, limit * 3)  # over-fetch so Python filter has room to discard
-    clean = [r["query"] for r in rows if _is_clean_query(r["query"])][:limit]
-    if len(clean) < 4:
-        return {"queries": _POPULAR_CURATED, "source": "curated"}
-    return {"queries": clean, "source": "live", "period": "7d"}
+    """, limit)
+    if not rows:
+        return {"categories": [], "source": "live", "period": "7d"}
+    return {
+        "categories": [{"category": r["category"], "count": int(r["count"])} for r in rows],
+        "source": "live",
+        "period": "7d",
+    }
 
 
 @router.get("/pricing/json")

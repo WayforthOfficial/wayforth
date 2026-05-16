@@ -316,7 +316,8 @@ async def save_memory(request: Request, body: MemoryItem, db=Depends(get_db)):
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    await _resolve_user(db, api_key)
+    user_id, _, _ = await _resolve_user(db, api_key)
+    # Memory is keyed on the authenticated user_id — client-supplied agent_id is ignored
     await db.execute(
         """
         INSERT INTO agent_memory (agent_id, service_id, service_name, note, created_at, updated_at)
@@ -324,19 +325,21 @@ async def save_memory(request: Request, body: MemoryItem, db=Depends(get_db)):
         ON CONFLICT (agent_id, service_id)
         DO UPDATE SET note=$4, updated_at=NOW()
         """,
-        body.agent_id or "anonymous", body.service_id, body.service_name, body.note,
+        str(user_id), body.service_id, body.service_name, body.note,
     )
     return {"status": "saved", "service_id": body.service_id, "service_name": body.service_name}
 
 
 @router.get("/memory")
 @limiter.limit("30/minute")
-async def get_memory(request: Request, agent_id: str = "anonymous", q: str = "", db=Depends(get_db)):
+async def get_memory(request: Request, q: str = "", db=Depends(get_db)):
     """Retrieve agent's saved services. Requires X-Wayforth-API-Key."""
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    await _resolve_user(db, api_key)
+    user_id, _, _ = await _resolve_user(db, api_key)
+    # Memory namespace is always the authenticated user_id — client cannot override it
+    namespace = str(user_id)
     if q:
         rows = await db.fetch(
             """
@@ -346,7 +349,7 @@ async def get_memory(request: Request, agent_id: str = "anonymous", q: str = "",
             AND (LOWER(service_name) LIKE $2 OR LOWER(note) LIKE $2)
             ORDER BY created_at DESC LIMIT 20
             """,
-            agent_id, f"%{q.lower()}%",
+            namespace, f"%{q.lower()}%",
         )
     else:
         rows = await db.fetch(
@@ -355,9 +358,9 @@ async def get_memory(request: Request, agent_id: str = "anonymous", q: str = "",
             FROM agent_memory WHERE agent_id = $1
             ORDER BY created_at DESC LIMIT 20
             """,
-            agent_id,
+            namespace,
         )
-    return {"agent_id": agent_id, "services": [dict(r) for r in rows], "total": len(rows)}
+    return {"services": [dict(r) for r in rows], "total": len(rows)}
 
 
 @router.post("/tier3/apply")

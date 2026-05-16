@@ -76,6 +76,24 @@
 
     <div class="version-card">
       <div class="version-header">
+        <span class="version-num">v0.6.12</span>
+        <span class="version-date">May 15, 2026</span>
+      </div>
+      <ul class="change-list">
+        <li>/auth/register: blocked @wayforth.io registrations, fake UUID rejection, reserved prefix blocklist</li>
+        <li>/dashboard: search history scoped to authenticated user only</li>
+        <li>/memory: namespace keyed on user_id, not client-controlled agent_id</li>
+        <li>/search/popular: returns category counts only, never raw query strings</li>
+        <li>/submit: authentication required</li>
+        <li>/leaderboard/x402: capped at 50 results, sensitive fields stripped</li>
+        <li>/health-report: authentication required</li>
+        <li>/search: endpoint_url stripped from unauthenticated responses</li>
+        <li>188 tests passing, 0 failures</li>
+      </ul>
+    </div>
+
+    <div class="version-card">
+      <div class="version-header">
         <span class="version-num">v0.1.5</span>
         <span class="version-date">April 25, 2026</span>
       </div>
