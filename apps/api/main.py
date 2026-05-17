@@ -80,71 +80,6 @@ async def _cleanup_anon_searches_loop(app: "FastAPI"):
             logger.info(f"Cleaned {len(stale)} stale anon search entries")
 
 
-async def _cleanup_pentest_accounts_loop():
-    """Delete pentest/test accounts every 24 h.
-
-    Targets accounts that match known pentest patterns AND have never been
-    active (api_keys.last_used_at IS NULL) AND were created more than 1 h
-    ago (avoids racing legitimate registrations in the instant after sign-up).
-    """
-    _PENTEST_KEEP = [
-        'dorassulin1@gmail.com', 'assulindor@gmail.com',
-        'support@wayforth.io', 'demo_free@wayforth.io',
-        'demo_starter@wayforth.io', 'demo_growth@wayforth.io',
-        'demo_pro@wayforth.io', 'demo_provider@wayforth.io',
-    ]
-    _CHILD_TABLES = [
-        'agent_memory', 'agent_identities', 'x402_agent_identities',
-        'x402_payment_receipts', 'usdc_payments', 'package_purchases',
-        'wri_alerts', 'service_favorites', 'referrals', 'org_members',
-        'user_service_keys', 'search_analytics', 'credit_transactions',
-        'api_keys', 'user_credits',
-    ]
-    while True:
-        await asyncio.sleep(86_400)  # 24 h
-        pool = getattr(app.state, "pool", None)
-        if not pool:
-            continue
-        try:
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """
-                    SELECT u.id FROM users u
-                    LEFT JOIN api_keys k ON k.user_id = u.id
-                    WHERE (
-                        u.email LIKE 'ratelimit-test-%'
-                        OR u.email LIKE 'audit-%@audit-research.io'
-                        OR u.email IN (
-                            'victim@example.com','some-other-email@example.com',
-                            'founders@wayforth.io','legal@wayforth.io',
-                            'info@wayforth.io','dev@wayforth.io',
-                            'team@wayforth.io','test@test.com'
-                        )
-                    )
-                    AND u.email != ALL($1::text[])
-                    AND u.created_at < NOW() - INTERVAL '1 hour'
-                    AND (k.last_used_at IS NULL OR k.id IS NULL)
-                    """,
-                    _PENTEST_KEEP,
-                )
-                if not rows:
-                    continue
-                ids = [r["id"] for r in rows]
-                async with conn.transaction():
-                    for tbl in _CHILD_TABLES:
-                        exists = await conn.fetchval(
-                            "SELECT 1 FROM information_schema.columns"
-                            " WHERE table_name=$1 AND column_name='user_id'", tbl
-                        )
-                        if exists:
-                            await conn.execute(
-                                f"DELETE FROM {tbl} WHERE user_id = ANY($1)", ids  # noqa: S608
-                            )
-                    await conn.execute("DELETE FROM users WHERE id = ANY($1)", ids)
-                logger.info(f"Pentest cleanup: deleted {len(ids)} stale test accounts")
-        except Exception as exc:
-            logger.warning(f"Pentest cleanup error: {exc}")
-
 
 # Probe payloads for each probeable managed service (skip resend, stability, assemblyai, elevenlabs)
 _PROBE_PARAMS: dict[str, dict] = {
@@ -599,50 +534,6 @@ async def lifespan(app: FastAPI):
                 WHERE slug = 'wayforth_labs_summarizer'
                    OR (endpoint_url ILIKE '%labs-production%' AND name ILIKE '%summarizer%')
             """)
-            # v0.6.12 — one-time deletion of pentest artifact accounts
-            # Uses IF EXISTS per table so missing tables are silently skipped
-            # and a single table error cannot abort the entire startup sequence.
-            await _mconn.execute("""
-                DO $$
-                DECLARE _ids UUID[];
-                BEGIN
-                    SELECT ARRAY_AGG(u.id) INTO _ids
-                    FROM users u
-                    WHERE (
-                        u.email LIKE 'ratelimit-test-%'
-                        OR u.email LIKE 'audit-%@audit-research.io'
-                        OR u.email IN (
-                            'victim@example.com','some-other-email@example.com',
-                            'founders@wayforth.io','legal@wayforth.io',
-                            'info@wayforth.io','dev@wayforth.io',
-                            'team@wayforth.io','test@test.com'
-                        )
-                    )
-                    AND u.email NOT IN (
-                        'dorassulin1@gmail.com','assulindor@gmail.com',
-                        'support@wayforth.io','demo_free@wayforth.io',
-                        'demo_starter@wayforth.io','demo_growth@wayforth.io',
-                        'demo_pro@wayforth.io','demo_provider@wayforth.io'
-                    );
-                    IF _ids IS NULL THEN RETURN; END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='agent_memory')          THEN DELETE FROM agent_memory          WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='agent_identities')      THEN DELETE FROM agent_identities      WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='x402_agent_identities') THEN DELETE FROM x402_agent_identities WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='x402_payment_receipts') THEN DELETE FROM x402_payment_receipts WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='usdc_payments')         THEN DELETE FROM usdc_payments         WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='package_purchases')     THEN DELETE FROM package_purchases     WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='wri_alerts')            THEN DELETE FROM wri_alerts            WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='service_favorites')     THEN DELETE FROM service_favorites     WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='referrals')             THEN DELETE FROM referrals             WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='org_members')           THEN DELETE FROM org_members           WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='user_service_keys')     THEN DELETE FROM user_service_keys     WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='search_analytics')      THEN DELETE FROM search_analytics      WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='credit_transactions')   THEN DELETE FROM credit_transactions   WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='api_keys')              THEN DELETE FROM api_keys              WHERE user_id = ANY(_ids); END IF;
-                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='user_credits')          THEN DELETE FROM user_credits          WHERE user_id = ANY(_ids); END IF;
-                    DELETE FROM users WHERE id = ANY(_ids);
-                END $$;
-            """)
     except Exception as e:
         import traceback
         print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
@@ -653,7 +544,6 @@ async def lifespan(app: FastAPI):
     else:
         print("STARTUP: pool created and migrations complete", flush=True)
     cleanup_task = asyncio.create_task(_cleanup_anon_searches_loop(app))
-    pentest_cleanup_task = asyncio.create_task(_cleanup_pentest_accounts_loop())
     watcher_task = asyncio.create_task(_usdc_payment_watcher())
     renewal_task = asyncio.create_task(_usdc_renewal_reminder())
     reset_task = asyncio.create_task(_monthly_topup_reset())
@@ -662,7 +552,6 @@ async def lifespan(app: FastAPI):
     _get_redis()  # eagerly init so the rate-limiter log line appears at startup
     yield
     cleanup_task.cancel()
-    pentest_cleanup_task.cancel()
     watcher_task.cancel()
     renewal_task.cancel()
     reset_task.cancel()
