@@ -420,19 +420,28 @@ async def test_T230b_anon_query_blocked_by_tier_gate(c):
 
 
 @pytest.mark.asyncio
-async def test_T231_auth_register_rate_limited(c):
-    """POST /auth/register has @limiter.limit('5/minute') — confirm 429 after 6 attempts."""
-    saw_429 = False
-    for i in range(8):
+async def test_T231_auth_register_blocks_pentest_domains(c):
+    """Registration with pentest domains must never create DB records.
+
+    Two independent guards prevent persistence:
+    1. supabase_id format validation (UUID4 regex) → 400 on any server version
+    2. Domain blocklist (@example.invalid) → 403 once deployed
+
+    Using a non-UUID supabase_id guarantees rejection before any INSERT,
+    so the test never writes to production regardless of deployment state.
+    403 is accepted if the domain block is also active.
+    """
+    statuses = set()
+    for i in range(3):
         r = await c.post("/auth/register", json={
-            "email": f"ratelimit-test-{i}-{int(time.time())}@example.invalid",
-            "supabase_id": f"test-{i}-{int(time.time())}",
+            "email": f"ratelimit-test-{i}@example.invalid",
+            "supabase_id": f"not-a-uuid-{i}",  # fails UUID4 guard → 400, no INSERT
         })
-        if r.status_code == 429:
-            saw_429 = True
-            break
-    # The endpoint may also 400/409 first (validation errors). Accept either.
-    assert saw_429 or True
+        statuses.add(r.status_code)
+    # 409 = already exists from a previous run — no new account created, acceptable
+    assert statuses <= {400, 403, 409, 429}, (
+        f"Pentest-domain registration must be rejected (not 200/201/2xx), got: {statuses}"
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
