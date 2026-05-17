@@ -226,7 +226,7 @@ async def sitemap_xml(request: Request):
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
         "  <url><loc>https://wayforth.io/</loc></url>\n"
         "  <url><loc>https://wayforth.io/pricing</loc></url>\n"
-        "  <url><loc>https://wayforth.io/docs</loc></url>\n"
+        "  <url><loc>https://gateway.wayforth.io/guide/</loc></url>\n"
         "  <url><loc>https://wayforth.io/changelog</loc></url>\n"
         "  <url><loc>https://wayforth.io/token</loc></url>\n"
         "  <url><loc>https://wayforth.io/Wayforth_Whitepaper_v6.4.pdf</loc></url>\n"
