@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from core.auth import _resolve_user
-from core.credits import _dispatch_webhooks
+from core.credits import _dispatch_webhooks, _maybe_grant_founding_bonus
 from core.db import get_db
 from core.rate_limit import limiter, get_real_ip
 
@@ -507,6 +507,7 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
                 WHERE user_id = $2::uuid
             """, sub_id, user_id)
 
+        asyncio.create_task(_maybe_grant_founding_bonus(db, user_id))
         return {"status": "credited", "credits_added": credits, "new_balance": new_balance}
 
     elif event["type"] == "invoice.payment_succeeded":
@@ -598,6 +599,7 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
                     "WHERE stripe_subscription_id = $1",
                     sub_id,
                 )
+        asyncio.create_task(_maybe_grant_founding_bonus(db, user_id))
         return {"status": "renewed", "credits_added": credits}
 
     elif event["type"] == "customer.subscription.deleted":
