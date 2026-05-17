@@ -621,7 +621,7 @@ app.add_middleware(
 async def docs_redirect(request: Request, call_next):
     if request.headers.get("host", "").startswith("docs.wayforth.io"):
         from fastapi.responses import RedirectResponse
-        return RedirectResponse("https://gateway.wayforth.io/docs/")
+        return RedirectResponse("https://gateway.wayforth.io/guide/")
     return await call_next(request)
 
 
@@ -846,7 +846,7 @@ except Exception:
     pass  # static dir may not exist in all environments
 
 try:
-    app.mount("/docs", StaticFiles(directory="packages/docs", html=True), name="docs")
+    app.mount("/guide", StaticFiles(directory="packages/docs", html=True), name="guide")
 except Exception:
     pass  # packages/docs may not exist in all environments
 
