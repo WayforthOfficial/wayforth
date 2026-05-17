@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>REST API — Wayforth Docs</title>
+  <meta name="description" content="Full REST API reference for gateway.wayforth.io — endpoints, authentication, rate limits, and error codes.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a href="index.html" class="logo">
+      <div class="logo-mark">W</div>
+      <span class="logo-text">Wayforth</span>
+      <span class="logo-docs">docs</span>
+    </a>
+    <div class="header-links">
+      <a href="https://wayforth.io" class="header-link" target="_blank" rel="noopener">wayforth.io ↗</a>
+      <a href="https://gateway.wayforth.io" class="header-link" target="_blank" rel="noopener">gateway ↗</a>
+      <button class="menu-btn" id="menuBtn">☰ Menu</button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="search-wrap">
+      <span class="search-icon">⌕</span>
+      <input type="text" id="search" placeholder="Search docs…" autocomplete="off" spellcheck="false">
+      <div class="search-results" id="searchResults"></div>
+    </div>
+    <nav>
+      <div class="nav-group">
+        <span class="nav-label">Documentation</span>
+        <a href="index.html" class="nav-link"><em class="icon">⚡</em>Getting Started</a>
+        <a href="search.html" class="nav-link"><em class="icon">🔍</em>Search &amp; Discovery</a>
+        <a href="execute.html" class="nav-link"><em class="icon">▶</em>Execution</a>
+        <a href="payment-rails.html" class="nav-link"><em class="icon">💳</em>Payment Rails</a>
+        <a href="sdk.html" class="nav-link"><em class="icon">{}</em>SDK Reference</a>
+        <a href="api.html" class="nav-link active"><em class="icon">~</em>REST API</a>
+      </div>
+      <div class="nav-group">
+        <span class="nav-label">On this page</span>
+        <a href="#base-url" class="toc-link">Base URL</a>
+        <a href="#authentication" class="toc-link">Authentication</a>
+        <a href="#endpoints" class="toc-link">Endpoints</a>
+        <a href="#search-endpoint" class="toc-link">POST /v1/search</a>
+        <a href="#query-endpoint" class="toc-link">POST /v1/query</a>
+        <a href="#execute-endpoint" class="toc-link">POST /v1/execute/{slug}</a>
+        <a href="#run-endpoint" class="toc-link">POST /v1/run</a>
+        <a href="#balance-endpoint" class="toc-link">GET /v1/balance</a>
+        <a href="#services-endpoint" class="toc-link">GET /v1/services</a>
+        <a href="#billing-endpoints" class="toc-link">Billing endpoints</a>
+        <a href="#rate-limits" class="toc-link">Rate limits</a>
+        <a href="#errors" class="toc-link">Error codes</a>
+      </div>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="content-inner">
+      <div class="page-badge">REST API</div>
+      <h1 class="page-title">REST API Reference</h1>
+      <p class="page-lead">Direct HTTP access to the Wayforth gateway. All endpoints accept JSON and return JSON. The SDK is a thin wrapper around these endpoints.</p>
+
+      <!-- Base URL -->
+      <section id="base-url">
+        <h2>Base URL</h2>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">http</span><button class="copy-btn">Copy</button></div>
+          <pre><code>https://gateway.wayforth.io</code></pre>
+        </div>
+        <p>All paths are versioned under <code>/v1/</code>. The gateway runs on <a href="https://railway.app" target="_blank">Railway</a> with auto-scaling and a global CDN edge layer.</p>
+      </section>
+
+      <!-- Authentication -->
+      <section id="authentication">
+        <h2>Authentication</h2>
+        <p>Pass your API key in the <code>x-wayforth-api-key</code> header on every request:</p>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl https://gateway.wayforth.io/v1/balance \
+  -H "x-wayforth-api-key: wf_live_your_key_here"</code></pre>
+        </div>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Key prefix</th><th>Scope</th><th>Charges credits</th></tr></thead>
+            <tbody>
+              <tr><td><code>wf_live_</code></td><td>Production — all endpoints</td><td>Yes</td></tr>
+              <tr><td><code>wf_test_</code></td><td>Testing — responses are mocked</td><td>No</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout cn">
+          <p><strong>Rate limiting:</strong> 10 consecutive failed authentication attempts from the same IP within 60 seconds will result in a <code>429 too_many_auth_failures</code> response. Use test keys during development to avoid this.</p>
+        </div>
+      </section>
+
+      <!-- Endpoint overview -->
+      <section id="endpoints">
+        <h2>Endpoint overview</h2>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Method</th><th>Path</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><span class="badge b-post">POST</span></td>
+                <td><code>/v1/search</code></td>
+                <td>Natural language service search</td>
+              </tr>
+              <tr>
+                <td><span class="badge b-post">POST</span></td>
+                <td><code>/v1/query</code></td>
+                <td>WayforthQL structured search</td>
+              </tr>
+              <tr>
+                <td><span class="badge b-post">POST</span></td>
+                <td><code>/v1/execute/{slug}</code></td>
+                <td>Execute a managed service</td>
+              </tr>
+              <tr>
+                <td><span class="badge b-post">POST</span></td>
+                <td><code>/v1/run</code></td>
+                <td>Search + execute in one call</td>
+              </tr>
+              <tr>
+                <td><span class="badge b-get">GET</span></td>
+                <td><code>/v1/balance</code></td>
+                <td>Account credits and usage</td>
+              </tr>
+              <tr>
+                <td><span class="badge b-get">GET</span></td>
+                <td><code>/v1/services</code></td>
+                <td>Browse service catalog</td>
+              </tr>
+              <tr>
+                <td><span class="badge b-get">GET</span></td>
+                <td><code>/billing/balance</code></td>
+                <td>Detailed billing balance</td>
+              </tr>
+              <tr>
+                <td><span class="badge b-post">POST</span></td>
+                <td><code>/billing/upgrade</code></td>
+                <td>Upgrade subscription tier</td>
+              </tr>
+              <tr>
+                <td><span class="badge b-post">POST</span></td>
+                <td><code>/billing/topup</code></td>
+                <td>Purchase top-up credits</td>
+              </tr>
+              <tr>
+                <td><span class="badge b-get">GET</span></td>
+                <td><code>/billing/packages</code></td>
+                <td>Available plans and top-up packages</td>
+              </tr>
+              <tr>
+                <td><span class="badge b-get">GET</span></td>
+                <td><code>/health</code></td>
+                <td>Gateway health check (no auth)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- POST /v1/search -->
+      <section id="search-endpoint">
+        <h2><span class="badge b-post" style="margin-right:0.5rem">POST</span> /v1/search</h2>
+        <p>Natural language search ranked by semantic relevance × WRI score.</p>
+
+        <h3>Request body</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  "query": "translate text to Spanish",
+  "tier": 2,
+  "max_price_usd": 0.01,
+  "max_latency_ms": 2000,
+  "region": "us-east",
+  "payment_rail": "card",
+  "limit": 10
+}</code></pre>
+        </div>
+
+        <h3>Response</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">[
+  {
+    "slug": "deepl",
+    "name": "DeepL Translation",
+    "description": "Neural machine translation in 31 languages",
+    "wri_score": 94,
+    "tier": 2,
+    "category": "translation",
+    "payment_rails": ["card", "usdc", "x402"],
+    "price_per_call": 0.003,
+    "region": "eu-west"
+  }
+]</code></pre>
+        </div>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl -X POST https://gateway.wayforth.io/v1/search \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "translate to Spanish", "tier": 2}'</code></pre>
+        </div>
+      </section>
+
+      <!-- POST /v1/query -->
+      <section id="query-endpoint">
+        <h2><span class="badge b-post" style="margin-right:0.5rem">POST</span> /v1/query</h2>
+        <p>WayforthQL structured query. See <a href="search.html#wayforthql">WayforthQL v1.1</a> for syntax.</p>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl -X POST https://gateway.wayforth.io/v1/query \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"ql": "category:vision AND tier:>=3 SORT BY wri_score DESC LIMIT 5"}'</code></pre>
+        </div>
+
+        <h3>Request body</h3>
+        <div class="params">
+          <div class="param-row">
+            <span class="pname">ql</span>
+            <span class="ptype">string</span>
+            <span class="pdesc">WayforthQL query string. <span class="pill pill-req">required</span></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- POST /v1/execute/{slug} -->
+      <section id="execute-endpoint">
+        <h2><span class="badge b-post" style="margin-right:0.5rem">POST</span> /v1/execute/{slug}</h2>
+        <p>Execute a managed service. The request body is passed directly to the upstream service as its native parameters.</p>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl -X POST https://gateway.wayforth.io/v1/execute/deepl \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello, world!", "target_lang": "ES"}'</code></pre>
+        </div>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  "translation": "¡Hola, mundo!",
+  "detected_source_lang": "EN",
+  "billed_calls": 1,
+  "credits_remaining": 846,
+  "latency_ms": 318,
+  "provider": "deepl"
+}</code></pre>
+        </div>
+
+        <h3>Path parameters</h3>
+        <div class="params">
+          <div class="param-row">
+            <span class="pname">slug</span>
+            <span class="ptype">string</span>
+            <span class="pdesc">Service slug from <code>/v1/search</code> or <code>/v1/services</code>. <span class="pill pill-req">required</span></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- POST /v1/run -->
+      <section id="run-endpoint">
+        <h2><span class="badge b-post" style="margin-right:0.5rem">POST</span> /v1/run</h2>
+        <p>Find the best service for a natural language query and execute it in one call.</p>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl -X POST https://gateway.wayforth.io/v1/run \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "translate Hello to Spanish"}'</code></pre>
+        </div>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  "output": "Hola",
+  "service": "deepl",
+  "wri_score": 94,
+  "billed_calls": 1,
+  "credits_remaining": 845
+}</code></pre>
+        </div>
+      </section>
+
+      <!-- GET /v1/balance -->
+      <section id="balance-endpoint">
+        <h2><span class="badge b-get" style="margin-right:0.5rem">GET</span> /v1/balance</h2>
+        <p>Returns current credits, tier, and usage forecast.</p>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl https://gateway.wayforth.io/v1/balance \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY"</code></pre>
+        </div>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  "credits_remaining": 847,
+  "tier": "builder",
+  "usage": {
+    "calls_this_period": 153,
+    "calls_included": 1000
+  }
+}</code></pre>
+        </div>
+      </section>
+
+      <!-- GET /v1/services -->
+      <section id="services-endpoint">
+        <h2><span class="badge b-get" style="margin-right:0.5rem">GET</span> /v1/services</h2>
+        <p>Browse the full service catalog. Filter by category with the <code>category</code> query parameter.</p>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash"># All services
+curl "https://gateway.wayforth.io/v1/services" \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY"
+
+# Filter by category
+curl "https://gateway.wayforth.io/v1/services?category=audio" \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY"</code></pre>
+        </div>
+      </section>
+
+      <!-- Billing endpoints -->
+      <section id="billing-endpoints">
+        <h2>Billing endpoints</h2>
+
+        <h3><span class="badge b-get" style="margin-right:0.5rem">GET</span> /billing/balance</h3>
+        <p>Extended balance with full billing period details and usage forecast.</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  "calls_remaining": 847,
+  "calls_included": 1000,
+  "billing_period_start": "2026-05-01T00:00:00Z",
+  "next_reset": "2026-06-01T00:00:00Z",
+  "days_until_reset": 15,
+  "plan": "builder",
+  "forecast": {
+    "daily_avg_calls": 10,
+    "days_remaining_at_current_rate": 84,
+    "projected_reset_balance": 697,
+    "will_exhaust_before_reset": false
+  }
+}</code></pre>
+        </div>
+
+        <h3><span class="badge b-post" style="margin-right:0.5rem">POST</span> /billing/upgrade</h3>
+        <p>Create a Stripe Checkout session to upgrade your plan.</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">// Request
+{ "target_tier": "pro" }
+
+// Response
+{ "checkout_url": "https://checkout.stripe.com/c/pay/..." }</code></pre>
+        </div>
+        <p>Valid tiers: <code>builder</code>, <code>starter</code>, <code>pro</code>, <code>growth</code>. Cannot downgrade via API — contact support.</p>
+
+        <h3><span class="badge b-post" style="margin-right:0.5rem">POST</span> /billing/topup</h3>
+        <p>Create a Stripe Checkout session for a top-up package.</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">// Request
+{ "package": "large" }
+
+// Response
+{ "checkout_url": "https://checkout.stripe.com/c/pay/..." }</code></pre>
+        </div>
+        <p>Valid packages: <code>small</code> ($5/500), <code>medium</code> ($10/1100), <code>large</code> ($25/3000), <code>xl</code> ($50/7000).</p>
+
+        <h3><span class="badge b-get" style="margin-right:0.5rem">GET</span> /billing/packages</h3>
+        <p>Returns available upgrade tiers and top-up packages for the current user.</p>
+
+        <h3><span class="badge b-get" style="margin-right:0.5rem">GET</span> /billing/invoice/{year}/{month}</h3>
+        <p>Returns a monthly invoice. Example: <code>/billing/invoice/2026/05</code>.</p>
+      </section>
+
+      <!-- Rate limits -->
+      <section id="rate-limits">
+        <h2>Rate limits</h2>
+        <p>Rate limits apply to all endpoints. Limits are per API key, not per IP.</p>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Tier</th><th>Requests / minute</th><th>Calls / month</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><span class="pill pill-free">free</span></td>
+                <td>10</td>
+                <td>100</td>
+              </tr>
+              <tr>
+                <td><span class="pill pill-builder">builder</span></td>
+                <td>60</td>
+                <td>1,000</td>
+              </tr>
+              <tr>
+                <td><span class="pill pill-starter">starter</span></td>
+                <td>120</td>
+                <td>3,500</td>
+              </tr>
+              <tr>
+                <td><span class="pill pill-pro">pro</span></td>
+                <td>300</td>
+                <td>12,000</td>
+              </tr>
+              <tr>
+                <td><span class="pill pill-growth">growth</span></td>
+                <td>600</td>
+                <td>40,000</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Rate limit headers</h3>
+        <p>Every response includes rate limit context:</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">http</span><button class="copy-btn">Copy</button></div>
+          <pre><code>X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 47
+X-RateLimit-Reset: 1748012400
+X-Credits-Remaining: 847</code></pre>
+        </div>
+
+        <p>When the rate limit is exceeded, the gateway returns <code>429 Too Many Requests</code> with a <code>Retry-After</code> header indicating seconds to wait.</p>
+      </section>
+
+      <!-- Errors -->
+      <section id="errors">
+        <h2>Error codes</h2>
+        <p>All errors follow the same JSON envelope with a <code>detail</code> field:</p>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  "detail": "Insufficient credits. Top up at https://wayforth.io/billing",
+  "error_code": "insufficient_credits",
+  "credits_remaining": 0
+}</code></pre>
+        </div>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Status</th><th>error_code</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><span class="sc sc-2">200</span></td>
+                <td>–</td>
+                <td>Success</td>
+              </tr>
+              <tr>
+                <td><span class="sc sc-4">400</span></td>
+                <td><code>bad_request</code></td>
+                <td>Invalid JSON or missing required field</td>
+              </tr>
+              <tr>
+                <td><span class="sc sc-401">401</span></td>
+                <td><code>invalid_api_key</code></td>
+                <td>Missing or invalid <code>x-wayforth-api-key</code> header</td>
+              </tr>
+              <tr>
+                <td><span class="sc sc-401">402</span></td>
+                <td><code>insufficient_credits</code></td>
+                <td>Account has 0 credits remaining</td>
+              </tr>
+              <tr>
+                <td><span class="sc sc-4">404</span></td>
+                <td><code>service_not_found</code></td>
+                <td>Slug does not exist in the catalog</td>
+              </tr>
+              <tr>
+                <td><span class="sc sc-4">422</span></td>
+                <td><code>validation_error</code></td>
+                <td>Request body fails schema validation</td>
+              </tr>
+              <tr>
+                <td><span class="sc sc-4">429</span></td>
+                <td><code>rate_limit_exceeded</code></td>
+                <td>Too many requests — check <code>Retry-After</code> header</td>
+              </tr>
+              <tr>
+                <td><span class="sc sc-4">429</span></td>
+                <td><code>too_many_auth_failures</code></td>
+                <td>10+ consecutive auth failures from this IP in 60s</td>
+              </tr>
+              <tr>
+                <td><span class="sc sc-5">500</span></td>
+                <td><code>internal_error</code></td>
+                <td>Unexpected gateway error</td>
+              </tr>
+              <tr>
+                <td><span class="sc sc-5">503</span></td>
+                <td><code>service_unavailable</code></td>
+                <td>Upstream provider unavailable, failover exhausted</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Health check</h3>
+        <p>The <code>/health</code> endpoint requires no authentication and is safe to poll:</p>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl https://gateway.wayforth.io/health</code></pre>
+        </div>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  "status": "ok",
+  "service": "wayforth-gateway",
+  "version": "0.7.0"
+}</code></pre>
+        </div>
+
+        <div class="callout ct">
+          <p><strong>Webhook events:</strong> Subscribe to gateway events (balance warnings, service degradation, payment failures) at <a href="https://wayforth.io/settings/webhooks" target="_blank">wayforth.io/settings/webhooks</a>. Full event list available at <code>GET /webhooks/events</code>.</p>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
