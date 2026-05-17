@@ -600,69 +600,48 @@ async def lifespan(app: FastAPI):
                    OR (endpoint_url ILIKE '%labs-production%' AND name ILIKE '%summarizer%')
             """)
             # v0.6.12 — one-time deletion of pentest artifact accounts
+            # Uses IF EXISTS per table so missing tables are silently skipped
+            # and a single table error cannot abort the entire startup sequence.
             await _mconn.execute("""
-                DELETE FROM agent_memory          WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM agent_identities      WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM x402_agent_identities WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM x402_payment_receipts WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM usdc_payments         WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM package_purchases     WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM wri_alerts            WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM service_favorites     WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM referrals             WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM org_members           WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM user_service_keys     WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM search_analytics      WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM credit_transactions   WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM api_keys              WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM user_credits          WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
-            """)
-            await _mconn.execute("""
-                DELETE FROM users
-                WHERE (
-                    email LIKE 'ratelimit-test-%'
-                    OR email LIKE 'audit-%@audit-research.io'
-                    OR email IN (
-                        'victim@example.com','some-other-email@example.com',
-                        'founders@wayforth.io','legal@wayforth.io',
-                        'info@wayforth.io','dev@wayforth.io',
-                        'team@wayforth.io','test@test.com'
+                DO $$
+                DECLARE _ids UUID[];
+                BEGIN
+                    SELECT ARRAY_AGG(u.id) INTO _ids
+                    FROM users u
+                    WHERE (
+                        u.email LIKE 'ratelimit-test-%'
+                        OR u.email LIKE 'audit-%@audit-research.io'
+                        OR u.email IN (
+                            'victim@example.com','some-other-email@example.com',
+                            'founders@wayforth.io','legal@wayforth.io',
+                            'info@wayforth.io','dev@wayforth.io',
+                            'team@wayforth.io','test@test.com'
+                        )
                     )
-                )
-                AND email NOT IN (
-                    'dorassulin1@gmail.com','assulindor@gmail.com',
-                    'support@wayforth.io','demo_free@wayforth.io',
-                    'demo_starter@wayforth.io','demo_growth@wayforth.io',
-                    'demo_pro@wayforth.io','demo_provider@wayforth.io'
-                )
+                    AND u.email NOT IN (
+                        'dorassulin1@gmail.com','assulindor@gmail.com',
+                        'support@wayforth.io','demo_free@wayforth.io',
+                        'demo_starter@wayforth.io','demo_growth@wayforth.io',
+                        'demo_pro@wayforth.io','demo_provider@wayforth.io'
+                    );
+                    IF _ids IS NULL THEN RETURN; END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='agent_memory')          THEN DELETE FROM agent_memory          WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='agent_identities')      THEN DELETE FROM agent_identities      WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='x402_agent_identities') THEN DELETE FROM x402_agent_identities WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='x402_payment_receipts') THEN DELETE FROM x402_payment_receipts WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='usdc_payments')         THEN DELETE FROM usdc_payments         WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='package_purchases')     THEN DELETE FROM package_purchases     WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='wri_alerts')            THEN DELETE FROM wri_alerts            WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='service_favorites')     THEN DELETE FROM service_favorites     WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='referrals')             THEN DELETE FROM referrals             WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='org_members')           THEN DELETE FROM org_members           WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='user_service_keys')     THEN DELETE FROM user_service_keys     WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='search_analytics')      THEN DELETE FROM search_analytics      WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='credit_transactions')   THEN DELETE FROM credit_transactions   WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='api_keys')              THEN DELETE FROM api_keys              WHERE user_id = ANY(_ids); END IF;
+                    IF EXISTS (SELECT FROM information_schema.tables WHERE table_name='user_credits')          THEN DELETE FROM user_credits          WHERE user_id = ANY(_ids); END IF;
+                    DELETE FROM users WHERE id = ANY(_ids);
+                END $$;
             """)
     except Exception as e:
         import traceback
