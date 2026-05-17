@@ -151,7 +151,7 @@ Real API result + WayforthRank signal update
 ## Links
 
 - **Dashboard:** [wayforth.io/dashboard](https://wayforth.io/dashboard)
-- **Docs:** [wayforth.io/docs](https://wayforth.io/docs)
+- **Docs:** [gateway.wayforth.io/guide/](https://gateway.wayforth.io/guide/)
 - **Whitepaper:** [wayforth.io/Wayforth_Whitepaper_v6.4.pdf](https://wayforth.io/Wayforth_Whitepaper_v6.4.pdf)
 - **PyPI:** [pypi.org/project/wayforth-mcp](https://pypi.org/project/wayforth-mcp/)
 - **Contact:** [wayforth.io/contact](https://wayforth.io/contact)

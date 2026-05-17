@@ -773,7 +773,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
                 "message": "No service found with this slug.",
                 "suggestion": "Search for available services:",
                 "search_endpoint": f"GET /search?q={service_slug}",
-                "docs": "https://wayforth.io/docs",
+                "docs": "https://gateway.wayforth.io/guide/",
             })
 
         if not catalog_svc["x402_supported"]:
