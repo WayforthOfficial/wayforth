@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from core.credits import PLANS, CREDITS_PER_CALL, _dispatch_webhooks
+from core.credits import PLANS, CREDITS_PER_CALL, _dispatch_webhooks, _maybe_grant_founding_bonus
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier
@@ -468,6 +468,8 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
                 (reference_id, api_key_id, plan, amount_usdc, tx_hash, status, bonus_credits, expires_at)
             VALUES ($1, $2::uuid, 'topup', $3, $4, 'confirmed', $5, NOW() + INTERVAL '10 years')
         """, reference_id, str(key_record["id"]), amount_usdc_float, tx_hash, topup_bonus)
+
+    asyncio.create_task(_maybe_grant_founding_bonus(db, str(key_record["user_id"])))
 
     new_spent = round(spent_usd + amount_usdc_float, 2)
     new_remaining = round(limit_usd - new_spent, 2)
