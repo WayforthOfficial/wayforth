@@ -618,6 +618,14 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def docs_redirect(request: Request, call_next):
+    if request.headers.get("host", "").startswith("docs.wayforth.io"):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("https://gateway.wayforth.io/docs/")
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def add_request_id(request: Request, call_next):
     request_id = str(uuid_lib.uuid4())
     request.state.request_id = request_id
