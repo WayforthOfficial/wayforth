@@ -1146,3 +1146,36 @@ async def account_org(request: Request, db=Depends(get_db)):
         "org_name": org["name"],
         "members": [dict(r) for r in rows],
     }
+
+
+FOUNDING_MEMBER_CUTOFF = "2026-08-31"
+
+
+@router.get("/account/founding-status", tags=["Account"])
+@limiter.limit("30/minute")
+async def account_founding_status(request: Request, db=Depends(get_db)):
+    """Return founding-member status and bonus grant state for the authenticated user."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    key_record = await db.fetchrow(
+        "SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true",
+        hashlib.sha256(api_key.encode()).hexdigest(),
+    )
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    user = await db.fetchrow(
+        "SELECT founding_member, founding_bonus_granted_at FROM users WHERE id = $1::uuid",
+        str(key_record["user_id"]),
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {
+        "is_founding_member": bool(user["founding_member"]),
+        "bonus_granted": user["founding_bonus_granted_at"] is not None,
+        "bonus_amount": 500,
+        "cutoff_date": FOUNDING_MEMBER_CUTOFF,
+    }

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import secrets
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -19,6 +20,8 @@ from core.tier_gates import require_tier
 logger = logging.getLogger("wayforth")
 
 router = APIRouter()
+
+FOUNDING_MEMBER_CUTOFF = datetime(2026, 8, 31, tzinfo=timezone.utc)
 
 # ── Registration guards ───────────────────────────────────────────────────────
 
@@ -269,11 +272,12 @@ async def register_user(request: Request, db=Depends(get_db)):
             "code": "supabase_id_conflict",
         })
 
+    is_founding = datetime.now(timezone.utc) < FOUNDING_MEMBER_CUTOFF
     user = await db.fetchrow("""
-        INSERT INTO users (email, supabase_id)
-        VALUES ($1, $2)
+        INSERT INTO users (email, supabase_id, founding_member)
+        VALUES ($1, $2, $3)
         RETURNING id, email, created_at
-    """, email, supabase_id)
+    """, email, supabase_id, is_founding)
 
     raw_key = "wf_live_" + secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
