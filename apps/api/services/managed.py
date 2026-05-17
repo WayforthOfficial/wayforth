@@ -31,6 +31,11 @@ SERVICE_CONFIGS = {
     "stability":   {"key_var": "STABILITY_API_KEY",     "credits": 45,  "real_cost_per_call": 0.080},
     # Email
     "resend":      {"key_var": "RESEND_API_KEY",        "credits": 3,   "real_cost_per_call": 0.001},
+    # Web scraping
+    "firecrawl":   {"key_var": "FIRECRAWL_API_KEY",     "credits": 5,   "real_cost_per_call": 0.003},
+    # Inference (additional)
+    "mistral":     {"key_var": "MISTRAL_API_KEY",        "credits": 3,   "real_cost_per_call": 0.001},
+    "gemini":      {"key_var": "GEMINI_API_KEY",         "credits": 3,   "real_cost_per_call": 0.001},
 }
 
 # Fallback alternatives — used when a service fails with 5xx (bidirectional pairs)
@@ -60,6 +65,9 @@ SERVICE_DISPLAY_NAMES = {
     "elevenlabs":  "ElevenLabs TTS",
     "stability":   "Stability AI",
     "resend":      "Resend Email",
+    "firecrawl":   "Firecrawl Scrape",
+    "mistral":     "Mistral AI",
+    "gemini":      "Google Gemini Flash",
 }
 
 
@@ -621,6 +629,82 @@ async def call_brave(params: dict, api_key: str) -> dict:
     return {"query": query, "results": results}
 
 
+async def call_firecrawl(params: dict, api_key: str) -> dict:
+    url = params.get("url", "")
+    if not url:
+        raise Exception("params.url is required")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(
+            "https://api.firecrawl.dev/v1/scrape",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"url": url, "formats": params.get("formats", ["markdown"])},
+        )
+    if r.status_code not in (200, 201):
+        raise Exception(f"Firecrawl error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    inner = data.get("data", data)
+    return {
+        "url": url,
+        "markdown": inner.get("markdown", ""),
+        "title": inner.get("metadata", {}).get("title", ""),
+    }
+
+
+async def call_mistral(params: dict, api_key: str) -> dict:
+    messages = params.get("messages", [])
+    if not messages:
+        raise Exception("params.messages is required")
+    model = params.get("model", "mistral-small-latest")
+    max_tokens = params.get("max_tokens", 1024)
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "max_tokens": max_tokens},
+        )
+    if r.status_code != 200:
+        raise Exception(f"Mistral error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    choice = data["choices"][0]
+    usage = data.get("usage", {})
+    return {
+        "content": choice["message"]["content"],
+        "model": data.get("model", model),
+        "tokens_used": usage.get("total_tokens", 0),
+    }
+
+
+async def call_gemini(params: dict, api_key: str) -> dict:
+    prompt = params.get("prompt", "")
+    messages = params.get("messages", [])
+    if not prompt and not messages:
+        raise Exception("params.prompt or params.messages is required")
+    if messages and not prompt:
+        # Convert messages format to Gemini contents
+        contents = [{"role": m["role"].replace("assistant", "model"), "parts": [{"text": m["content"]}]} for m in messages]
+    else:
+        contents = [{"parts": [{"text": prompt}]}]
+    model = params.get("model", "gemini-1.5-flash")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+            headers={"Content-Type": "application/json"},
+            json={"contents": contents},
+        )
+    if r.status_code != 200:
+        raise Exception(f"Gemini error {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    candidate = data.get("candidates", [{}])[0]
+    content_parts = candidate.get("content", {}).get("parts", [{}])
+    text = content_parts[0].get("text", "") if content_parts else ""
+    usage = data.get("usageMetadata", {})
+    return {
+        "content": text,
+        "model": model,
+        "tokens_used": usage.get("totalTokenCount", 0),
+    }
+
+
 ADAPTERS = {
     "groq":        call_groq,
     "together":    call_together,
@@ -637,4 +721,7 @@ ADAPTERS = {
     "elevenlabs":  call_elevenlabs,
     "stability":   call_stability,
     "resend":      call_resend,
+    "firecrawl":   call_firecrawl,
+    "mistral":     call_mistral,
+    "gemini":      call_gemini,
 }

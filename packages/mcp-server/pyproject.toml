@@ -1,6 +1,6 @@
 [project]
 name = "wayforth-mcp"
-version = "0.6.12"
+version = "0.6.13"
 description = "MCP server for Wayforth — Intelligence. Search engine and payment rail for AI agents."
 readme = "README.md"
 license = {text = "MIT"}
