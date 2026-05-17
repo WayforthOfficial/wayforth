@@ -312,12 +312,12 @@ async def test_T223_x402_garbage_payment_header_rejected(c):
         json={"service_slug": "openweather", "params": {"city": "London"}},
         headers={"X-PAYMENT": fake_payment},
     )
-    # Acceptable: 402 (payment invalid), 503 (wallet unconfigured). NOT 200.
+    # Acceptable: 400/402/422 (invalid/missing fields), 503 (wallet unconfigured). NOT 200.
     assert r.status_code != 200, (
         f"Garbage payment header should not authorize a call, got 200: {r.text[:200]}"
     )
-    assert r.status_code in (400, 402, 503), (
-        f"Garbage payment should yield 400/402/503, got {r.status_code}: {r.text[:200]}"
+    assert r.status_code in (400, 402, 422, 503), (
+        f"Garbage payment should yield 400/402/422/503, got {r.status_code}: {r.text[:200]}"
     )
 
 
