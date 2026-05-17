@@ -846,7 +846,7 @@ except Exception:
     pass  # static dir may not exist in all environments
 
 try:
-    app.mount("/guide", StaticFiles(directory="packages/docs", html=True), name="guide")
+    app.mount("/guide", StaticFiles(directory="static/guide", html=True), name="guide")
 except Exception:
     pass  # packages/docs may not exist in all environments
 

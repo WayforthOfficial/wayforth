@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Getting Started — Wayforth Docs</title>
+  <meta name="description" content="Install the Wayforth MCP, make your first search, and execute a managed service in under 5 minutes.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a href="index.html" class="logo">
+      <div class="logo-mark">W</div>
+      <span class="logo-text">Wayforth</span>
+      <span class="logo-docs">docs</span>
+    </a>
+    <div class="header-links">
+      <a href="https://wayforth.io" class="header-link" target="_blank" rel="noopener">wayforth.io ↗</a>
+      <a href="https://gateway.wayforth.io" class="header-link" target="_blank" rel="noopener">gateway ↗</a>
+      <button class="menu-btn" id="menuBtn">☰ Menu</button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="search-wrap">
+      <span class="search-icon">⌕</span>
+      <input type="text" id="search" placeholder="Search docs…" autocomplete="off" spellcheck="false">
+      <div class="search-results" id="searchResults"></div>
+    </div>
+    <nav>
+      <div class="nav-group">
+        <span class="nav-label">Documentation</span>
+        <a href="index.html" class="nav-link active"><em class="icon">⚡</em>Getting Started</a>
+        <a href="search.html" class="nav-link"><em class="icon">🔍</em>Search &amp; Discovery</a>
+        <a href="execute.html" class="nav-link"><em class="icon">▶</em>Execution</a>
+        <a href="payment-rails.html" class="nav-link"><em class="icon">💳</em>Payment Rails</a>
+        <a href="sdk.html" class="nav-link"><em class="icon">{}</em>SDK Reference</a>
+        <a href="api.html" class="nav-link"><em class="icon">~</em>REST API</a>
+      </div>
+      <div class="nav-group">
+        <span class="nav-label">On this page</span>
+        <a href="#install" class="toc-link">Installation</a>
+        <a href="#first-search" class="toc-link">First search</a>
+        <a href="#first-execute" class="toc-link">First execution</a>
+        <a href="#authentication" class="toc-link">Authentication</a>
+        <a href="#free-tier" class="toc-link">Free tier</a>
+        <a href="#next-steps" class="toc-link">Next steps</a>
+      </div>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="content-inner">
+      <div class="page-badge">Getting Started</div>
+      <h1 class="page-title">Wayforth Quickstart</h1>
+      <p class="page-lead">Access 200+ AI services through a single interface. Install the MCP, set your API key, and start calling services in under 5 minutes.</p>
+
+      <!-- Install -->
+      <section id="install">
+        <h2>Installation</h2>
+        <p>Wayforth ships as an MCP (Model Context Protocol) server. Install it with <code>uvx</code> — no virtual environment needed:</p>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">bash</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-bash">uvx wayforth-mcp</code></pre>
+        </div>
+
+        <p>Alternatively, install as a persistent package:</p>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">bash</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-bash"># Using uv
+uv tool install wayforth-mcp
+
+# Using pip
+pip install wayforth-mcp</code></pre>
+        </div>
+
+        <p>To add Wayforth to your AI assistant, configure it in your MCP client. For Claude Desktop, add to <code>claude_desktop_config.json</code>:</p>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">json</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-json">{
+  "mcpServers": {
+    "wayforth": {
+      "command": "uvx",
+      "args": ["wayforth-mcp"],
+      "env": {
+        "WAYFORTH_API_KEY": "wf_live_..."
+      }
+    }
+  }
+}</code></pre>
+        </div>
+
+        <div class="callout cn">
+          <p><strong>Note:</strong> Wayforth MCP requires Python 3.10+ and <code>uv</code> 0.4+. Install <code>uv</code> with <code>curl -LsSf https://astral.sh/uv/install.sh | sh</code>.</p>
+        </div>
+      </section>
+
+      <!-- First search -->
+      <section id="first-search">
+        <h2>First search</h2>
+        <p>Use <code>wayforth_search</code> to find services in natural language. Wayforth ranks results by WRI score — a reliability index based on uptime, latency, and payment success rate.</p>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">mcp tool</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-python">wayforth_search("translate to spanish")</code></pre>
+        </div>
+
+        <p>Returns a ranked list of matching services:</p>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">json</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-json">[
+  {
+    "slug": "deepl",
+    "name": "DeepL Translation",
+    "description": "High-quality neural machine translation in 31 languages",
+    "wri_score": 94,
+    "tier": 2,
+    "category": "translation",
+    "payment_rails": ["card", "usdc", "x402"],
+    "price_per_call": 0.003
+  },
+  {
+    "slug": "google-translate",
+    "name": "Google Cloud Translation",
+    "wri_score": 91,
+    "tier": 2,
+    "category": "translation"
+  }
+]</code></pre>
+        </div>
+
+        <p>Narrow results with filters:</p>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">mcp tool</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-python">wayforth_search("translate to spanish", max_price_usd=0.01, tier=2)</code></pre>
+        </div>
+      </section>
+
+      <!-- First execute -->
+      <section id="first-execute">
+        <h2>First execution</h2>
+        <p>Once you have a <code>slug</code>, use <code>wayforth_execute</code> to run the service directly. Wayforth handles auth, billing, and failover automatically.</p>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">mcp tool</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-python">wayforth_execute(slug="deepl", text="Hello, world!", target_lang="ES")</code></pre>
+        </div>
+
+        <p>Response:</p>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">json</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-json">{
+  "translation": "¡Hola, mundo!",
+  "detected_source_lang": "EN",
+  "billed_calls": 1,
+  "credits_remaining": 98
+}</code></pre>
+        </div>
+
+        <h3>One-shot: search + execute</h3>
+        <p><code>wayforth_run</code> finds the best match for your query and executes it in one call — no slug needed:</p>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">mcp tool</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-python">wayforth_run("translate Hello to Spanish")</code></pre>
+        </div>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">json</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-json">{
+  "output": "Hola",
+  "service": "deepl",
+  "wri_score": 94
+}</code></pre>
+        </div>
+      </section>
+
+      <!-- Authentication -->
+      <section id="authentication">
+        <h2>Authentication</h2>
+        <p>All Wayforth APIs use a single API key passed as the <code>x-wayforth-api-key</code> header (or via the <code>WAYFORTH_API_KEY</code> environment variable for MCP).</p>
+
+        <div class="steps">
+          <div class="step">
+            <div class="step-body">
+              <h3>Create an account</h3>
+              <p>Sign up at <a href="https://wayforth.io" target="_blank">wayforth.io</a>. No credit card required — you start on the free tier with 100 calls.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-body">
+              <h3>Copy your API key</h3>
+              <p>Go to <strong>Settings → API Keys</strong>. Your live key starts with <code>wf_live_</code>. Test keys start with <code>wf_test_</code> and don't charge credits.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-body">
+              <h3>Set the key</h3>
+              <p>Set it as an environment variable in your shell or MCP config:</p>
+              <div class="code-block">
+                <div class="cb-header">
+                  <span class="cb-lang">bash</span>
+                  <button class="copy-btn">Copy</button>
+                </div>
+                <pre><code class="language-bash">export WAYFORTH_API_KEY="wf_live_your_key_here"</code></pre>
+              </div>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-body">
+              <h3>Test the connection</h3>
+              <div class="code-block">
+                <div class="cb-header">
+                  <span class="cb-lang">bash</span>
+                  <button class="copy-btn">Copy</button>
+                </div>
+                <pre><code class="language-bash">curl https://gateway.wayforth.io/v1/balance \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY"</code></pre>
+              </div>
+              <div class="code-block">
+                <div class="cb-header">
+                  <span class="cb-lang">json</span>
+                  <button class="copy-btn">Copy</button>
+                </div>
+                <pre><code class="language-json">{
+  "credits_remaining": 100,
+  "tier": "free",
+  "usage": { "calls_this_period": 0 }
+}</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="callout cw">
+          <p><strong>Security:</strong> Never commit API keys to source control. Use environment variables or a secrets manager. Rotate keys immediately if compromised via the dashboard.</p>
+        </div>
+      </section>
+
+      <!-- Free tier -->
+      <section id="free-tier">
+        <h2>Free tier</h2>
+        <p>Every account starts on the free tier — no credit card required.</p>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr><th>Tier</th><th>Calls / month</th><th>Price</th><th>Rate limit</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><span class="pill pill-free">free</span></td><td>100</td><td>$0</td><td>10 req/min</td></tr>
+              <tr><td><span class="pill pill-builder">builder</span></td><td>1,000</td><td>$9/mo</td><td>60 req/min</td></tr>
+              <tr><td><span class="pill pill-starter">starter</span></td><td>3,500</td><td>$29/mo</td><td>120 req/min</td></tr>
+              <tr><td><span class="pill pill-pro">pro</span></td><td>12,000</td><td>$79/mo</td><td>300 req/min</td></tr>
+              <tr><td><span class="pill pill-growth">growth</span></td><td>40,000</td><td>$199/mo</td><td>600 req/min</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>Need more calls? Top-up packages can be added to any plan. See <a href="payment-rails.html#topup">top-up packages</a>.</p>
+
+        <div class="callout ct">
+          <p><strong>Founding member bonus:</strong> Accounts created during the launch period receive a one-time 500-call bonus on their first paid invoice. No code required.</p>
+        </div>
+      </section>
+
+      <!-- Next steps -->
+      <section id="next-steps">
+        <h2>Next steps</h2>
+        <div class="svc-grid">
+          <a href="search.html" class="svc-card" style="text-decoration:none">
+            <div class="svc-slug">search.html</div>
+            <div class="svc-name">Search &amp; Discovery</div>
+            <div class="svc-meta">WayforthQL, filters, 19 categories</div>
+          </a>
+          <a href="execute.html" class="svc-card" style="text-decoration:none">
+            <div class="svc-slug">execute.html</div>
+            <div class="svc-name">Execution</div>
+            <div class="svc-meta">15 managed services, BYOK, x402</div>
+          </a>
+          <a href="sdk.html" class="svc-card" style="text-decoration:none">
+            <div class="svc-slug">sdk.html</div>
+            <div class="svc-name">SDK Reference</div>
+            <div class="svc-meta">Python &amp; TypeScript SDKs</div>
+          </a>
+          <a href="api.html" class="svc-card" style="text-decoration:none">
+            <div class="svc-slug">api.html</div>
+            <div class="svc-name">REST API</div>
+            <div class="svc-meta">Direct gateway access</div>
+          </a>
+        </div>
+      </section>
+
+    </div><!-- /content-inner -->
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+<script src="main.js"></script>
+</body>
+</html>

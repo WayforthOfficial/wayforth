@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Payment Rails — Wayforth Docs</title>
+  <meta name="description" content="Track A (Card), Track B (USDC), Track C (x402), credit system, and top-up packages.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a href="index.html" class="logo">
+      <div class="logo-mark">W</div>
+      <span class="logo-text">Wayforth</span>
+      <span class="logo-docs">docs</span>
+    </a>
+    <div class="header-links">
+      <a href="https://wayforth.io" class="header-link" target="_blank" rel="noopener">wayforth.io ↗</a>
+      <a href="https://gateway.wayforth.io" class="header-link" target="_blank" rel="noopener">gateway ↗</a>
+      <button class="menu-btn" id="menuBtn">☰ Menu</button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="search-wrap">
+      <span class="search-icon">⌕</span>
+      <input type="text" id="search" placeholder="Search docs…" autocomplete="off" spellcheck="false">
+      <div class="search-results" id="searchResults"></div>
+    </div>
+    <nav>
+      <div class="nav-group">
+        <span class="nav-label">Documentation</span>
+        <a href="index.html" class="nav-link"><em class="icon">⚡</em>Getting Started</a>
+        <a href="search.html" class="nav-link"><em class="icon">🔍</em>Search &amp; Discovery</a>
+        <a href="execute.html" class="nav-link"><em class="icon">▶</em>Execution</a>
+        <a href="payment-rails.html" class="nav-link active"><em class="icon">💳</em>Payment Rails</a>
+        <a href="sdk.html" class="nav-link"><em class="icon">{}</em>SDK Reference</a>
+        <a href="api.html" class="nav-link"><em class="icon">~</em>REST API</a>
+      </div>
+      <div class="nav-group">
+        <span class="nav-label">On this page</span>
+        <a href="#overview" class="toc-link">Overview</a>
+        <a href="#track-a" class="toc-link">Track A — Card</a>
+        <a href="#track-b" class="toc-link">Track B — USDC</a>
+        <a href="#track-c" class="toc-link">Track C — x402</a>
+        <a href="#credits" class="toc-link">Credit system</a>
+        <a href="#topup" class="toc-link">Top-up packages</a>
+      </div>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="content-inner">
+      <div class="page-badge">Payment Rails</div>
+      <h1 class="page-title">Payment Rails</h1>
+      <p class="page-lead">Wayforth supports three payment tracks: card (Stripe Treasury), on-chain USDC (Base L2), and x402 (HTTP-native micropayments). All tracks share the same credit system.</p>
+
+      <!-- Overview -->
+      <section id="overview">
+        <h2>Overview</h2>
+        <div class="rail">
+          <div class="rail-letter ra">A</div>
+          <div class="rail-body">
+            <div class="rail-title">Track A — Card (Stripe Treasury)</div>
+            <p class="rail-desc">Monthly subscription or one-time top-up via credit/debit card. Settled through Stripe. Fastest onboarding — no wallet required.</p>
+          </div>
+        </div>
+        <div class="rail">
+          <div class="rail-letter rb">B</div>
+          <div class="rail-body">
+            <div class="rail-title">Track B — USDC on Base</div>
+            <p class="rail-desc">Top-up credits by sending USDC on the Base L2 network. Gas-free (Base covers fees). Ideal for teams that prefer on-chain settlement.</p>
+          </div>
+        </div>
+        <div class="rail">
+          <div class="rail-letter rc">C</div>
+          <div class="rail-body">
+            <div class="rail-title">Track C — x402</div>
+            <p class="rail-desc">HTTP-native per-request payments. No API key, no subscription. USDC micropayments embedded directly in the HTTP lifecycle. <span class="pill pill-free">experimental</span></p>
+          </div>
+        </div>
+
+        <h3>Comparison</h3>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th></th><th>Track A</th><th>Track B</th><th>Track C</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Settlement</strong></td><td>Fiat via Stripe</td><td>USDC on Base</td><td>USDC on Base</td></tr>
+              <tr><td><strong>Billing model</strong></td><td>Monthly sub + optional top-up</td><td>Top-up credits</td><td>Per-request</td></tr>
+              <tr><td><strong>API key needed</strong></td><td>Yes</td><td>Yes</td><td>No</td></tr>
+              <tr><td><strong>Setup time</strong></td><td>30 seconds</td><td>~2 minutes</td><td>Wallet + x402 client</td></tr>
+              <tr><td><strong>Min charge</strong></td><td>$5</td><td>$5</td><td>~$0.001</td></tr>
+              <tr><td><strong>Best for</strong></td><td>Most users</td><td>Web3 teams</td><td>Agent / ephemeral use</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Track A -->
+      <section id="track-a">
+        <h2>Track A — Card (Stripe Treasury)</h2>
+        <p>The default payment method. Subscribe to a monthly plan or purchase credits with any major credit or debit card.</p>
+
+        <h3>Subscriptions</h3>
+        <p>Monthly subscriptions include a fixed call quota that resets on your billing anniversary. Unused calls do not roll over.</p>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Plan</th><th>Calls/month</th><th>Price</th><th>Overage</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><span class="pill pill-free">free</span></td>
+                <td>100</td>
+                <td>$0</td>
+                <td>–</td>
+              </tr>
+              <tr>
+                <td><span class="pill pill-builder">builder</span></td>
+                <td>1,000</td>
+                <td>$9/mo</td>
+                <td>Top-up packages</td>
+              </tr>
+              <tr>
+                <td><span class="pill pill-starter">starter</span></td>
+                <td>3,500</td>
+                <td>$29/mo</td>
+                <td>Top-up packages</td>
+              </tr>
+              <tr>
+                <td><span class="pill pill-pro">pro</span></td>
+                <td>12,000</td>
+                <td>$79/mo</td>
+                <td>Top-up packages</td>
+              </tr>
+              <tr>
+                <td><span class="pill pill-growth">growth</span></td>
+                <td>40,000</td>
+                <td>$199/mo</td>
+                <td>Top-up packages</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Upgrading via API</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl -X POST https://gateway.wayforth.io/billing/upgrade \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"target_tier": "pro"}'
+
+# Returns a Stripe Checkout URL
+# {"checkout_url": "https://checkout.stripe.com/..."}</code></pre>
+        </div>
+
+        <h3>Dunning policy</h3>
+        <p>If a card payment fails, Wayforth retries on days 1, 4, and 7. After 3 failures your plan is downgraded to the nearest tier whose quota matches your actual usage. You are notified by email at each step.</p>
+      </section>
+
+      <!-- Track B -->
+      <section id="track-b">
+        <h2>Track B — USDC on Base</h2>
+        <p>Top up credits by sending USDC to your Wayforth wallet address on the Base L2 network. Credits are credited at a fixed rate of <strong>$0.01 USD per credit</strong>.</p>
+
+        <h3>Getting your wallet address</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl https://gateway.wayforth.io/billing/wallet \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY"</code></pre>
+        </div>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  "wallet_address": "0x742d35Cc6634C0532925a3b8D4C9Cf4e12345678",
+  "network": "base",
+  "token": "USDC",
+  "min_deposit_usd": 5.00
+}</code></pre>
+        </div>
+
+        <h3>Credit conversion</h3>
+        <p>Credits are applied to your account immediately after 2 block confirmations (~4 seconds on Base). No gas fees — Base's EIP-4844 blob transactions cover L2 fees.</p>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>USDC sent</th><th>Credits received</th></tr></thead>
+            <tbody>
+              <tr><td>$5.00</td><td>500 credits</td></tr>
+              <tr><td>$10.00</td><td>1,100 credits (+10% bonus)</td></tr>
+              <tr><td>$25.00</td><td>3,000 credits (+20% bonus)</td></tr>
+              <tr><td>$50.00</td><td>7,000 credits (+40% bonus)</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout cw">
+          <p><strong>Base network only.</strong> Sending USDC on Ethereum mainnet or other chains will not credit your account. Always verify you are on the Base network (Chain ID: 8453) before sending.</p>
+        </div>
+      </section>
+
+      <!-- Track C -->
+      <section id="track-c">
+        <h2>Track C — x402</h2>
+        <p>x402 is an emerging standard for HTTP-native micropayments. Instead of pre-funding an account, each API request carries its own payment authorization, settled on-chain in real time.</p>
+
+        <h3>The 402 flow</h3>
+        <ol>
+          <li>Client sends a standard HTTP request (no API key)</li>
+          <li>Gateway returns <code>402 Payment Required</code> with a <code>X-Payment-Descriptor</code> header</li>
+          <li>Client constructs and signs a USDC transfer on Base</li>
+          <li>Client re-sends the request with the signed payment in <code>X-Payment</code> header</li>
+          <li>Gateway verifies the payment, forwards the request, and returns the response</li>
+        </ol>
+
+        <h3>Payment descriptor format</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">// X-Payment-Descriptor (returned on 402)
+{
+  "version": "1.0",
+  "scheme": "exact",
+  "network": "base",
+  "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "amount": "3000",
+  "payee": "0x742d35Cc6634C0532925a3b8D4C9Cf4e12345678",
+  "memo": "wayforth:execute:deepl",
+  "expires": 1748000000
+}</code></pre>
+        </div>
+
+        <h3>x402 client libraries</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash"># Python
+pip install x402-client
+
+# TypeScript / Node
+npm install @x402/client</code></pre>
+        </div>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">import { X402Client } from '@x402/client';
+
+const x402 = new X402Client({
+  privateKey: process.env.WALLET_PRIVATE_KEY,
+  rpcUrl: 'https://mainnet.base.org',
+});
+
+const res = await x402.post('https://gateway.wayforth.io/v1/execute/deepl', {
+  text: 'Hello',
+  target_lang: 'ES',
+});
+
+console.log(await res.json()); // { translation: 'Hola', ... }</code></pre>
+        </div>
+
+        <div class="callout cn">
+          <p><strong>Status:</strong> x402 execution is available on all tier 1–3 services. Higher tiers will be enabled as the protocol matures. Follow <a href="https://github.com/coinbase/x402" target="_blank">github.com/coinbase/x402</a> for spec updates.</p>
+        </div>
+      </section>
+
+      <!-- Credits -->
+      <section id="credits">
+        <h2>Credit system</h2>
+        <p>Wayforth uses a unified credit system across all three payment rails. Credits never expire and carry over between billing periods.</p>
+
+        <h3>How credits work</h3>
+        <ul>
+          <li><strong>1 credit = 1 API call</strong> to any managed service (unless the service specifies otherwise)</li>
+          <li>Credits from your monthly subscription reset each billing period</li>
+          <li>Top-up credits are permanent and never reset</li>
+          <li>Subscription credits are used before top-up credits</li>
+          <li>Failed calls that were rerouted via self-healing are not charged</li>
+        </ul>
+
+        <h3>Check your balance</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl https://gateway.wayforth.io/v1/balance \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY"</code></pre>
+        </div>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  "credits_remaining": 847,
+  "credits_included": 1000,
+  "tier": "builder",
+  "billing_period_start": "2026-05-01T00:00:00Z",
+  "next_reset": "2026-06-01T00:00:00Z",
+  "days_until_reset": 15,
+  "forecast": {
+    "daily_avg_calls": 10,
+    "days_remaining_at_current_rate": 84,
+    "projected_reset_balance": 697,
+    "will_exhaust_before_reset": false
+  }
+}</code></pre>
+        </div>
+
+        <h3>Balance warnings</h3>
+        <p>Wayforth fires webhook events when your balance runs low:</p>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Event</th><th>Trigger</th></tr></thead>
+            <tbody>
+              <tr><td><code>wayf.balance_warning_80</code></td><td>80% of credits consumed in billing period</td></tr>
+              <tr><td><code>wayf.balance_warning_95</code></td><td>95% of credits consumed</td></tr>
+              <tr><td><code>wayf.balance_low</code></td><td>Fewer than 50 credits remaining</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Top-up packages -->
+      <section id="topup">
+        <h2>Top-up packages</h2>
+        <p>Supplement any plan with permanent credits. Available on Track A (card) and Track B (USDC).</p>
+
+        <div class="pkg-grid">
+          <div class="pkg-card">
+            <div class="pkg-price">$5</div>
+            <div class="pkg-calls">500 calls</div>
+            <div class="pkg-name">small</div>
+          </div>
+          <div class="pkg-card">
+            <div class="pkg-price">$10</div>
+            <div class="pkg-calls">1,100 calls</div>
+            <div class="pkg-name">medium <span style="color:var(--green);font-size:0.7rem">+10%</span></div>
+          </div>
+          <div class="pkg-card">
+            <div class="pkg-price">$25</div>
+            <div class="pkg-calls">3,000 calls</div>
+            <div class="pkg-name">large <span style="color:var(--green);font-size:0.7rem">+20%</span></div>
+          </div>
+          <div class="pkg-card">
+            <div class="pkg-price">$50</div>
+            <div class="pkg-calls">7,000 calls</div>
+            <div class="pkg-name">xl <span style="color:var(--green);font-size:0.7rem">+40%</span></div>
+          </div>
+        </div>
+
+        <h3>Purchase via API</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">curl -X POST https://gateway.wayforth.io/billing/topup \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"package": "large"}'
+
+# Returns a Stripe Checkout URL
+# {"checkout_url": "https://checkout.stripe.com/..."}</code></pre>
+        </div>
+
+        <div class="callout ct">
+          <p><strong>Founding member bonus:</strong> Accounts created during the launch period automatically receive 500 bonus credits on their first paid invoice. The bonus is applied once and does not stack with top-up packages.</p>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
