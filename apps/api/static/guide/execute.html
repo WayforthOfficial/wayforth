@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Execution — Wayforth Docs</title>
+  <meta name="description" content="wayforth_execute reference, managed services catalog, BYOK setup, x402 native execution, and self-healing payments.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a href="index.html" class="logo">
+      <div class="logo-mark">W</div>
+      <span class="logo-text">Wayforth</span>
+      <span class="logo-docs">docs</span>
+    </a>
+    <div class="header-links">
+      <a href="https://wayforth.io" class="header-link" target="_blank" rel="noopener">wayforth.io ↗</a>
+      <a href="https://gateway.wayforth.io" class="header-link" target="_blank" rel="noopener">gateway ↗</a>
+      <button class="menu-btn" id="menuBtn">☰ Menu</button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="search-wrap">
+      <span class="search-icon">⌕</span>
+      <input type="text" id="search" placeholder="Search docs…" autocomplete="off" spellcheck="false">
+      <div class="search-results" id="searchResults"></div>
+    </div>
+    <nav>
+      <div class="nav-group">
+        <span class="nav-label">Documentation</span>
+        <a href="index.html" class="nav-link"><em class="icon">⚡</em>Getting Started</a>
+        <a href="search.html" class="nav-link"><em class="icon">🔍</em>Search &amp; Discovery</a>
+        <a href="execute.html" class="nav-link active"><em class="icon">▶</em>Execution</a>
+        <a href="payment-rails.html" class="nav-link"><em class="icon">💳</em>Payment Rails</a>
+        <a href="sdk.html" class="nav-link"><em class="icon">{}</em>SDK Reference</a>
+        <a href="api.html" class="nav-link"><em class="icon">~</em>REST API</a>
+      </div>
+      <div class="nav-group">
+        <span class="nav-label">On this page</span>
+        <a href="#wayforth-execute" class="toc-link">wayforth_execute()</a>
+        <a href="#managed-services" class="toc-link">Managed services</a>
+        <a href="#byok" class="toc-link">BYOK setup</a>
+        <a href="#x402" class="toc-link">x402 execution</a>
+        <a href="#self-healing" class="toc-link">Self-healing payments</a>
+      </div>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="content-inner">
+      <div class="page-badge">Execution</div>
+      <h1 class="page-title">Execution</h1>
+      <p class="page-lead">Run any managed service with a single call. Wayforth handles authentication, billing, retries, and provider failover so your code doesn't have to.</p>
+
+      <!-- wayforth_execute -->
+      <section id="wayforth-execute">
+        <h2>wayforth_execute()</h2>
+        <p>Execute a managed service by its slug. Parameters vary by service — check the catalog or call <code>wayforth_search()</code> first to discover available services.</p>
+
+        <div class="sig">
+          <span class="kw">def</span> <span class="fn">wayforth_execute</span>(
+            slug: <span class="tp">str</span>,
+            **params: <span class="tp">Any</span>
+          ) -&gt; <span class="ret">dict</span>
+        </div>
+
+        <div class="params">
+          <div class="param-row">
+            <span class="pname">slug</span>
+            <span class="ptype">str</span>
+            <span class="pdesc">Service identifier from <code>wayforth_search()</code>. <span class="pill pill-req">required</span></span>
+          </div>
+          <div class="param-row">
+            <span class="pname">**params</span>
+            <span class="ptype">Any</span>
+            <span class="pdesc">Service-specific parameters. Passed directly to the underlying API. <span class="pill pill-opt">varies</span></span>
+          </div>
+        </div>
+
+        <h3>Examples</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">mcp tool</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python"># Translation
+wayforth_execute(slug="deepl", text="Hello world", target_lang="ES")
+
+# Transcription
+wayforth_execute(slug="whisper-large", audio_url="https://example.com/clip.mp3")
+
+# Embeddings
+wayforth_execute(slug="openai-embeddings", input="The quick brown fox", model="text-embedding-3-large")
+
+# Web search
+wayforth_execute(slug="perplexity-sonar", query="latest AI research 2025", num_results=5)</code></pre>
+        </div>
+
+        <h3>Response envelope</h3>
+        <p>All responses include billing metadata alongside the service's native output:</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  // Service-native fields (varies by service)
+  "translation": "¡Hola, mundo!",
+  "detected_source_lang": "EN",
+
+  // Wayforth billing fields (always present)
+  "billed_calls": 1,
+  "credits_remaining": 97,
+  "latency_ms": 423,
+  "provider": "deepl"
+}</code></pre>
+        </div>
+
+        <h3>Error handling</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">from wayforth import WayforthError, InsufficientCreditsError, ServiceUnavailableError
+
+try:
+    result = wayforth_execute(slug="deepl", text="Hello", target_lang="ES")
+except InsufficientCreditsError:
+    print("Top up at https://wayforth.io/billing")
+except ServiceUnavailableError:
+    print("Provider degraded — Wayforth will retry automatically")
+except WayforthError as e:
+    print(f"Error {e.status_code}: {e}")</code></pre>
+        </div>
+      </section>
+
+      <!-- Managed services -->
+      <section id="managed-services">
+        <h2>Managed services</h2>
+        <p>Wayforth manages authentication, rate limits, and retries for these 15 services. You never handle upstream API keys for managed services — use Wayforth credits instead.</p>
+
+        <div class="svc-grid">
+          <div class="svc-card">
+            <div class="svc-slug">deepl</div>
+            <div class="svc-name">DeepL Translation</div>
+            <div class="svc-meta"><span>translation</span> <span>WRI 94</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">openai-embeddings</div>
+            <div class="svc-name">OpenAI Embeddings</div>
+            <div class="svc-meta"><span>embeddings</span> <span>WRI 96</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">cohere-rerank</div>
+            <div class="svc-name">Cohere Rerank v3</div>
+            <div class="svc-meta"><span>embeddings</span> <span>WRI 91</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">stability-sdxl</div>
+            <div class="svc-name">Stability SDXL 1.0</div>
+            <div class="svc-meta"><span>generation</span> <span>WRI 88</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">whisper-large</div>
+            <div class="svc-name">Whisper Large v3</div>
+            <div class="svc-meta"><span>audio</span> <span>WRI 93</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">eleven-turbo</div>
+            <div class="svc-name">ElevenLabs Turbo v2</div>
+            <div class="svc-meta"><span>audio</span> <span>WRI 89</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">perplexity-sonar</div>
+            <div class="svc-name">Perplexity Sonar</div>
+            <div class="svc-meta"><span>search</span> <span>WRI 92</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">aws-textract</div>
+            <div class="svc-name">AWS Textract</div>
+            <div class="svc-meta"><span>extraction</span> <span>WRI 95</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">google-vision</div>
+            <div class="svc-name">Google Cloud Vision</div>
+            <div class="svc-meta"><span>vision</span> <span>WRI 97</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">azure-speech</div>
+            <div class="svc-name">Azure Speech STT</div>
+            <div class="svc-meta"><span>audio</span> <span>WRI 94</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">serp-search</div>
+            <div class="svc-name">SERP Search API</div>
+            <div class="svc-meta"><span>search</span> <span>WRI 90</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">clearbit-enrich</div>
+            <div class="svc-name">Clearbit Enrichment</div>
+            <div class="svc-meta"><span>data</span> <span>WRI 87</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">hunter-find</div>
+            <div class="svc-name">Hunter.io Email Finder</div>
+            <div class="svc-meta"><span>identity</span> <span>WRI 85</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">ipapi</div>
+            <div class="svc-name">IP Geolocation</div>
+            <div class="svc-meta"><span>geo</span> <span>WRI 98</span></div>
+          </div>
+          <div class="svc-card">
+            <div class="svc-slug">twilio-sms</div>
+            <div class="svc-name">Twilio SMS Gateway</div>
+            <div class="svc-meta"><span>notifications</span> <span>WRI 96</span></div>
+          </div>
+        </div>
+
+        <div class="callout cn">
+          <p><strong>Browse the full catalog:</strong> The catalog grows weekly. Use <code>wayforth_services()</code> or visit <a href="https://wayforth.io/catalog" target="_blank">wayforth.io/catalog</a> for the live list.</p>
+        </div>
+      </section>
+
+      <!-- BYOK -->
+      <section id="byok">
+        <h2>BYOK — Bring Your Own Key</h2>
+        <p>For services where you already have an API subscription, BYOK lets you route calls through Wayforth's infrastructure (retry, failover, observability) while using your own upstream credentials. You are only charged the Wayforth gateway fee — not the underlying service cost.</p>
+
+        <h3>Setup</h3>
+        <div class="steps">
+          <div class="step">
+            <div class="step-body">
+              <h3>Register your key</h3>
+              <p>Go to <strong>Settings → BYOK</strong> in the dashboard, or use the API:</p>
+              <div class="code-block">
+                <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+                <pre><code class="language-bash">curl -X POST https://gateway.wayforth.io/v1/byok \
+  -H "x-wayforth-api-key: $WAYFORTH_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"service": "deepl", "upstream_key": "your-deepl-key"}'</code></pre>
+              </div>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-body">
+              <h3>Use as normal</h3>
+              <p>Once registered, your key is used automatically whenever you execute that service. No change to your call syntax:</p>
+              <div class="code-block">
+                <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+                <pre><code class="language-python"># Wayforth routes through your DeepL key transparently
+wayforth_execute(slug="deepl", text="Hello", target_lang="FR")</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h3>BYOK billing</h3>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Mode</th><th>Upstream cost</th><th>Wayforth fee</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Managed</strong> (default)</td><td>Included in credits</td><td>1 credit per call</td></tr>
+              <tr><td><strong>BYOK</strong></td><td>Billed to your upstream account</td><td>0.1 credits per call (routing only)</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout cw">
+          <p><strong>Security:</strong> Upstream keys are encrypted at rest with AES-256 and never logged in plaintext. You can revoke a BYOK key at any time from the dashboard.</p>
+        </div>
+      </section>
+
+      <!-- x402 -->
+      <section id="x402">
+        <h2>x402 native execution</h2>
+        <p>x402 is an open HTTP payment protocol that embeds micropayment settlement directly into the request lifecycle. With x402, you pay per call on-chain (USDC on Base) with no subscription or pre-funded credits needed.</p>
+
+        <h3>How it works</h3>
+        <ol>
+          <li>Your client sends a request to the gateway without an API key</li>
+          <li>The gateway returns <code>402 Payment Required</code> with a payment descriptor</li>
+          <li>Your x402-capable client signs and broadcasts a USDC microtransaction on Base</li>
+          <li>The gateway settles the transaction and proxies your request to the service</li>
+          <li>The response is returned along with a payment receipt</li>
+        </ol>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">from x402 import X402Client  # x402 Python client
+
+client = X402Client(wallet_key="0x...")
+
+# No Wayforth API key needed — payment is on-chain
+result = client.post(
+    "https://gateway.wayforth.io/v1/execute/deepl",
+    json={"text": "Hello", "target_lang": "ES"}
+)
+print(result.json()["translation"])  # Hola</code></pre>
+        </div>
+
+        <h3>x402 vs credits</h3>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th></th><th>Credits (Track A/B)</th><th>x402 (Track C)</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Auth required</strong></td><td>Yes (API key)</td><td>No</td></tr>
+              <tr><td><strong>Billing</strong></td><td>Monthly / top-up</td><td>Per call (on-chain)</td></tr>
+              <tr><td><strong>Settlement</strong></td><td>Stripe / USDC batch</td><td>USDC per request</td></tr>
+              <tr><td><strong>Latency overhead</strong></td><td>~0 ms</td><td>~50–80 ms (chain confirm)</td></tr>
+              <tr><td><strong>Best for</strong></td><td>Regular usage, budgets</td><td>Anonymous, ephemeral, agents</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout cn">
+          <p><strong>x402 is experimental.</strong> The protocol is in active development. Production use requires a compatible x402 client library. See <a href="payment-rails.html#track-c">Track C</a> for full details.</p>
+        </div>
+      </section>
+
+      <!-- Self-healing -->
+      <section id="self-healing">
+        <h2>Self-healing payments</h2>
+        <p>Wayforth's execution layer continuously monitors service health and automatically reroutes calls when a provider degrades — without any action from you.</p>
+
+        <h3>How it works</h3>
+        <ol>
+          <li><strong>Health monitoring:</strong> Each managed service is probed every 30 seconds. WRI score is updated continuously.</li>
+          <li><strong>Threshold detection:</strong> If a service's WRI drops below its tier's minimum or 3 consecutive calls fail, it enters degraded state.</li>
+          <li><strong>Automatic failover:</strong> Subsequent calls are rerouted to the next-best provider in the same category with the highest WRI score.</li>
+          <li><strong>Billing protection:</strong> Failed calls that were rerouted are not charged to your account. The retry is billed once success is confirmed.</li>
+          <li><strong>Recovery:</strong> When the original provider recovers (WRI returns above threshold), traffic is automatically shifted back.</li>
+        </ol>
+
+        <h3>Failover visibility</h3>
+        <p>Every response includes a <code>provider</code> field so you can see which upstream handled your call:</p>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-json">{
+  "translation": "Hola",
+  "provider": "google-translate",
+  "failover": true,
+  "original_provider": "deepl",
+  "billed_calls": 1
+}</code></pre>
+        </div>
+
+        <div class="callout ct">
+          <p><strong>Zero-downtime guarantee:</strong> For tier 3+ services, Wayforth guarantees at least one backup provider is always available. If no backup is available, you receive a <code>503</code> with <code>"failover_exhausted": true</code> and the call is not charged.</p>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
