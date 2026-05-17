@@ -33,7 +33,12 @@ _RESERVED_PREFIXES = {
     'system',
 }
 
-_BLOCKED_DOMAINS = {'wayforth.io'}
+_BLOCKED_DOMAINS = {
+    'wayforth.io',
+    'example.invalid',
+    'audit-research.io',
+    'example.com',
+}
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
