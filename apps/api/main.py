@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.6.12"
+VERSION = "0.6.13"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -1051,6 +1051,22 @@ async def get_chain_info():
 # ── Changelog RSS feed ────────────────────────────────────────────────────────
 
 _CHANGELOG_ENTRIES = [
+    {
+        "version": "0.6.13",
+        "title": "Gravity Prep",
+        "date": "Sun, 17 May 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.13",
+        "description": (
+            "Provider payout engine (1.5% fee / 98.5% provider split) with earnings endpoints. "
+            "Three new managed services: Firecrawl Scrape, Mistral AI, Google Gemini Flash. "
+            "POST /admin/purge-test-accounts with dry_run support. "
+            "Python SDK (wayforth-sdk 0.7.0). "
+            "TypeScript SDK (@wayforth/sdk 0.7.0). "
+            "Documentation site (packages/docs/). "
+            "Public status page (wayforth.io/status). "
+            "188 tests passing, 0 failures."
+        ),
+    },
     {
         "version": "0.6.12",
         "title": "Security Patch",

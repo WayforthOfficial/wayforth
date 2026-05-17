@@ -31,6 +31,9 @@ SERVICE_REQUIRED_PARAMS: dict[str, list[str]] = {
     "alphavantage": ["symbol"],
     "jina":         ["url"],
     "resend":       ["to", "subject", "html"],
+    "firecrawl":    ["url"],
+    "mistral":      ["messages"],
+    "gemini":       ["prompt"],
 }
 
 # Default values injected before validation; user values override these
@@ -43,6 +46,8 @@ SERVICE_DEFAULTS: dict[str, dict] = {
     "alphavantage": {"function": "GLOBAL_QUOTE"},
     "tavily":       {"max_results": 5},
     "brave":        {"count": 10},
+    "mistral":      {"model": "mistral-small-latest", "max_tokens": 1024},
+    "gemini":       {"model": "gemini-1.5-flash"},
 }
 
 # Catalog slug → SERVICE_CONFIGS key (handles naming mismatches from migration 033)
@@ -72,6 +77,12 @@ CATALOG_TO_MANAGED: dict[str, str] = {
     "stability_ai":     "stability",
     "stability":        "stability",
     "resend":           "resend",
+    "firecrawl":        "firecrawl",
+    "mistral":          "mistral",
+    "mistral_ai":       "mistral",
+    "gemini":           "gemini",
+    "gemini_flash":     "gemini",
+    "google_gemini":    "gemini",
 }
 
 # One-line hints shown in 422 missing_param errors
@@ -218,6 +229,9 @@ MANAGED_TO_CATALOG: dict[str, str] = {
     "elevenlabs":  "elevenlabs",
     "stability":   "stability_ai",
     "resend":      "resend",
+    "firecrawl":   "firecrawl",
+    "mistral":     "mistral_ai",
+    "gemini":      "gemini_flash",
 }
 
 
