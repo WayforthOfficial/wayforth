@@ -80,6 +80,72 @@ async def _cleanup_anon_searches_loop(app: "FastAPI"):
             logger.info(f"Cleaned {len(stale)} stale anon search entries")
 
 
+async def _cleanup_pentest_accounts_loop():
+    """Delete pentest/test accounts every 24 h.
+
+    Targets accounts that match known pentest patterns AND have never been
+    active (api_keys.last_used_at IS NULL) AND were created more than 1 h
+    ago (avoids racing legitimate registrations in the instant after sign-up).
+    """
+    _PENTEST_KEEP = [
+        'dorassulin1@gmail.com', 'assulindor@gmail.com',
+        'support@wayforth.io', 'demo_free@wayforth.io',
+        'demo_starter@wayforth.io', 'demo_growth@wayforth.io',
+        'demo_pro@wayforth.io', 'demo_provider@wayforth.io',
+    ]
+    _CHILD_TABLES = [
+        'agent_memory', 'agent_identities', 'x402_agent_identities',
+        'x402_payment_receipts', 'usdc_payments', 'package_purchases',
+        'wri_alerts', 'service_favorites', 'referrals', 'org_members',
+        'user_service_keys', 'search_analytics', 'credit_transactions',
+        'api_keys', 'user_credits',
+    ]
+    while True:
+        await asyncio.sleep(86_400)  # 24 h
+        pool = getattr(app.state, "pool", None)
+        if not pool:
+            continue
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT u.id FROM users u
+                    LEFT JOIN api_keys k ON k.user_id = u.id
+                    WHERE (
+                        u.email LIKE 'ratelimit-test-%'
+                        OR u.email LIKE 'audit-%@audit-research.io'
+                        OR u.email IN (
+                            'victim@example.com','some-other-email@example.com',
+                            'founders@wayforth.io','legal@wayforth.io',
+                            'info@wayforth.io','dev@wayforth.io',
+                            'team@wayforth.io','test@test.com'
+                        )
+                    )
+                    AND u.email != ALL($1::text[])
+                    AND u.created_at < NOW() - INTERVAL '1 hour'
+                    AND (k.last_used_at IS NULL OR k.id IS NULL)
+                    """,
+                    _PENTEST_KEEP,
+                )
+                if not rows:
+                    continue
+                ids = [r["id"] for r in rows]
+                async with conn.transaction():
+                    for tbl in _CHILD_TABLES:
+                        exists = await conn.fetchval(
+                            "SELECT 1 FROM information_schema.columns"
+                            " WHERE table_name=$1 AND column_name='user_id'", tbl
+                        )
+                        if exists:
+                            await conn.execute(
+                                f"DELETE FROM {tbl} WHERE user_id = ANY($1)", ids  # noqa: S608
+                            )
+                    await conn.execute("DELETE FROM users WHERE id = ANY($1)", ids)
+                logger.info(f"Pentest cleanup: deleted {len(ids)} stale test accounts")
+        except Exception as exc:
+            logger.warning(f"Pentest cleanup error: {exc}")
+
+
 # Probe payloads for each probeable managed service (skip resend, stability, assemblyai, elevenlabs)
 _PROBE_PARAMS: dict[str, dict] = {
     "groq":        {"messages": [{"role": "user", "content": "Hi"}]},
@@ -608,6 +674,7 @@ async def lifespan(app: FastAPI):
     else:
         print("STARTUP: pool created and migrations complete", flush=True)
     cleanup_task = asyncio.create_task(_cleanup_anon_searches_loop(app))
+    pentest_cleanup_task = asyncio.create_task(_cleanup_pentest_accounts_loop())
     watcher_task = asyncio.create_task(_usdc_payment_watcher())
     renewal_task = asyncio.create_task(_usdc_renewal_reminder())
     reset_task = asyncio.create_task(_monthly_topup_reset())
@@ -616,6 +683,7 @@ async def lifespan(app: FastAPI):
     _get_redis()  # eagerly init so the rate-limiter log line appears at startup
     yield
     cleanup_task.cancel()
+    pentest_cleanup_task.cancel()
     watcher_task.cancel()
     renewal_task.cancel()
     reset_task.cancel()
