@@ -683,3 +683,37 @@ async def _monthly_topup_reset():
                     ))
         except Exception as _e:
             logger.error("_monthly_topup_reset error: %s", _e)
+
+
+async def _maybe_grant_founding_bonus(db, user_id: str) -> bool:
+    """Grant 500 founding-member bonus credits on a user's first paid invoice.
+
+    Safe to call after any payment; no-ops if already granted or not a founding member.
+    Returns True if the bonus was granted this call.
+    """
+    user = await db.fetchrow(
+        "SELECT founding_member, founding_bonus_granted_at FROM users WHERE id = $1::uuid",
+        user_id,
+    )
+    if not user or not user["founding_member"] or user["founding_bonus_granted_at"] is not None:
+        return False
+
+    async with db.transaction():
+        await db.execute("""
+            UPDATE user_credits
+            SET credits_balance    = credits_balance    + 500,
+                lifetime_credits   = lifetime_credits   + 500
+            WHERE user_id = $1::uuid
+        """, user_id)
+        await db.execute(
+            "UPDATE users SET founding_bonus_granted_at = NOW() WHERE id = $1::uuid",
+            user_id,
+        )
+
+    asyncio.create_task(_dispatch_webhooks(user_id, "wayf.founding_bonus_granted", {
+        "event": "wayf.founding_bonus_granted",
+        "bonus_credits": 500,
+        "user_id": user_id,
+    }))
+    logger.info("founding_bonus_granted user_id=%s", user_id)
+    return True
