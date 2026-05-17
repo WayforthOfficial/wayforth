@@ -740,6 +740,95 @@ async def provider_agents(request: Request, db=Depends(get_db)):
     }
 
 
+# ── Provider earnings ────────────────────────────────────────────────────────
+
+@router.get("/provider/earnings", tags=["Provider"])
+@limiter.limit("30/minute")
+async def provider_earnings(request: Request, db=Depends(get_db)):
+    """Current-month earnings with 1.5% platform fee / 98.5% provider split."""
+    provider = await _get_provider(request, db)
+    svc = await _get_provider_service(db, provider["provider_id"])
+    if not svc:
+        raise HTTPException(status_code=404, detail={"error": "no_service_registered"})
+
+    slug = svc["service_slug"]
+    pricing_row = await db.fetchrow(
+        "SELECT pricing_usdc FROM services WHERE slug = $1 LIMIT 1", slug
+    )
+    price_per_call = float(pricing_row["pricing_usdc"] or 0) if pricing_row else 0.0
+
+    calls = await db.fetchval("""
+        SELECT COUNT(*) FROM credit_transactions
+        WHERE service_id = $1
+          AND type IN ('execution', 'cross_rail', 'usage')
+          AND created_at >= date_trunc('month', NOW())
+    """, slug) or 0
+
+    gross = round(float(calls) * price_per_call, 6)
+    fee   = round(gross * 0.015, 6)
+    net   = round(gross * 0.985, 6)
+
+    period_start = datetime.now(timezone.utc).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+
+    return {
+        "period_start":       period_start.isoformat(),
+        "service_slug":       slug,
+        "calls_count":        int(calls),
+        "price_per_call_usdc": price_per_call,
+        "gross_revenue_usdc": gross,
+        "platform_fee_usdc":  fee,
+        "net_payout_usdc":    net,
+        "fee_rate":           0.015,
+    }
+
+
+@router.get("/provider/earnings/history", tags=["Provider"])
+@limiter.limit("30/minute")
+async def provider_earnings_history(request: Request, db=Depends(get_db)):
+    """Monthly earnings history for the past 6 months."""
+    provider = await _get_provider(request, db)
+    svc = await _get_provider_service(db, provider["provider_id"])
+    if not svc:
+        raise HTTPException(status_code=404, detail={"error": "no_service_registered"})
+
+    slug = svc["service_slug"]
+    pricing_row = await db.fetchrow(
+        "SELECT pricing_usdc FROM services WHERE slug = $1 LIMIT 1", slug
+    )
+    price_per_call = float(pricing_row["pricing_usdc"] or 0) if pricing_row else 0.0
+
+    rows = await db.fetch("""
+        SELECT
+            date_trunc('month', created_at)::date AS month,
+            COUNT(*) AS calls
+        FROM credit_transactions
+        WHERE service_id = $1
+          AND type IN ('execution', 'cross_rail', 'usage')
+          AND created_at >= date_trunc('month', NOW()) - INTERVAL '5 months'
+        GROUP BY 1
+        ORDER BY 1 DESC
+    """, slug)
+
+    history = []
+    for row in rows:
+        calls = int(row["calls"] or 0)
+        gross = round(calls * price_per_call, 6)
+        history.append({
+            "month":            str(row["month"]),
+            "calls_count":      calls,
+            "gross_revenue_usdc": gross,
+            "net_payout_usdc":  round(gross * 0.985, 6),
+        })
+
+    return {
+        "service_slug":        slug,
+        "price_per_call_usdc": price_per_call,
+        "history":             history,
+    }
+
+
 # ── Provider billing ──────────────────────────────────────────────────────────
 
 @router.post("/provider/billing/upgrade", tags=["Provider"])

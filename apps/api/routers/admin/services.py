@@ -557,3 +557,68 @@ async def catalog_probe(request: Request, db=Depends(get_db)):
         "results": results,
     }
 
+
+# ── Admin: pentest account purge ──────────────────────────────────────────────
+
+_PURGE_PROTECTED: frozenset = frozenset()
+
+_PURGE_CHILD_TABLES = [
+    ("credit_transactions", "user_id = ANY($1::uuid[])"),
+    ("api_keys",            "user_id = ANY($1::uuid[])"),
+    ("search_analytics",    "user_id = ANY($1::uuid[])"),
+]
+
+
+@router.post("/admin/purge-test-accounts")
+@limiter.limit("5/minute")
+async def purge_test_accounts(
+    request: Request,
+    key: str = "",
+    dry_run: bool = False,
+    db=Depends(get_db),
+):
+    """Purge inactive pentest accounts. Use ?dry_run=true to preview without deleting.
+    Accounts must match the pentest email pattern AND have never made an execution call."""
+    if not await _admin_ok(request, db, key):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    candidates = await db.fetch("""
+        SELECT u.id, u.email
+        FROM users u
+        WHERE u.email ILIKE '%pentest%'
+          AND NOT EXISTS (
+              SELECT 1 FROM credit_transactions ct
+              WHERE ct.user_id = u.id
+                AND ct.type = 'execution'
+          )
+    """)
+
+    eligible  = [r for r in candidates if r["email"] not in _PURGE_PROTECTED]
+    protected = [r for r in candidates if r["email"] in _PURGE_PROTECTED]
+
+    if dry_run or not eligible:
+        return {
+            "deleted":   len(eligible),
+            "protected": len(protected),
+            "dry_run":   dry_run,
+        }
+
+    user_ids = [r["id"] for r in eligible]
+
+    for table, where_clause in _PURGE_CHILD_TABLES:
+        table_exists = await db.fetchval(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = $1",
+            table,
+        )
+        if table_exists:
+            await db.execute(f"DELETE FROM {table} WHERE {where_clause}", user_ids)
+
+    await db.execute("DELETE FROM users WHERE id = ANY($1::uuid[])", user_ids)
+
+    return {
+        "deleted":   len(user_ids),
+        "protected": len(protected),
+        "dry_run":   False,
+    }
+
