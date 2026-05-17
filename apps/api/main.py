@@ -837,6 +837,11 @@ try:
 except Exception:
     pass  # static dir may not exist in all environments
 
+try:
+    app.mount("/docs", StaticFiles(directory="packages/docs", html=True), name="docs")
+except Exception:
+    pass  # packages/docs may not exist in all environments
+
 # ── Core health / system routes ───────────────────────────────────────────────
 
 _ROBOTS_TXT = """\
