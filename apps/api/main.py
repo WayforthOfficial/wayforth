@@ -533,6 +533,71 @@ async def lifespan(app: FastAPI):
                 WHERE slug = 'wayforth_labs_summarizer'
                    OR (endpoint_url ILIKE '%labs-production%' AND name ILIKE '%summarizer%')
             """)
+            # v0.6.12 — one-time deletion of pentest artifact accounts
+            await _mconn.execute("""
+                DELETE FROM agent_memory          WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM agent_identities      WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM x402_agent_identities WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM x402_payment_receipts WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM usdc_payments         WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM package_purchases     WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM wri_alerts            WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM service_favorites     WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM referrals             WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM org_members           WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM user_service_keys     WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM search_analytics      WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM credit_transactions   WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM api_keys              WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM user_credits          WHERE user_id IN (SELECT id FROM users WHERE (email LIKE 'ratelimit-test-%' OR email LIKE 'audit-%@audit-research.io' OR email IN ('victim@example.com','some-other-email@example.com','founders@wayforth.io','legal@wayforth.io','info@wayforth.io','dev@wayforth.io','team@wayforth.io','test@test.com')) AND email NOT IN ('dorassulin1@gmail.com','assulindor@gmail.com','support@wayforth.io','demo_free@wayforth.io','demo_starter@wayforth.io','demo_growth@wayforth.io','demo_pro@wayforth.io','demo_provider@wayforth.io'))
+            """)
+            await _mconn.execute("""
+                DELETE FROM users
+                WHERE (
+                    email LIKE 'ratelimit-test-%'
+                    OR email LIKE 'audit-%@audit-research.io'
+                    OR email IN (
+                        'victim@example.com','some-other-email@example.com',
+                        'founders@wayforth.io','legal@wayforth.io',
+                        'info@wayforth.io','dev@wayforth.io',
+                        'team@wayforth.io','test@test.com'
+                    )
+                )
+                AND email NOT IN (
+                    'dorassulin1@gmail.com','assulindor@gmail.com',
+                    'support@wayforth.io','demo_free@wayforth.io',
+                    'demo_starter@wayforth.io','demo_growth@wayforth.io',
+                    'demo_pro@wayforth.io','demo_provider@wayforth.io'
+                )
+            """)
     except Exception as e:
         import traceback
         print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
