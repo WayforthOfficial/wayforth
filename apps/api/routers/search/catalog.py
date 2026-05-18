@@ -221,15 +221,56 @@ async def service_count(request: Request, db=Depends(get_db)):
 @router.get("/sitemap.xml", include_in_schema=False)
 async def sitemap_xml(request: Request):
     """Public sitemap for wayforth.io — no auth required."""
+    _W = "https://wayforth.io"
+    _G = "https://gateway.wayforth.io"
+
+    _urls = [
+        # wayforth.io pages
+        (_W + "/",                  "1.0", "monthly"),
+        (_W + "/pricing",           "0.9", "weekly"),
+        (_W + "/quickstart",        "0.9", "weekly"),
+        (_W + "/leaderboard",       "0.9", "daily"),
+        (_W + "/faq",               "0.8", "monthly"),
+        (_W + "/changelog",         "0.8", "daily"),
+        (_W + "/roadmap",           "0.8", "monthly"),
+        (_W + "/status",            "0.8", "daily"),
+        (_W + "/about",             "0.6", "monthly"),
+        (_W + "/blog",              "0.6", "monthly"),
+        (_W + "/contact",           "0.6", "monthly"),
+        (_W + "/press",             "0.6", "monthly"),
+        (_W + "/integrity",         "0.6", "monthly"),
+        (_W + "/technology",        "0.6", "monthly"),
+        (_W + "/manifesto",         "0.6", "monthly"),
+        (_W + "/providers/register","0.6", "monthly"),
+        (_W + "/privacy",           "0.3", "monthly"),
+        (_W + "/terms",             "0.3", "monthly"),
+        (_W + "/acceptable-use",    "0.3", "monthly"),
+        (_W + "/risk",              "0.3", "monthly"),
+        (_W + "/compliance",        "0.3", "monthly"),
+        (_W + "/disclaimer",        "0.3", "monthly"),
+        (_W + "/cookies",           "0.3", "monthly"),
+        # gateway.wayforth.io pages
+        (_G + "/guide/",                    "0.9", "weekly"),
+        (_G + "/guide/search.html",         "0.6", "monthly"),
+        (_G + "/guide/execute.html",        "0.6", "monthly"),
+        (_G + "/guide/payment-rails.html",  "0.6", "monthly"),
+        (_G + "/guide/sdk.html",            "0.6", "monthly"),
+        (_G + "/guide/api.html",            "0.6", "monthly"),
+        (_G + "/docs",                      "0.6", "monthly"),
+    ]
+
+    rows = "\n".join(
+        f"  <url>\n"
+        f"    <loc>{loc}</loc>\n"
+        f"    <priority>{pri}</priority>\n"
+        f"    <changefreq>{freq}</changefreq>\n"
+        f"  </url>"
+        for loc, pri, freq in _urls
+    )
     content = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-        "  <url><loc>https://wayforth.io/</loc></url>\n"
-        "  <url><loc>https://wayforth.io/pricing</loc></url>\n"
-        "  <url><loc>https://gateway.wayforth.io/guide/</loc></url>\n"
-        "  <url><loc>https://wayforth.io/changelog</loc></url>\n"
-        "  <url><loc>https://wayforth.io/token</loc></url>\n"
-        "  <url><loc>https://wayforth.io/Wayforth_Whitepaper_v6.4.pdf</loc></url>\n"
+        + rows + "\n"
         "</urlset>"
     )
     return Response(content=content, media_type="application/xml")
