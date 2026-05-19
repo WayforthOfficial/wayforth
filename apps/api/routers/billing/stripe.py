@@ -50,6 +50,22 @@ STRIPE_PACKAGES = {
                 "price_id": os.environ.get("STRIPE_PRICE_GROWTH", "")},
 }
 
+# Annual plans: 10 months price (2 months free). Credits replenished monthly, not upfront.
+STRIPE_ANNUAL_PACKAGES = {
+    "builder_annual": {"price_cents": 9900,   "credits": 6_000,   "label": "Builder Annual",
+                       "price_id": os.environ.get("STRIPE_PRICE_BUILDER_ANNUAL", ""),
+                       "savings_usd": 45.0,  "base_plan": "builder"},
+    "starter_annual": {"price_cents": 29000,  "credits": 21_000,  "label": "Starter Annual",
+                       "price_id": os.environ.get("STRIPE_PRICE_STARTER_ANNUAL", ""),
+                       "savings_usd": 58.0,  "base_plan": "starter"},
+    "pro_annual":     {"price_cents": 99000,  "credits": 72_000,  "label": "Pro Annual",
+                       "price_id": os.environ.get("STRIPE_PRICE_PRO_ANNUAL", ""),
+                       "savings_usd": 198.0, "base_plan": "pro"},
+    "growth_annual":  {"price_cents": 299000, "credits": 240_000, "label": "Growth Annual",
+                       "price_id": os.environ.get("STRIPE_PRICE_GROWTH_ANNUAL", ""),
+                       "savings_usd": 598.0, "base_plan": "growth"},
+}
+
 # ── Models ────────────────────────────────────────────────────────────────────
 
 class SubmitRequest(BaseModel):
@@ -183,7 +199,6 @@ async def get_packages(request: Request):
     for key, pkg in PACKAGES.items():
         plan = PLANS.get(key, {})
         if pkg['price_usd'] is None:
-            # Custom-priced plans: include with descriptive fields instead of numeric price
             result.append({
                 "plan": key,
                 "label": pkg['label'],
@@ -199,7 +214,20 @@ async def get_packages(request: Request):
                 "calls_included": plan.get("calls_included", pkg['credits']),
                 "price_per_credit": round(pkg['price_usd'] / pkg['credits'], 8),
             })
-    return {"packages": result}
+
+    annual_options = [
+        {
+            "plan": key,
+            "label": pkg["label"],
+            "price_usd_annual": pkg["price_cents"] / 100,
+            "credits_per_month": pkg["credits"],
+            "savings_usd": pkg["savings_usd"],
+            "billing_cadence": "annual",
+        }
+        for key, pkg in STRIPE_ANNUAL_PACKAGES.items()
+    ]
+
+    return {"packages": result, "annual_options": annual_options}
 
 
 @router.post("/billing/checkout")
@@ -221,10 +249,13 @@ async def create_checkout(request: Request, db=Depends(get_db)):
     body = await request.json()
     package = body.get("package", "starter")
 
-    if package not in STRIPE_PACKAGES:
+    # Support annual packages (e.g. "pro_annual") alongside monthly ones
+    all_packages = {**STRIPE_PACKAGES, **STRIPE_ANNUAL_PACKAGES}
+    if package not in all_packages:
         raise HTTPException(status_code=400, detail="Invalid package")
 
-    pkg = STRIPE_PACKAGES[package]
+    pkg = all_packages[package]
+    billing_cadence = "annual" if package.endswith("_annual") else "monthly"
 
     # Mock mode: no real Stripe key configured or STRIPE_MOCK=true
     if STRIPE_MOCK:
@@ -285,12 +316,14 @@ async def create_checkout(request: Request, db=Depends(get_db)):
                         "user_id": str(key_record['user_id']),
                         "package": package,
                         "credits": str(pkg["credits"]),
+                        "billing_cadence": billing_cadence,
                     }
                 },
                 metadata={
                     "user_id": str(key_record['user_id']),
                     "package": package,
                     "credits": str(pkg["credits"]),
+                    "billing_cadence": billing_cadence,
                 },
             )
         else:
@@ -488,13 +521,13 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
             """, user_id, credits, new_balance,
                 f"Stripe purchase: {package} pack — {credits:,} credits added")
 
-            # Keep api_keys.tier in sync — this is the authoritative tier field
-            # used by rate limiting and feature gating.
+            # Keep api_keys.tier and billing_cadence in sync.
             _new_tier = package.split("_")[0] if package else None
+            _cadence = meta.get("billing_cadence", "monthly")
             if _new_tier in ("builder", "starter", "pro", "growth"):
                 await db.execute(
-                    "UPDATE api_keys SET tier = $1 WHERE user_id = $2::uuid",
-                    _new_tier, user_id,
+                    "UPDATE api_keys SET tier = $1, billing_cadence = $2 WHERE user_id = $3::uuid",
+                    _new_tier, _cadence, user_id,
                 )
 
         # Store subscription_id on the api_key if this was a subscription checkout

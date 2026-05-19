@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.6.13"
+VERSION = "0.6.14"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -55,7 +55,7 @@ from core.rate_limit import get_real_ip
 from core.credits import (
     PLANS, CREDITS_PER_CALL, ROUTING_FEE, STRIPE_PACKAGES,
     check_and_deduct_credits, compute_calls_remaining, _dispatch_webhooks,
-    _monthly_topup_reset, _webhook_retry_loop,
+    _monthly_topup_reset, _webhook_retry_loop, check_service_margins,
 )
 from core.db import get_db
 from core.rate_limit import limiter
@@ -212,6 +212,7 @@ async def lifespan(app: FastAPI):
     from core.auth import get_jwks, _jwks_cache
     from routers.billing import _usdc_payment_watcher, _usdc_renewal_reminder
 
+    check_service_margins()
     logger.info(f"Wayforth API starting, environment={ENVIRONMENT}")
     try:
         await asyncio.to_thread(get_jwks)
@@ -267,6 +268,10 @@ async def lifespan(app: FastAPI):
                 ALTER TABLE user_service_keys
                     ADD COLUMN IF NOT EXISTS endpoint_url TEXT,
                     ADD COLUMN IF NOT EXISTS default_method TEXT DEFAULT 'POST'
+            """)
+            await _mconn.execute("""
+                ALTER TABLE api_keys
+                    ADD COLUMN IF NOT EXISTS billing_cadence VARCHAR NOT NULL DEFAULT 'monthly'
             """)
             await _mconn.execute("""
                 INSERT INTO services (name, description, endpoint_url, category, coverage_tier, pricing_usdc, source, payment_protocol, x402_supported, metadata)
@@ -1064,6 +1069,20 @@ async def get_chain_info():
 # ── Changelog RSS feed ────────────────────────────────────────────────────────
 
 _CHANGELOG_ENTRIES = [
+    {
+        "version": "0.6.14",
+        "title": "Economics",
+        "date": "Mon, 19 May 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.6.14",
+        "description": (
+            "Stability AI credits: 45 → 65 (all services margin-positive at every tier). "
+            "Annual billing: 2 months free, monthly credit replenishment. "
+            "x402 fee model: markup on developer charge — providers receive 100% of their stated price. "
+            "Cross-rail abstraction: card→x402 uses Wayforth operational wallet; "
+            "USDC→managed routes via Circle CCTP. Rail is invisible to developers. "
+            "Startup margin alert if any managed service falls below $0.005/call at Growth tier."
+        ),
+    },
     {
         "version": "0.6.13",
         "title": "Gravity Prep",
