@@ -51,3 +51,5 @@ apps/api/ranker.py
 # Claude Code settings
 .claude/
 apps/**/.claude/
+test_results*.txt
+DECISIONS.md
