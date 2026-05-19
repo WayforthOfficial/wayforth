@@ -19,6 +19,7 @@
     "api"
   ],
   "license": "MIT",
+  "author": "Wayforth Technologies Inc.",
   "homepage": "https://wayforth.io",
   "repository": {
     "type": "git",

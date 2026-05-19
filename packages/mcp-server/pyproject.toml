@@ -4,6 +4,7 @@ version = "0.6.13"
 description = "MCP server for Wayforth — Intelligence. Search engine and payment rail for AI agents."
 readme = "README.md"
 license = {text = "MIT"}
+authors = [{name = "Wayforth Technologies Inc."}]
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
