@@ -160,6 +160,6 @@ Real API result + WayforthRank signal update
 
 Business Source License 1.1 (BSL 1.1)
 Converts to Apache 2.0 on April 25, 2030
-Licensor: Wayforth Inc.
+Licensor: Wayforth Technologies Inc.
 
 Smart contracts: [WayforthEscrow on Base Sepolia](https://sepolia.basescan.org/address/0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809)
