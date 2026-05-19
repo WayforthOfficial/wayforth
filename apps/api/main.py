@@ -590,7 +590,7 @@ uvx wayforth-mcp
 https://wayforth.io/contact
 """,
     version=VERSION,
-    contact={"name": "Wayforth", "url": "https://wayforth.io/contact"},
+    contact={"name": "Wayforth Technologies Inc.", "url": "https://wayforth.io/contact"},
     license_info={"name": "BSL 1.1", "url": "https://wayforth.io/license"},
     lifespan=lifespan,
 )
