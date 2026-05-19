@@ -106,6 +106,21 @@ _PLAN_ANNUAL_PRICE_ENV: dict[str, str] = {
 # Growth: $299/mo × 12 / (240_000 credits × 12) = $0.001246/credit net to Wayforth.
 _GROWTH_CREDIT_VALUE_USD = 0.001246
 
+# x402 fee divisor: developer_charge = provider_price / _X402_FEE_DIVISOR
+# Provider receives their stated price in full; Wayforth keeps the difference.
+_X402_FEE_DIVISOR = 1.0 - ROUTING_FEE  # 0.985
+
+
+def x402_developer_charge(provider_price: float) -> float:
+    """Return the amount to charge the developer for an x402 call.
+
+    Provider receives provider_price exactly. Developer pays
+    provider_price / 0.985 (≈ provider_price × 1.015233).
+    Wayforth keeps the difference as the 1.5% routing fee.
+    """
+    return round(provider_price / _X402_FEE_DIVISOR, 8)
+
+
 CREDIT_COSTS = {
     "search": 1,
     "query": 2,
