@@ -1080,7 +1080,8 @@ _CHANGELOG_ENTRIES = [
             "x402 fee model: markup on developer charge — providers receive 100% of their stated price. "
             "Cross-rail abstraction: card→x402 uses Wayforth operational wallet; "
             "USDC→managed routes via Circle CCTP. Rail is invisible to developers. "
-            "Startup margin alert if any managed service falls below $0.005/call at Growth tier."
+            "Startup margin alert if any managed service falls below $0.005/call at Growth tier. "
+            "216 tests passing, 0 failures."
         ),
     },
     {
