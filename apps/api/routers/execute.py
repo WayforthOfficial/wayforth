@@ -563,10 +563,17 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
         service_id,
     )
 
-    # Calculate routing fee (1.5% flat, all tracks)
+    # Rail abstraction layer — developer's payment method is decoupled from the
+    # provider's accepted settlement rail. Credits are always the developer's
+    # unit of account; the underlying rail (card, USDC, CCTP) is Wayforth's concern.
+    #
+    # x402 fee model: providers receive 100% of their stated price.
+    # Developer charge = provider_price / (1 − ROUTING_FEE) ≈ provider_price × 1.015233.
+    # Wayforth keeps the difference as the routing fee.
     routing_fee_pct = ROUTING_FEE
-    routing_fee_usd = round(amount_usd * routing_fee_pct, 8)
-    service_receives_usd = round(amount_usd - routing_fee_usd, 8)
+    # amount_usd is the provider's stated price; fee is a markup on top, not a deduction.
+    service_receives_usd = amount_usd
+    routing_fee_usd = round(amount_usd / (1 - routing_fee_pct) - amount_usd, 8)
     wayforth_revenue = routing_fee_usd
 
     service_name = service["name"] if service else service_id

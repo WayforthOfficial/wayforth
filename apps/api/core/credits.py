@@ -87,6 +87,25 @@ STRIPE_PACKAGES = {
                 "price_id": os.environ.get("STRIPE_PRICE_GROWTH", "")},
 }
 
+# Annual plans: 10 months price (2 months free). Credits replenished monthly.
+PLAN_ANNUAL_DETAILS: dict[str, dict] = {
+    "builder": {"price_usd_annual": 99.0,    "credits": 6_000,   "savings_usd": 45.0},
+    "starter": {"price_usd_annual": 290.0,   "credits": 21_000,  "savings_usd": 58.0},
+    "pro":     {"price_usd_annual": 990.0,   "credits": 72_000,  "savings_usd": 198.0},
+    "growth":  {"price_usd_annual": 2_990.0, "credits": 240_000, "savings_usd": 598.0},
+}
+
+_PLAN_ANNUAL_PRICE_ENV: dict[str, str] = {
+    "builder": "STRIPE_PRICE_BUILDER_ANNUAL",
+    "starter": "STRIPE_PRICE_STARTER_ANNUAL",
+    "pro":     "STRIPE_PRICE_PRO_ANNUAL",
+    "growth":  "STRIPE_PRICE_GROWTH_ANNUAL",
+}
+
+# Growth-tier credit value (binding constraint for margin alerts).
+# Growth: $299/mo × 12 / (240_000 credits × 12) = $0.001246/credit net to Wayforth.
+_GROWTH_CREDIT_VALUE_USD = 0.001246
+
 CREDIT_COSTS = {
     "search": 1,
     "query": 2,
@@ -95,6 +114,20 @@ CREDIT_COSTS = {
     "wri_history": 1,
     "payment_routing": 100,  # per $1 routed
 }
+
+
+def check_service_margins() -> None:
+    """Warn at startup if any managed service margin falls below $0.005 at Growth tier."""
+    from services.managed import SERVICE_CONFIGS
+    for slug, cfg in SERVICE_CONFIGS.items():
+        credits = cfg.get("credits", 1)
+        api_cost = cfg.get("real_cost_per_call", 0.0)
+        margin = credits * _GROWTH_CREDIT_VALUE_USD - api_cost
+        if margin < 0.005:
+            logger.warning(
+                "MARGIN ALERT: %s margin=$%.4f at Growth tier (credits=%d, api_cost=$%.4f)",
+                slug, margin, credits, api_cost,
+            )
 
 
 async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
