@@ -84,3 +84,24 @@ export interface TiersResponse {
     features: string[];
   }>;
 }
+
+export interface ExecuteResult {
+  slug: string;
+  result: unknown;
+  credits_used: number;
+  [key: string]: unknown;
+}
+
+export interface RunResult {
+  query: string;
+  matched_service: string;
+  result: unknown;
+  credits_used: number;
+  [key: string]: unknown;
+}
+
+export interface BalanceResult {
+  credits_remaining: number;
+  tier: string;
+  billing_period_start: string;
+}
