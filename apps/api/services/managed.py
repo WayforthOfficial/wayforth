@@ -27,8 +27,8 @@ SERVICE_CONFIGS = {
     # Audio / Voice
     "assemblyai":  {"key_var": "ASSEMBLYAI_API_KEY",    "credits": 20,  "real_cost_per_call": 0.012},
     "elevenlabs":  {"key_var": "ELEVENLABS_API_KEY",    "credits": 200, "real_cost_per_call": 0.150},
-    # Image — stability credits: 45 for core (default), 100 for ultra (resolved at call time)
-    "stability":   {"key_var": "STABILITY_API_KEY",     "credits": 45,  "real_cost_per_call": 0.080},
+    # Image — stability credits: 65 for core (default), 100 for ultra (resolved at call time)
+    "stability":   {"key_var": "STABILITY_API_KEY",     "credits": 65,  "real_cost_per_call": 0.065},
     # Email
     "resend":      {"key_var": "RESEND_API_KEY",        "credits": 3,   "real_cost_per_call": 0.001},
     # Web scraping
