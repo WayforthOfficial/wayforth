@@ -41,6 +41,103 @@ _UPGRADE_CTA_HTML = """
 </div>
 """
 
+# Plain-text equivalents of the HTML block variables above.
+# send_email() swaps these in automatically when rendering the text version
+# so callers never need to pass separate text/HTML pairs.
+_FOUNDING_NOTE_TEXT = (
+    "FOUNDING MEMBER: You joined before August 31, 2026 and qualify for a "
+    "500-credit founding member bonus. It is credited automatically on your "
+    "first paid invoice — no action needed.\n"
+)
+_UPGRADE_CTA_TEXT = (
+    "Upgrade your plan: https://wayforth.io/billing\n"
+    "Plans from $12/mo · cancel anytime\n"
+)
+
+_HTML_TO_TEXT: dict[str, str] = {
+    _FOUNDING_NOTE_HTML: _FOUNDING_NOTE_TEXT,
+    _UPGRADE_CTA_HTML: _UPGRADE_CTA_TEXT,
+}
+
+# Plain-text body per template. Uses the same {{variable}} substitution as HTML.
+_PLAIN_TEXTS: dict[str, str] = {
+    "welcome": """\
+Welcome to Wayforth.
+
+You're on the free tier with {{credits}} credits to get started.
+
+YOUR BALANCE: {{credits}} credits
+Free tier · resets monthly
+
+QUICK START:
+  {{quick_start}}
+
+{{founding_note}}
+Read the quickstart guide: https://wayforth.io/quickstart
+
+---
+Wayforth Technologies Inc. · wayforth.io · support@wayforth.io
+""",
+    "subscription_confirmed": """\
+Wayforth {{plan_name}} plan confirmed.
+
+SUBSCRIPTION ACTIVE
+Plan:    {{plan_name}}
+Amount:  {{amount}} · renews {{renewal_date}}
+
+CREDITS ADDED: +{{credits_added}}
+Credits reset monthly on your renewal date.
+
+NEXT RENEWAL: {{renewal_date}}
+
+View your dashboard: https://wayforth.io/dashboard
+
+---
+Wayforth Technologies Inc. · wayforth.io · support@wayforth.io
+""",
+    "low_credits": """\
+Your Wayforth credits are running low.
+
+CREDITS RUNNING LOW
+{{credits_remaining}} credits left — {{percent_remaining}} remaining · resets {{renewal_date}}
+
+Your Wayforth credits are at {{percent_remaining}}. Once exhausted, API calls
+will return 402 until your next renewal or top-up.
+
+{{upgrade_cta}}
+View usage and top up: https://wayforth.io/dashboard
+
+---
+Wayforth Technologies Inc. · wayforth.io · support@wayforth.io
+""",
+    "founding_member": """\
+Founding member bonus: +{{bonus_credits}} credits added.
+
+FOUNDING MEMBER BONUS
++{{bonus_credits}} credits · one-time bonus
+
+Thank you for being an early Wayforth supporter.
+
+You joined before {{cutoff_date}} and qualify for our founding member bonus.
+{{bonus_credits}} credits have been added to your balance on your first paid
+invoice — no action needed.
+
+This is a one-time bonus. It does not affect your monthly credit renewal.
+
+View your balance: https://wayforth.io/dashboard
+
+---
+Wayforth Technologies Inc. · wayforth.io · support@wayforth.io
+""",
+}
+
+# Sent with every transactional email to help Gmail route to Primary, not Promotions.
+_TRANSACTIONAL_HEADERS: dict[str, str] = {
+    "X-Priority": "1",
+    "Precedence": "transactional",
+    "X-Mailer": "Wayforth",
+}
+
 
 def _load_template(name: str) -> str:
     return (_TEMPLATE_DIR / f"{name}.html").read_text(encoding="utf-8")
@@ -74,6 +171,11 @@ async def send_email(to: str, template: str, data: dict[str, str]) -> str:
     html = _render(_load_template(template), data)
     subject = _render(_SUBJECTS.get(template, "Wayforth"), data)
 
+    # Build plain-text version; swap HTML block variables for their text equivalents
+    # so callers don't need to maintain parallel text/HTML data dicts.
+    text_data = {k: _HTML_TO_TEXT.get(v, v) for k, v in data.items()}
+    plain = _render(_PLAIN_TEXTS.get(template, subject), text_data)
+
     import resend as _resend  # imported lazily so tests can patch before import
 
     _resend.api_key = api_key
@@ -85,6 +187,8 @@ async def send_email(to: str, template: str, data: dict[str, str]) -> str:
             "to": to,
             "subject": subject,
             "html": html,
+            "text": plain,
+            "headers": _TRANSACTIONAL_HEADERS,
         })
 
     result = await asyncio.to_thread(_send)
