@@ -3,9 +3,9 @@
 [![PyPI](https://img.shields.io/pypi/v/wayforth-mcp)](https://pypi.org/project/wayforth-mcp/)
 [![smithery badge](https://smithery.ai/badge/support-9ef4/Wayforth)](https://smithery.ai/servers/support-9ef4/Wayforth)
 
-**v0.6.11 — Security Hardening** · Search engine and payment rail for AI agents.
+**v0.6.14** · Search engine and payment rail for AI agents.
 
-3,000+ verified API endpoints across 19 categories. Pay via card or crypto. One MCP install.
+3,271 verified API endpoints across 19 categories. Pay via card or crypto. One MCP install.
 
 ```bash
 uvx wayforth-mcp
@@ -39,17 +39,17 @@ POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 
 ## Live Now
 
-- **3,000+ verified API endpoints** across 19 categories
+- **3,271 verified API endpoints** across 19 categories
 - **800+ Tier 2 verified endpoints** — probed and confirmed reachable
 - **250+ x402-native services** — pay-per-call via HTTP 402 protocol
-- **13 managed services** — Groq, Together AI, DeepL, Brave Search, OpenWeatherMap, NewsAPI, Serper, Tavily, Jina AI, Alpha Vantage, AssemblyAI, Stability AI, Resend
+- **18 managed services (13 active with API keys)** — Groq, Together AI, DeepL, Brave Search, Perplexity, OpenWeatherMap, NewsAPI, Serper, Tavily, Jina AI, Alpha Vantage, AssemblyAI, Stability AI, Resend, Firecrawl, Mistral, Gemini, ElevenLabs
 - **WayforthQL v1.1** — filter by latency, region, payment rail, price, tier, and protocol with pagination
 - **WayforthRank** — payment-signal weighted service scoring
 - **Live service health** — response time and reliability tracked per service, affects ranking
 - **BYOK** — bring your own API key for any service, AES-128 encrypted
 - **Triple-track payments** — card, USDC on Base, x402 protocol
 - **3 provisional patents** filed
-- **120/120 end-to-end tests** passing
+- **216 tests** passing
 
 ## Install
 
@@ -68,14 +68,16 @@ Get your API key: [wayforth.io/signup](https://wayforth.io/signup)
 
 ## Plans
 
-| Plan | Calls/month | Price |
-|------|-------------|-------|
-| Free | 100 | $0 |
-| Builder | 1,000 | $12/mo |
-| Starter | 3,500 | $29/mo |
-| Pro | 12,000 | $99/mo |
-| Growth | 40,000 | $299/mo |
-| Enterprise | 100,000 | Custom |
+| Plan | Credits/month | Monthly | Annual (save) |
+|------|--------------|---------|---------------|
+| Free | 100 | $0 | — |
+| Builder | 1,000 | $12/mo | $99/yr (save $45) |
+| Starter | 3,500 | $29/mo | $290/yr (save $58) |
+| Pro | 12,000 | $99/mo | $990/yr (save $198) |
+| Growth | 40,000 | $299/mo | $2,990/yr (save $598) |
+| Enterprise | 100,000 | Custom | Custom |
+
+Annual plans replenish credits monthly (same monthly amount); 2 months free vs paying monthly.
 
 ## Payment Tracks
 
@@ -87,23 +89,28 @@ Get your API key: [wayforth.io/signup](https://wayforth.io/signup)
 
 All tracks earn Wayforth the same 1.5% routing fee.
 
-## Execution — 13 Managed Services
+## Execution — 18 Managed Services
 
 | Service | Category | Credits/Call |
 |---------|----------|-------------|
 | Groq | LLM inference | 3 |
-| Together AI | LLM inference | 3 |
-| DeepL | Translation | 1 |
-| OpenWeatherMap | Weather data | 1 |
-| NewsAPI | News search | 1 |
-| Serper | Google search | 1 |
-| Resend | Email | 2 |
-| AssemblyAI | Speech-to-text | 5 |
-| Stability AI | Image generation | 10 |
-| Tavily | AI web search | 3 |
-| Jina AI | URL to markdown | 2 |
-| Alpha Vantage | Stock data | 2 |
-| ElevenLabs | Text-to-speech | 5 |
+| Together AI | LLM inference | 4 |
+| Mistral | LLM inference | 3 |
+| Gemini | LLM inference | 3 |
+| Perplexity | AI search | 10 |
+| DeepL | Translation | 20 |
+| Serper | Google search | 3 |
+| Brave Search | Web search | 5 |
+| Tavily | AI web search | 4 |
+| Jina AI | URL to markdown | 4 |
+| Firecrawl | Web scraping | 5 |
+| OpenWeatherMap | Weather data | 2 |
+| NewsAPI | News search | 5 |
+| Alpha Vantage | Stock data | 4 |
+| AssemblyAI | Speech-to-text | 20 |
+| ElevenLabs | Text-to-speech | 200 |
+| Stability AI | Image generation | 65 |
+| Resend | Email | 3 |
 
 ## Key Endpoints
 
