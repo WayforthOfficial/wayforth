@@ -151,11 +151,16 @@ async def provider_login(request: Request, db=Depends(get_db)):
     password = body.get("password") or ""
 
     provider = await db.fetchrow(
-        "SELECT id, company_name, email, password_hash, tier, verified FROM providers WHERE email = $1",
+        "SELECT id, company_name, email, password_hash, tier, verified, mfa_enabled FROM providers WHERE email = $1",
         email,
     )
     if not provider or not bcrypt.checkpw(password.encode(), provider["password_hash"].encode()):
         raise HTTPException(status_code=401, detail={"error": "invalid_credentials"})
+
+    if provider.get("mfa_enabled"):
+        from routers.mfa import issue_mfa_challenge
+        challenge = await issue_mfa_challenge(db, "provider", provider["id"])
+        return {"mfa_required": True, "mfa_challenge": challenge, "token": None}
 
     token = "pvdr_" + secrets.token_hex(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
