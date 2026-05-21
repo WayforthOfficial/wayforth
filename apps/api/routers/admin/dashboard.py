@@ -74,6 +74,11 @@ async def admin_login(request: Request, db=Depends(get_db)):
     if not bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
+    if user.get("mfa_enabled"):
+        from routers.mfa import issue_mfa_challenge
+        challenge = await issue_mfa_challenge(db, "admin", user["id"])
+        return {"mfa_required": True, "mfa_challenge": challenge, "token": None}
+
     raw_token = secrets.token_urlsafe(48)
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=12)

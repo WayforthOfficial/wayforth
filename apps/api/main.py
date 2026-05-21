@@ -775,6 +775,7 @@ from routers import (
     search, execute, billing, webhooks, provider, admin, x402, auth, agent
 )
 from routers.org import router as org_router
+from routers.mfa import router as mfa_router
 
 app.include_router(search.router)
 app.include_router(execute.router)
@@ -786,6 +787,7 @@ app.include_router(x402.router)
 app.include_router(auth.router)
 app.include_router(agent.router)
 app.include_router(org_router)
+app.include_router(mfa_router)
 
 
 # ── OpenAPI customisation (security scheme + description) ─────────────────────
