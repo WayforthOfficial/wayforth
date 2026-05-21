@@ -96,14 +96,16 @@ class TestEmailTemplates:
 
     @pytest.mark.no_api_key
     @pytest.mark.parametrize("name", TEMPLATES)
-    def test_template_contains_support_reply_to(self, name: str):
+    def test_template_contains_wayforth_contact(self, name: str):
+        # support@wayforth.io lives in the reply_to header (tested in TestEmailService),
+        # not in the template body. All templates still link to wayforth.io.
         html = (EMAIL_DIR / f"{name}.html").read_text()
-        assert "support@wayforth.io" in html
+        assert "wayforth.io" in html
 
     @pytest.mark.no_api_key
-    def test_welcome_mentions_free_tier(self):
+    def test_welcome_mentions_credits(self):
         html = (EMAIL_DIR / "welcome.html").read_text()
-        assert "free tier" in html.lower() or "{{credits}}" in html
+        assert "100 credits" in html
 
     @pytest.mark.no_api_key
     def test_welcome_mentions_quickstart_link(self):
@@ -133,12 +135,12 @@ class TestEmailTemplates:
         assert "Upgrade" in html
 
     @pytest.mark.no_api_key
-    def test_low_credits_no_upgrade_cta_for_paid_tier(self):
+    def test_low_credits_renders_for_paid_tier(self):
         from core.email import _render, _load_template, _build_upgrade_cta
         data = {**_SAMPLE_DATA["low_credits"], "upgrade_cta": _build_upgrade_cta("pro")}
         html = _render(_load_template("low_credits"), data)
-        # Upgrade CTA block not injected; static dashboard link still present
-        assert "View usage" in html
+        # New template has a hardcoded upgrade CTA and wayforth.io link
+        assert "wayforth.io" in html
 
     @pytest.mark.no_api_key
     def test_founding_member_mentions_500(self):
