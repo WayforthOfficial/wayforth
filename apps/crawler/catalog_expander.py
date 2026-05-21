@@ -28,7 +28,13 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("catalog_expander")
 
-DB_URL = os.environ.get("DATABASE_URL", "")
+# DATABASE_PUBLIC_URL (externally routable) is preferred when running outside
+# Railway's private network. DATABASE_URL uses postgres.railway.internal which
+# only resolves from within Railway. Both are set on the crawler service.
+DB_URL = (
+    os.environ.get("DATABASE_PUBLIC_URL")
+    or os.environ.get("DATABASE_URL", "")
+)
 _ASYNCPG_URL = DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 _INFERENCE_KW = frozenset({
