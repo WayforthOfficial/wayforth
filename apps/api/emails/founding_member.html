@@ -1,46 +1,53 @@
-<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#0F172A;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
-<div style="max-width:600px;margin:0 auto;padding:40px 24px">
-
-  <!-- Header -->
-  <p style="margin:0 0 4px;font-size:22px;font-weight:700;color:#4F46E5">Wayforth</p>
-  <p style="margin:0 0 36px;font-size:13px;color:#64748B">Search engine and payment rail for AI agents</p>
-
-  <!-- Bonus card -->
-  <div style="background:#1E293B;border-radius:10px;padding:20px;margin:0 0 20px;border-left:4px solid #8B5CF6">
-    <p style="margin:0 0 4px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#8B5CF6">FOUNDING MEMBER BONUS</p>
-    <p style="margin:0;font-size:28px;font-weight:700;color:#E2E8F0">+{{bonus_credits}} credits added</p>
-    <p style="margin:6px 0 0;font-size:13px;color:#94A3B8">One-time bonus &middot; credited to your account now</p>
-  </div>
-
-  <!-- Thank you message -->
-  <p style="margin:0 0 16px;font-size:15px;color:#E2E8F0">
-    Thank you for being an early Wayforth supporter.
-  </p>
-  <p style="margin:0 0 24px;font-size:14px;color:#94A3B8">
-    You joined before {{cutoff_date}} and qualify for our founding member bonus. {{bonus_credits}} credits have been added to your balance on your first paid invoice — no action needed.
-  </p>
-  <p style="margin:0 0 28px;font-size:14px;color:#94A3B8">
-    This is a one-time bonus. It does not affect your monthly credit renewal.
-  </p>
-
-  <!-- CTA -->
-  <p style="margin:0 0 12px;text-align:center">
-    <a href="https://wayforth.io/dashboard"
-       style="display:inline-block;background:#4F46E5;color:#fff;padding:13px 32px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">
-      View your balance &rarr;
-    </a>
-  </p>
-
-  <!-- Footer -->
-  <p style="margin:36px 0 0;font-size:12px;color:#475569;text-align:center">
-    Wayforth Technologies Inc. &middot;
-    <a href="https://wayforth.io" style="color:#4F46E5;text-decoration:none">wayforth.io</a> &middot;
-    <a href="mailto:support@wayforth.io" style="color:#4F46E5;text-decoration:none">support@wayforth.io</a>
-  </p>
-
-</div>
-</body>
-</html>
+<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<style>
+  body{margin:0;padding:0;background:#0a0f1a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif}
+  .wrap{background:#0a0f1a;padding:40px 0}
+  .email{max-width:580px;margin:0 auto;border-radius:16px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}
+  .hd{background:#07090f;background-image:linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);background-size:40px 40px;padding:36px 48px 32px;text-align:center}
+  .logo-wrap{display:inline-flex;align-items:center;gap:10px;margin-bottom:14px}
+  .logo-pill{background:#fff;border-radius:8px;padding:6px 8px;display:inline-flex;align-items:center;justify-content:center}
+  .logo-pill img{height:22px;display:block}
+  .logo-name{font-size:18px;font-weight:700;color:#fff;letter-spacing:-.3px}
+  .tagline{font-size:11px;color:rgba(255,255,255,.28);letter-spacing:.2em;text-transform:uppercase;font-family:monospace}
+  .bd{background:#0d1117;padding:44px 48px 36px}
+  .label{font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;font-family:monospace;margin-bottom:14px}
+  .h1{font-size:30px;font-weight:700;color:#fff;letter-spacing:-.6px;line-height:1.15;margin:0 0 18px}
+  .body-text{font-size:15px;color:rgba(255,255,255,.5);line-height:1.75;margin:0 0 28px}
+  .big-num{font-size:52px;font-weight:700;color:#fff;letter-spacing:-2px;text-align:center;padding:20px 0 8px}
+  .big-label{font-size:11px;color:rgba(255,255,255,.25);letter-spacing:.16em;text-transform:uppercase;font-family:monospace;text-align:center;margin-bottom:28px}
+  .note{font-size:13px;color:rgba(255,255,255,.25);line-height:1.65;font-style:italic;margin-bottom:28px}
+  .cta-wrap{text-align:center;margin-bottom:36px}
+  .cta{display:inline-block;background:#00D4B8;color:#07090f;font-weight:700;font-size:14px;text-decoration:none;padding:14px 36px;border-radius:8px;letter-spacing:-.1px}
+  .ft{background:#07090f;border-top:1px solid rgba(255,255,255,.07);padding:24px 48px;text-align:center}
+  .ft p{margin:0;font-size:12px;color:rgba(255,255,255,.2);line-height:1.8;font-family:monospace}
+  .ft a{color:#00D4B8;text-decoration:none}
+  .ft .dim{color:rgba(255,255,255,.12)}
+</style>
+</head>
+<body><div class="wrap"><table class="email" width="580" cellpadding="0" cellspacing="0">
+<tr><td class="hd">
+  <div class="logo-wrap">
+    <div class="logo-pill"><img src="https://wayforth.io/wayforth-logo.png" alt=""></div>
+    <span class="logo-name">Wayforth</span>
+  </div><br>
+  <span class="tagline">The API Runtime for AI Agents</span>
+</td></tr>
+<tr><td class="bd">
+  <div class="label" style="color:#00D4B8">Founding member</div>
+  <div class="h1">{{bonus_credits}} bonus credits<br>added.</div>
+  <div class="body-text">You signed up before {{cutoff_date}} — that makes you a Wayforth founding member. Your bonus has been applied automatically.</div>
+  <div class="big-num">{{bonus_credits}}</div>
+  <div class="big-label">Bonus credits</div>
+  <div class="note">One-time bonus. Applied to your first paid invoice. Thank you for being here early.</div>
+  <div class="cta-wrap"><a class="cta" href="https://wayforth.io/dashboard">View dashboard →</a></div>
+</td></tr>
+<tr><td class="ft"><p>
+<a href="https://wayforth.io">wayforth.io</a>
+<span class="dim">&nbsp;&middot;&nbsp;</span>
+<a href="https://wayforth.io/privacy" style="color:rgba(255,255,255,.25)">Privacy</a>
+<span class="dim">&nbsp;&middot;&nbsp;</span>
+<a href="https://wayforth.io/terms" style="color:rgba(255,255,255,.25)">Terms</a>
+</p></td></tr>
+</table></div></body></html>
