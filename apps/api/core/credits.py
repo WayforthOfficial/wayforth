@@ -637,16 +637,18 @@ async def _maybe_dispatch_credits_low(pool, user_id: str, api_key_str: str, bala
                     user_id,
                 )
             if user_row and user_row["email"]:
-                from notifications import send_credits_low_email
+                from core.email import send_email, _build_upgrade_cta
                 tier = key["tier"] or "free"
                 plan_calls = PLANS.get(tier, PLANS["free"])["calls_included"]
-                percent = round(calls_remaining / plan_calls * 100) if plan_calls > 0 else 0
+                percent_remaining = round(calls_remaining / plan_calls * 100) if plan_calls > 0 else 0
                 reset_dt = user_row["monthly_calls_reset_at"]
                 reset_date = reset_dt.strftime("%B %d") if reset_dt else "next month"
-                await asyncio.to_thread(
-                    send_credits_low_email,
-                    user_row["email"], calls_remaining, percent, tier, reset_date,
-                )
+                asyncio.create_task(send_email(user_row["email"], "low_credits", {
+                    "credits_remaining": str(calls_remaining),
+                    "percent_remaining": str(percent_remaining),
+                    "renewal_date": reset_date,
+                    "upgrade_cta": _build_upgrade_cta(tier),
+                }))
         except Exception as _email_err:
             logger.warning("credits_low email dispatch error: %s", _email_err)
     except Exception as _e:
@@ -764,4 +766,18 @@ async def _maybe_grant_founding_bonus(db, user_id: str) -> bool:
         "user_id": user_id,
     }))
     logger.info("founding_bonus_granted user_id=%s", user_id)
+
+    try:
+        email_row = await db.fetchrow(
+            "SELECT email FROM users WHERE id = $1::uuid", user_id
+        )
+        if email_row and email_row["email"]:
+            from core.email import send_email
+            asyncio.create_task(send_email(email_row["email"], "founding_member", {
+                "bonus_credits": "500",
+                "cutoff_date": "August 31, 2026",
+            }))
+    except Exception as _em:
+        logger.warning("founding_member email error: %s", _em)
+
     return True

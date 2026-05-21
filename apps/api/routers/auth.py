@@ -306,9 +306,12 @@ async def register_user(request: Request, db=Depends(get_db)):
         VALUES ($1, 100, 100, 'bonus', 'Free signup credits')
     """, user['id'])
 
-    asyncio.create_task(asyncio.to_thread(
-        send_welcome_email, email, key_prefix, 'free'
-    ))
+    from core.email import send_email, _build_founding_note
+    asyncio.create_task(send_email(email, "welcome", {
+        "credits": "100",
+        "quick_start": "uvx wayforth-mcp",
+        "founding_note": _build_founding_note(is_founding),
+    }))
 
     return {
         "user_id": str(user['id']),

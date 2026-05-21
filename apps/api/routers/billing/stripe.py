@@ -633,6 +633,31 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
                     sub_id,
                 )
         asyncio.create_task(_maybe_grant_founding_bonus(db, user_id))
+
+        # Subscription confirmed email
+        if credits and package:
+            try:
+                user_email_row = await db.fetchrow(
+                    "SELECT email FROM users WHERE id = $1::uuid", user_id
+                )
+                if user_email_row and user_email_row["email"]:
+                    from core.email import send_email
+                    plan_label = PACKAGES.get(package.split("_")[0], {}).get("label", package.title())
+                    price_usd = PACKAGES.get(package.split("_")[0], {}).get("price_usd", 0)
+                    from datetime import datetime, timezone
+                    renewal_dt = datetime.now(timezone.utc).replace(day=1)
+                    import calendar
+                    last_day = calendar.monthrange(renewal_dt.year, renewal_dt.month)[1]
+                    renewal_date = f"{calendar.month_name[renewal_dt.month]} {last_day}, {renewal_dt.year}"
+                    asyncio.create_task(send_email(user_email_row["email"], "subscription_confirmed", {
+                        "plan_name": plan_label,
+                        "credits_added": f"{credits:,}",
+                        "amount": f"${price_usd}/mo",
+                        "renewal_date": renewal_date,
+                    }))
+            except Exception as _email_err:
+                logger.warning("subscription_confirmed email error: %s", _email_err)
+
         return {"status": "renewed", "credits_added": credits}
 
     elif event["type"] == "customer.subscription.deleted":
