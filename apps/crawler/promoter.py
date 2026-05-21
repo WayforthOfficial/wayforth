@@ -182,6 +182,57 @@ async def promote_tier1_to_tier2(service: dict, db_conn: asyncpg.Connection) -> 
         return False
 
 
+async def bulk_promote_to_tier2(db_conn: asyncpg.Connection) -> int:
+    """
+    Promote all Tier 1 services with ≥1 successful probe in the last 7 days to Tier 2.
+    Called after bulk_prober.py runs to batch-upgrade the catalog.
+    Returns count of newly promoted services.
+    """
+    result = await db_conn.execute(
+        """
+        UPDATE services
+        SET coverage_tier = 2,
+            payment_tested = TRUE,
+            updated_at = NOW()
+        WHERE coverage_tier = 1
+          AND schema_validated = TRUE
+          AND EXISTS (
+              SELECT 1 FROM service_probes
+              WHERE service_id = services.id
+                AND reachable = TRUE
+                AND probed_at >= NOW() - INTERVAL '7 days'
+          )
+        """
+    )
+    count = int(result.split()[-1])
+    logger.info("bulk_promote_to_tier2: %d services Tier 1 → 2", count)
+    return count
+
+
+async def bulk_demote_stale_tier2(db_conn: asyncpg.Connection) -> int:
+    """
+    Demote Tier 2 services with 0 successful probes in the last 14 days back to Tier 1.
+    Returns count of demoted services.
+    """
+    result = await db_conn.execute(
+        """
+        UPDATE services
+        SET coverage_tier = 1,
+            updated_at = NOW()
+        WHERE coverage_tier = 2
+          AND NOT EXISTS (
+              SELECT 1 FROM service_probes
+              WHERE service_id = services.id
+                AND reachable = TRUE
+                AND probed_at >= NOW() - INTERVAL '14 days'
+          )
+        """
+    )
+    count = int(result.split()[-1])
+    logger.info("bulk_demote_stale_tier2: %d services Tier 2 → 1", count)
+    return count
+
+
 async def run_promotion_cycle(db_url: str) -> None:
     """
     Main entry point. Run one full promotion cycle:
@@ -190,8 +241,10 @@ async def run_promotion_cycle(db_url: str) -> None:
     3. Promote passing services to Tier 1
     4. Fetch all Tier 1 services
     5. Update their uptime stats
-    6. Promote qualifying services to Tier 2
-    7. Print summary
+    6. Promote qualifying services to Tier 2 (uptime-based)
+    7. Bulk-promote Tier 1 services with any recent successful probe to Tier 2
+    8. Demote stale Tier 2 services with no recent probes
+    9. Print summary
     """
     pool = await asyncpg.create_pool(db_url, min_size=2, max_size=10)
     sem = asyncio.Semaphore(10)
@@ -246,8 +299,25 @@ async def run_promotion_cycle(db_url: str) -> None:
         sum(1 for r in t0_results if r is not True)
         + sum(1 for r in t1_results if r is not True)
     )
+
+    # Bulk promotion: upgrade any Tier 1 with recent probe to Tier 2
+    async with pool.acquire() as conn:
+        bulk_promoted = await bulk_promote_to_tier2(conn)
+        bulk_demoted = await bulk_demote_stale_tier2(conn)
+
+    async with pool.acquire() as conn:
+        tier2_total = await conn.fetchval(
+            "SELECT COUNT(*) FROM services WHERE coverage_tier = 2"
+        )
+
     print(
-        f"Cycle complete: {tier0_promoted} Tier0→1, {tier1_promoted} Tier1→2, {failed} failed probes"
+        f"Cycle complete: "
+        f"{tier0_promoted} Tier0→1, "
+        f"{tier1_promoted} Tier1→2 (uptime), "
+        f"{bulk_promoted} Tier1→2 (bulk), "
+        f"{bulk_demoted} Tier2→1 (stale), "
+        f"{failed} failed probes | "
+        f"Tier 2 total: {tier2_total}"
     )
 
     await run_health_check(pool)
