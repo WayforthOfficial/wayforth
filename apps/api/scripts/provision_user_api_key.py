@@ -102,9 +102,20 @@ async def provision(
     keep_existing: bool,
     dry_run: bool,
 ) -> int:
-    db_url = os.environ.get("DATABASE_URL", "")
+    # DATABASE_PUBLIC_URL (externally routable) is preferred when running
+    # outside Railway's private network — `railway run` from a dev laptop
+    # injects DATABASE_URL pointing at postgres.railway.internal which only
+    # resolves from inside the cluster. Same fallback the crawler scripts
+    # (e.g. apps/crawler/bulk_prober.py) use.
+    db_url = (
+        os.environ.get("DATABASE_PUBLIC_URL")
+        or os.environ.get("DATABASE_URL", "")
+    )
     if not db_url:
-        print("ERROR: DATABASE_URL is not set.", file=sys.stderr)
+        print(
+            "ERROR: neither DATABASE_PUBLIC_URL nor DATABASE_URL is set.",
+            file=sys.stderr,
+        )
         return 1
 
     if tier not in _TIER_DEFAULTS:
