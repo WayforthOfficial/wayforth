@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from core.auth import resolve_dashboard_caller
 from core.credits import PLANS, CREDITS_PER_CALL, ROUTING_FEE, PAYMENT_MULTIPLIERS, compute_calls_remaining
 from core.db import get_db
 from core.rate_limit import limiter
@@ -57,7 +58,10 @@ def _credits_to_tier(lifetime_credits: int, package_tier: str | None) -> str:
 
 
 def _account_auth_key(request: Request):
-    """Return (raw_key, key_hash) from X-Wayforth-API-Key header, or raise 401."""
+    """Legacy API-key-only auth helper. Kept for endpoints that genuinely
+    require the API key (not a cookie/JWT session). New /account/* endpoints
+    should use `core.auth.resolve_dashboard_caller` instead, which accepts
+    cookie, Bearer JWT, AND API key."""
     raw = request.headers.get("X-Wayforth-API-Key", "")
     if not raw:
         raise HTTPException(status_code=401, detail="API key required")
@@ -69,17 +73,24 @@ def _account_auth_key(request: Request):
 @router.get("/account/billing-permissions")
 @limiter.limit("30/minute")
 async def get_billing_permissions(request: Request, db=Depends(get_db)):
-    """Return billing permission settings for the authenticated API key."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-
+    """Return billing permission settings for the authenticated caller."""
+    caller = await resolve_dashboard_caller(request, db)
+    if not caller["api_key_id"]:
+        # No active API key on this account → no billing permissions yet.
+        return {
+            "billing_permission": "none",
+            "topup_trigger_calls": 100,
+            "topup_amount_usd": 5.0,
+            "monthly_topup_limit_usd": 20.0,
+            "monthly_topup_spent_usd": 0.0,
+            "monthly_topup_reset_at": None,
+        }
     row = await db.fetchrow("""
         SELECT billing_permission, topup_trigger_calls, topup_amount_usd,
                monthly_topup_limit_usd, monthly_topup_spent_usd, monthly_topup_reset_at
         FROM api_keys
-        WHERE key_hash = $1 AND active = true
-    """, hashlib.sha256(api_key.encode()).hexdigest())
+        WHERE id = $1::uuid
+    """, str(caller["api_key_id"]))
 
     if not row:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -97,15 +108,16 @@ async def get_billing_permissions(request: Request, db=Depends(get_db)):
 @router.put("/account/billing-permissions")
 @limiter.limit("10/minute")
 async def put_billing_permissions(request: Request, db=Depends(get_db)):
-    """Update billing permission settings for the authenticated API key."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-
+    """Update billing permission settings for the authenticated caller."""
+    caller = await resolve_dashboard_caller(request, db)
+    if not caller["api_key_id"]:
+        raise HTTPException(status_code=400, detail={
+            "error": "no_active_api_key",
+            "message": "Create or activate an API key before configuring billing permissions.",
+        })
     key_record = await db.fetchrow(
-        "SELECT id, topup_amount_usd, monthly_topup_limit_usd FROM api_keys "
-        "WHERE key_hash = $1 AND active = true",
-        hashlib.sha256(api_key.encode()).hexdigest(),
+        "SELECT id, topup_amount_usd, monthly_topup_limit_usd FROM api_keys WHERE id = $1::uuid",
+        str(caller["api_key_id"]),
     )
     if not key_record:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -314,58 +326,48 @@ async def get_balance(request: Request, db=Depends(get_db)):
 @limiter.limit("30/minute")
 async def account_credits(request: Request, db=Depends(get_db)):
     """Current credit balance — canonical endpoint for dashboard and agents."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-
-    key_record = await db.fetchrow("""
-        SELECT k.id, k.user_id, k.tier, u.email
-        FROM api_keys k JOIN users u ON u.id = k.user_id
-        WHERE k.key_hash = $1 AND k.active = true
-    """, hashlib.sha256(api_key.encode()).hexdigest())
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    caller = await resolve_dashboard_caller(request, db)
 
     credits = await db.fetchrow(
         "SELECT credits_balance, lifetime_credits, package_tier FROM user_credits WHERE user_id = $1",
-        key_record['user_id']
+        caller["user_id"],
     )
     balance = credits['credits_balance'] if credits else 0
     lifetime = credits['lifetime_credits'] if credits else 0
     pkg_tier = credits['package_tier'] if credits else 'free'
     tier = _credits_to_tier(lifetime, pkg_tier)
 
+    calls_remaining = (
+        await compute_calls_remaining(db, str(caller["api_key_id"]))
+        if caller["api_key_id"] else 0
+    )
+
     return {
         "plan": tier,
-        "calls_remaining": await compute_calls_remaining(db, str(key_record["id"])),
+        "calls_remaining": calls_remaining,
         "calls_included": PLANS.get(tier, PLANS["free"])["calls_included"],
         # Dashboard-only credit detail (not shown in public docs)
         "credits_remaining": balance,
         "credits_total": lifetime,
         "tier": tier,
-        "email": key_record["email"],
+        "email": caller["email"],
     }
 
 
 @router.get("/account/tier")
 @limiter.limit("30/minute")
 async def account_tier(request: Request, db=Depends(get_db)):
-    """Tier and feature flags — used by the dashboard to gate UI sections."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
+    """Tier and feature flags — used by the dashboard to gate UI sections.
 
-    key_record = await db.fetchrow("""
-        SELECT k.user_id
-        FROM api_keys k
-        WHERE k.key_hash = $1 AND k.active = true
-    """, hashlib.sha256(api_key.encode()).hexdigest())
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
+    Accepts wf_session cookie, Authorization: Bearer <supabase_jwt>, or
+    X-Wayforth-API-Key. The dashboard relies on this to display the user's
+    plan; before the cookie/Bearer paths were added, the post-/auth/me
+    dashboard had no API key to send here and silently fell back to "Free".
+    """
+    caller = await resolve_dashboard_caller(request, db)
     credits = await db.fetchrow(
         "SELECT credits_balance, lifetime_credits, package_tier FROM user_credits WHERE user_id = $1",
-        key_record['user_id']
+        caller["user_id"],
     )
     balance = credits['credits_balance'] if credits else 0
     lifetime = credits['lifetime_credits'] if credits else 0
@@ -386,14 +388,8 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     """Per-user analytics — Pro and Growth tiers only."""
     import re as _re
     import datetime as _datetime
-    raw_key, key_hash = _account_auth_key(request)
-    key_record = await db.fetchrow(
-        "SELECT k.user_id, k.id, k.monthly_calls_count, k.monthly_calls_reset_at, k.tier "
-        "FROM api_keys k WHERE k.key_hash = $1 AND k.active = true", key_hash
-    )
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    user_id = key_record["user_id"]
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
 
     credits = await db.fetchrow(
         "SELECT credits_balance, lifetime_credits, package_tier FROM user_credits WHERE user_id = $1", user_id
@@ -492,7 +488,7 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     plan_tier = credits["package_tier"] if credits else "free"
     plan_def = PLANS.get(plan_tier, PLANS["free"])
     calls_included = plan_def["calls_included"]
-    calls_used = key_record["monthly_calls_count"] or 0
+    calls_used = caller["monthly_calls_count"] or 0
     calls_remaining = max(0, calls_included - calls_used)
 
     return {
@@ -511,8 +507,8 @@ async def account_analytics(request: Request, db=Depends(get_db)):
             "included": calls_included,
             "remaining": calls_remaining,
             "resets_at": (
-                key_record["monthly_calls_reset_at"].date().isoformat()
-                if key_record["monthly_calls_reset_at"] else reset.isoformat()
+                caller["monthly_calls_reset_at"].date().isoformat()
+                if caller["monthly_calls_reset_at"] else reset.isoformat()
             ),
         },
         "top_queries": [{"query": r["query"], "count": r["count"]} for r in top_query_rows],
@@ -524,13 +520,8 @@ async def account_analytics(request: Request, db=Depends(get_db)):
 @limiter.limit("30/minute")
 async def account_usage_history(request: Request, db=Depends(get_db)):
     """30-day call history grouped by day and service. All tiers."""
-    raw_key, key_hash = _account_auth_key(request)
-    key_record = await db.fetchrow(
-        "SELECT k.user_id FROM api_keys k WHERE k.key_hash = $1 AND k.active = true", key_hash
-    )
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    user_id = key_record["user_id"]
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
 
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
 
@@ -571,13 +562,8 @@ async def account_usage_history(request: Request, db=Depends(get_db)):
 @limiter.limit("30/minute")
 async def account_searches(request: Request, db=Depends(get_db)):
     """Authenticated user's own search history — all tiers."""
-    raw_key, key_hash = _account_auth_key(request)
-    key_record = await db.fetchrow(
-        "SELECT k.user_id FROM api_keys k WHERE k.key_hash = $1 AND k.active = true", key_hash
-    )
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    user_id = key_record["user_id"]
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
 
     rows = await db.fetch("""
         SELECT sa.query, sa.created_at, sa.result_count,
@@ -609,13 +595,8 @@ async def account_searches(request: Request, db=Depends(get_db)):
 @limiter.limit("30/minute")
 async def account_executions(request: Request, db=Depends(get_db)):
     """Authenticated user's own execution history — all tiers."""
-    raw_key, key_hash = _account_auth_key(request)
-    key_record = await db.fetchrow(
-        "SELECT k.user_id FROM api_keys k WHERE k.key_hash = $1 AND k.active = true", key_hash
-    )
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    user_id = key_record["user_id"]
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
 
     rows = await db.fetch("""
         SELECT service_id, created_at, ABS(amount) as credits_used, type
@@ -645,17 +626,9 @@ async def account_executions(request: Request, db=Depends(get_db)):
 @limiter.limit("30/minute")
 async def account_agents(request: Request, db=Depends(get_db)):
     """Per-agent usage breakdown for the authenticated user."""
-    raw_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not raw_key:
-        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
-    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-    key_record = await db.fetchrow(
-        "SELECT user_id, tier FROM api_keys WHERE key_hash=$1 AND active=true", key_hash
-    )
-    if not key_record:
-        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
-    require_tier(key_record["tier"] or "free", "account_agents")
-    user_id = key_record["user_id"]
+    caller = await resolve_dashboard_caller(request, db)
+    require_tier(caller["tier"], "account_agents")
+    user_id = caller["user_id"]
 
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -714,17 +687,9 @@ async def account_agents(request: Request, db=Depends(get_db)):
 @limiter.limit("30/minute")
 async def account_agent_detail(request: Request, agent_id: str, db=Depends(get_db)):
     """Detailed usage breakdown for a single agent_id."""
-    raw_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not raw_key:
-        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
-    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-    key_record = await db.fetchrow(
-        "SELECT user_id, tier FROM api_keys WHERE key_hash=$1 AND active=true", key_hash
-    )
-    if not key_record:
-        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
-    require_tier(key_record["tier"] or "free", "account_agents")
-    user_id = key_record["user_id"]
+    caller = await resolve_dashboard_caller(request, db)
+    require_tier(caller["tier"], "account_agents")
+    user_id = caller["user_id"]
 
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1051,27 +1016,19 @@ async def get_invoice(year: int, month: int, request: Request, db=Depends(get_db
 @limiter.limit("30/minute")
 async def account_alerts(request: Request, db=Depends(get_db)):
     """Credit alert flags derived from the billing forecast."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-
-    key_record = await db.fetchrow("""
-        SELECT k.id, k.user_id, k.tier, k.monthly_calls_count, k.monthly_calls_reset_at
-        FROM api_keys k
-        WHERE k.key_hash = $1 AND k.active = true
-    """, hashlib.sha256(api_key.encode()).hexdigest())
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
+    caller = await resolve_dashboard_caller(request, db)
     credits = await db.fetchrow(
         "SELECT credits_balance, package_tier FROM user_credits WHERE user_id = $1",
-        key_record["user_id"],
+        caller["user_id"],
     )
     balance = credits["credits_balance"] if credits else 0
     pkg_tier = credits["package_tier"] if credits else "free"
     tier = _credits_to_tier(balance, pkg_tier)
 
-    calls_remaining = await compute_calls_remaining(db, str(key_record["id"]))
+    calls_remaining = (
+        await compute_calls_remaining(db, str(caller["api_key_id"]))
+        if caller["api_key_id"] else 0
+    )
     plan_def = PLANS.get(tier, PLANS["free"])
     calls_included = plan_def["calls_included"]
 
@@ -1080,8 +1037,8 @@ async def account_alerts(request: Request, db=Depends(get_db)):
 
     will_exhaust = False
     days_remaining = None
-    monthly_count = key_record.get("monthly_calls_count") or 0
-    monthly_reset_at = key_record.get("monthly_calls_reset_at")
+    monthly_count = caller.get("monthly_calls_count") or 0
+    monthly_reset_at = caller.get("monthly_calls_reset_at")
     if monthly_reset_at and monthly_count > 0:
         now_utc = datetime.now(timezone.utc)
         period_start = monthly_reset_at.replace(tzinfo=timezone.utc) - timedelta(days=30)
@@ -1107,18 +1064,8 @@ async def account_alerts(request: Request, db=Depends(get_db)):
 @limiter.limit("30/minute")
 async def account_org(request: Request, db=Depends(get_db)):
     """Alias for /org/members — returns the caller's org and member list."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-
-    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-    key_record = await db.fetchrow(
-        "SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true", key_hash
-    )
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    user_id = str(key_record["user_id"])
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
     org = await db.fetchrow("""
         SELECT o.* FROM organizations o
         JOIN org_members m ON m.org_id = o.id
@@ -1155,20 +1102,11 @@ FOUNDING_MEMBER_CUTOFF = "2026-08-31"
 @limiter.limit("30/minute")
 async def account_founding_status(request: Request, db=Depends(get_db)):
     """Return founding-member status and bonus grant state for the authenticated user."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-
-    key_record = await db.fetchrow(
-        "SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true",
-        hashlib.sha256(api_key.encode()).hexdigest(),
-    )
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    caller = await resolve_dashboard_caller(request, db)
 
     user = await db.fetchrow(
         "SELECT founding_member, founding_bonus_granted_at FROM users WHERE id = $1::uuid",
-        str(key_record["user_id"]),
+        caller["user_id"],
     )
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
