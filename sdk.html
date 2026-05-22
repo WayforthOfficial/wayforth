@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SDK Reference — Wayforth Docs</title>
+  <meta name="description" content="Full API reference for the Python SDK (wayforth-sdk) and TypeScript SDK (@wayforth/sdk) with code examples for every method.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a href="index.html" class="logo">
+      <div class="logo-mark">W</div>
+      <span class="logo-text">Wayforth</span>
+      <span class="logo-docs">docs</span>
+    </a>
+    <div class="header-links">
+      <a href="https://wayforth.io" class="header-link" target="_blank" rel="noopener">wayforth.io ↗</a>
+      <a href="https://gateway.wayforth.io" class="header-link" target="_blank" rel="noopener">gateway ↗</a>
+      <button class="menu-btn" id="menuBtn">☰ Menu</button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="search-wrap">
+      <span class="search-icon">⌕</span>
+      <input type="text" id="search" placeholder="Search docs…" autocomplete="off" spellcheck="false">
+      <div class="search-results" id="searchResults"></div>
+    </div>
+    <nav>
+      <div class="nav-group">
+        <span class="nav-label">Documentation</span>
+        <a href="index.html" class="nav-link"><em class="icon">⚡</em>Getting Started</a>
+        <a href="search.html" class="nav-link"><em class="icon">🔍</em>Search &amp; Discovery</a>
+        <a href="execute.html" class="nav-link"><em class="icon">▶</em>Execution</a>
+        <a href="payment-rails.html" class="nav-link"><em class="icon">💳</em>Payment Rails</a>
+        <a href="sdk.html" class="nav-link active"><em class="icon">{}</em>SDK Reference</a>
+        <a href="api.html" class="nav-link"><em class="icon">~</em>REST API</a>
+      </div>
+      <div class="nav-group">
+        <span class="nav-label">On this page</span>
+        <a href="#python-install" class="toc-link">Python — Install</a>
+        <a href="#python-sync" class="toc-link">Python — Wayforth</a>
+        <a href="#python-async" class="toc-link">Python — AsyncWayforth</a>
+        <a href="#python-errors" class="toc-link">Python — Errors</a>
+        <a href="#ts-install" class="toc-link">TypeScript — Install</a>
+        <a href="#ts-client" class="toc-link">TypeScript — Wayforth</a>
+        <a href="#ts-types" class="toc-link">TypeScript — Types</a>
+        <a href="#ts-errors" class="toc-link">TypeScript — Errors</a>
+      </div>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="content-inner">
+      <div class="page-badge">SDK Reference</div>
+      <h1 class="page-title">SDK Reference</h1>
+      <p class="page-lead">First-party SDKs for Python and TypeScript. Both target the Wayforth gateway at <code>gateway.wayforth.io</code>, include retry logic, and ship with typed error classes.</p>
+
+      <!-- Python install -->
+      <section id="python-install">
+        <h2>Python SDK</h2>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">pip install wayforth-sdk</code></pre>
+        </div>
+
+        <p>Requires Python 3.12+. The only runtime dependency is <code>httpx&nbsp;&gt;=&nbsp;0.27</code>.</p>
+
+        <h3>Quick start</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">from wayforth import Wayforth
+
+client = Wayforth(api_key="wf_live_...")
+
+results = client.search("translate to spanish")
+print(results[0]["name"])  # DeepL Translation
+
+result = client.execute("deepl", text="Hello", target_lang="ES")
+print(result["translation"])  # Hola
+
+result = client.run("translate Hello to Spanish")
+print(result["output"])  # Hola</code></pre>
+        </div>
+      </section>
+
+      <!-- Python sync -->
+      <section id="python-sync">
+        <h2>Wayforth (sync)</h2>
+        <p>Synchronous client backed by <code>httpx.Client</code>. Supports context manager usage.</p>
+
+        <div class="sig">
+          <span class="kw">class</span> <span class="fn">Wayforth</span>(<br>
+          &nbsp;&nbsp;api_key: <span class="tp">str</span>,<br>
+          &nbsp;&nbsp;base_url: <span class="tp">str</span> <span class="df">= "https://gateway.wayforth.io"</span><br>
+          )
+        </div>
+
+        <h4>Methods</h4>
+
+        <h3>search()</h3>
+        <div class="sig">
+          <span class="fn">search</span>(query: <span class="tp">str</span>, **filters) -&gt; <span class="ret">list[dict]</span>
+        </div>
+        <p>Natural language search. Supports filters: <code>max_price_usd</code>, <code>tier</code>, <code>payment_rail</code>, <code>region</code>, <code>limit</code>.</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">results = client.search(
+    "image classification",
+    tier=2,
+    max_price_usd=0.01,
+    region="eu-west",
+    limit=5
+)
+for svc in results:
+    print(svc["slug"], svc["wri_score"])</code></pre>
+        </div>
+
+        <h3>query()</h3>
+        <div class="sig">
+          <span class="fn">query</span>(ql: <span class="tp">str</span>) -&gt; <span class="ret">list[dict]</span>
+        </div>
+        <p>WayforthQL structured query. See <a href="search.html#wayforthql">WayforthQL v1.1</a> for syntax.</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">results = client.query(
+    "category:vision AND tier:>=3 SORT BY wri_score DESC LIMIT 5"
+)</code></pre>
+        </div>
+
+        <h3>execute()</h3>
+        <div class="sig">
+          <span class="fn">execute</span>(slug: <span class="tp">str</span>, **params) -&gt; <span class="ret">dict</span>
+        </div>
+        <p>Execute a managed service. Parameters are service-specific.</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python"># Translation
+result = client.execute("deepl", text="Bonjour", target_lang="EN")
+
+# Embeddings
+result = client.execute(
+    "openai-embeddings",
+    input="The quick brown fox",
+    model="text-embedding-3-large"
+)
+print(len(result["embedding"]))  # 3072
+
+# Transcription
+result = client.execute(
+    "whisper-large",
+    audio_url="https://example.com/recording.mp3",
+    language="en"
+)</code></pre>
+        </div>
+
+        <h3>run()</h3>
+        <div class="sig">
+          <span class="fn">run</span>(query: <span class="tp">str</span>, **params) -&gt; <span class="ret">dict</span>
+        </div>
+        <p>Find the best match and execute in one call. Wayforth selects the service with the highest relevance × WRI score.</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">result = client.run(
+    "transcribe this audio to English",
+    audio_url="https://example.com/clip.mp3"
+)
+print(result["output"])   # "Hello, this is a test recording"
+print(result["service"])  # "whisper-large"</code></pre>
+        </div>
+
+        <h3>balance()</h3>
+        <div class="sig">
+          <span class="fn">balance</span>() -&gt; <span class="ret">dict</span>
+        </div>
+        <p>Returns account credits, tier, and usage forecast.</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">info = client.balance()
+print(info["credits_remaining"])  # 847
+print(info["tier"])               # "builder"
+print(info["forecast"]["will_exhaust_before_reset"])  # False</code></pre>
+        </div>
+
+        <h3>services()</h3>
+        <div class="sig">
+          <span class="fn">services</span>(category: <span class="tp">str | None</span> <span class="df">= None</span>) -&gt; <span class="ret">list[dict]</span>
+        </div>
+        <p>Browse the service catalog. Optionally filter by category slug.</p>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">all_services = client.services()
+audio_services = client.services(category="audio")
+for svc in audio_services:
+    print(f"{svc['slug']:20} WRI {svc['wri_score']}")</code></pre>
+        </div>
+
+        <h3>Context manager</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">with Wayforth(api_key="wf_live_...") as client:
+    results = client.search("translate to french")
+    # Connection pool closed automatically on exit</code></pre>
+        </div>
+      </section>
+
+      <!-- Python async -->
+      <section id="python-async">
+        <h2>AsyncWayforth</h2>
+        <p>Async client backed by <code>httpx.AsyncClient</code>. Drop-in async equivalent — all method signatures are identical, just add <code>await</code>.</p>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">import asyncio
+from wayforth import AsyncWayforth
+
+async def main():
+    async with AsyncWayforth(api_key="wf_live_...") as client:
+        # Run searches concurrently
+        search, balance = await asyncio.gather(
+            client.search("translate to spanish"),
+            client.balance(),
+        )
+        print(search[0]["name"])
+        print(balance["credits_remaining"])
+
+        # Execute
+        result = await client.execute("deepl", text="Hello", target_lang="ES")
+        print(result["translation"])
+
+asyncio.run(main())</code></pre>
+        </div>
+
+        <h3>Concurrent execution</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">import asyncio
+from wayforth import AsyncWayforth
+
+async def batch_translate(texts: list[str], target_lang: str) -> list[str]:
+    async with AsyncWayforth(api_key="wf_live_...") as client:
+        tasks = [
+            client.execute("deepl", text=t, target_lang=target_lang)
+            for t in texts
+        ]
+        results = await asyncio.gather(*tasks)
+        return [r["translation"] for r in results]
+
+translated = asyncio.run(batch_translate(
+    ["Hello", "Good morning", "Goodbye"],
+    target_lang="ES"
+))
+# ["Hola", "Buenos días", "Adiós"]</code></pre>
+        </div>
+      </section>
+
+      <!-- Python errors -->
+      <section id="python-errors">
+        <h2>Python error handling</h2>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">python</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-python">from wayforth import (
+    WayforthError,
+    AuthenticationError,        # 401
+    InsufficientCreditsError,   # 402
+    ServiceUnavailableError,    # 5xx after 3 retries
+)
+
+try:
+    result = client.execute("deepl", text="Hello", target_lang="ES")
+except AuthenticationError:
+    print("Invalid API key — check WAYFORTH_API_KEY")
+except InsufficientCreditsError:
+    print("Out of credits — top up at https://wayforth.io/billing")
+except ServiceUnavailableError as e:
+    print(f"Service down after retries: {e}")
+except WayforthError as e:
+    print(f"API error {e.status_code}: {e}")</code></pre>
+        </div>
+
+        <h3>Retry policy</h3>
+        <p>Both <code>Wayforth</code> and <code>AsyncWayforth</code> automatically retry on <code>5xx</code> responses with exponential backoff. Client errors (<code>4xx</code>) are raised immediately.</p>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Attempt</th><th>Delay before retry</th></tr></thead>
+            <tbody>
+              <tr><td>1</td><td>— (immediate)</td></tr>
+              <tr><td>2</td><td>1 second</td></tr>
+              <tr><td>3</td><td>2 seconds</td></tr>
+              <tr><td>4 (final)</td><td>4 seconds — raises <code>ServiceUnavailableError</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <hr>
+
+      <!-- TypeScript install -->
+      <section id="ts-install">
+        <h2>TypeScript SDK</h2>
+
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-bash">npm install @wayforth/sdk</code></pre>
+        </div>
+
+        <p>Requires Node.js 18+. No runtime dependencies — uses native <code>fetch</code>. Dual ESM + CommonJS export.</p>
+
+        <h3>Quick start</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">import { Wayforth } from '@wayforth/sdk';
+
+const wayforth = new Wayforth({ apiKey: 'wf_live_...' });
+
+const results = await wayforth.search('translate to spanish');
+console.log(results[0].name);  // DeepL Translation
+
+const result = await wayforth.execute('deepl', { text: 'Hello', target_lang: 'ES' });
+console.log(result.translation);  // Hola
+
+const run = await wayforth.run('translate Hello to Spanish');
+console.log(run.output);  // Hola</code></pre>
+        </div>
+      </section>
+
+      <!-- TypeScript client -->
+      <section id="ts-client">
+        <h2>Wayforth class</h2>
+
+        <div class="sig">
+          <span class="kw">new</span> <span class="fn">Wayforth</span>({ apiKey: <span class="tp">string</span>; baseUrl?: <span class="tp">string</span> })
+        </div>
+
+        <h3>search()</h3>
+        <div class="sig">
+          <span class="fn">search</span>(query: <span class="tp">string</span>, options?: <span class="tp">SearchOptions</span>): <span class="tp">Promise</span>&lt;<span class="ret">SearchResult[]</span>&gt;
+        </div>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">const results = await wayforth.search('image classification', {
+  max_price_usd: 0.01,
+  tier: 2,
+  region: 'us-east',
+  limit: 5,
+});
+results.forEach(r => console.log(r.slug, r.wri_score));</code></pre>
+        </div>
+
+        <h3>query()</h3>
+        <div class="sig">
+          <span class="fn">query</span>(ql: <span class="tp">string</span>): <span class="tp">Promise</span>&lt;<span class="ret">SearchResult[]</span>&gt;
+        </div>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">const results = await wayforth.query(
+  'category:nlp AND tier:>=3 SORT BY wri_score DESC'
+);</code></pre>
+        </div>
+
+        <h3>execute()</h3>
+        <div class="sig">
+          <span class="fn">execute</span>(slug: <span class="tp">string</span>, params?: <span class="tp">Record&lt;string, unknown&gt;</span>): <span class="tp">Promise</span>&lt;<span class="ret">ExecuteResult</span>&gt;
+        </div>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">const result = await wayforth.execute('deepl', {
+  text: 'Hello, world!',
+  target_lang: 'FR',
+});
+console.log(result.translation);  // Bonjour, le monde!</code></pre>
+        </div>
+
+        <h3>run()</h3>
+        <div class="sig">
+          <span class="fn">run</span>(query: <span class="tp">string</span>, params?: <span class="tp">Record&lt;string, unknown&gt;</span>): <span class="tp">Promise</span>&lt;<span class="ret">RunResult</span>&gt;
+        </div>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">const result = await wayforth.run('transcribe this audio', {
+  audio_url: 'https://example.com/clip.mp3',
+});
+console.log(result.output);   // "Hello, this is a test..."
+console.log(result.service);  // "whisper-large"</code></pre>
+        </div>
+
+        <h3>balance()</h3>
+        <div class="sig">
+          <span class="fn">balance</span>(): <span class="tp">Promise</span>&lt;<span class="ret">BalanceResult</span>&gt;
+        </div>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">const bal = await wayforth.balance();
+console.log(bal.credits_remaining);  // 847
+console.log(bal.tier);               // "builder"</code></pre>
+        </div>
+
+        <h3>services()</h3>
+        <div class="sig">
+          <span class="fn">services</span>(category?: <span class="tp">string</span>): <span class="tp">Promise</span>&lt;<span class="ret">SearchResult[]</span>&gt;
+        </div>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">const all = await wayforth.services();
+const audio = await wayforth.services('audio');</code></pre>
+        </div>
+
+        <h3>Factory function</h3>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">import { createWayforth } from '@wayforth/sdk';
+
+const wayforth = createWayforth({
+  apiKey: process.env.WAYFORTH_API_KEY!,
+  baseUrl: 'https://gateway.wayforth.io',  // optional override
+});</code></pre>
+        </div>
+      </section>
+
+      <!-- TypeScript types -->
+      <section id="ts-types">
+        <h2>TypeScript types</h2>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">interface WayforthConfig {
+  apiKey: string;
+  baseUrl?: string;
+}
+
+interface SearchOptions {
+  max_price_usd?: number;
+  tier?: number;
+  payment_rail?: string;
+  region?: string;
+  limit?: number;
+}
+
+interface SearchResult {
+  slug: string;
+  name: string;
+  description: string;
+  wri_score: number;
+  tier: number;
+  payment_rails: string[];
+  category: string;
+}
+
+interface ExecuteResult {
+  [key: string]: unknown;
+}
+
+interface RunResult {
+  output: unknown;
+  service: string;
+}
+
+interface BalanceResult {
+  credits_remaining: number;
+  tier: string;
+  usage: unknown;
+}</code></pre>
+        </div>
+      </section>
+
+      <!-- TypeScript errors -->
+      <section id="ts-errors">
+        <h2>TypeScript error handling</h2>
+        <div class="code-block">
+          <div class="cb-header"><span class="cb-lang">typescript</span><button class="copy-btn">Copy</button></div>
+          <pre><code class="language-typescript">import {
+  Wayforth,
+  WayforthError,
+  AuthenticationError,
+  InsufficientCreditsError,
+  ServiceUnavailableError,
+} from '@wayforth/sdk';
+
+const wayforth = new Wayforth({ apiKey: process.env.WAYFORTH_API_KEY! });
+
+try {
+  const result = await wayforth.execute('deepl', {
+    text: 'Hello',
+    target_lang: 'ES',
+  });
+} catch (err) {
+  if (err instanceof AuthenticationError) {
+    console.error('Invalid API key');
+  } else if (err instanceof InsufficientCreditsError) {
+    console.error('Out of credits — visit https://wayforth.io/billing');
+  } else if (err instanceof ServiceUnavailableError) {
+    console.error(`Service down after retries: ${err.message}`);
+  } else if (err instanceof WayforthError) {
+    console.error(`API error ${err.statusCode}: ${err.message}`);
+  }
+}</code></pre>
+        </div>
+
+        <h3>Error classes</h3>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Class</th><th>HTTP status</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>AuthenticationError</code></td><td>401</td><td>Invalid or missing API key</td></tr>
+              <tr><td><code>InsufficientCreditsError</code></td><td>402</td><td>No credits remaining</td></tr>
+              <tr><td><code>ServiceUnavailableError</code></td><td>5xx</td><td>Provider down after 3 retries</td></tr>
+              <tr><td><code>WayforthError</code></td><td>Any 4xx/5xx</td><td>Base class — check <code>statusCode</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+<footer class="docs-footer">
+  <span>&copy; 2025 Wayforth Technologies Inc.</span>
+  <nav class="docs-footer-links" aria-label="Legal">
+    <a href="https://wayforth.io/privacy">Privacy</a>
+    <a href="https://wayforth.io/terms">Terms</a>
+    <a href="https://wayforth.io/acceptable-use">Acceptable Use</a>
+    <a href="https://wayforth.io/cookies">Cookies</a>
+    <a href="https://wayforth.io/risk">Risk Disclosure</a>
+    <a href="https://wayforth.io/compliance">Compliance</a>
+  </nav>
+</footer>
+<script src="main.js"></script>
+</body>
+</html>

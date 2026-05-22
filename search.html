@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Search &amp; Discovery — Wayforth Docs</title>
+  <meta name="description" content="wayforth_search reference, WayforthQL v1.1, available filters, all 19 categories, and WRI score explained.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a href="index.html" class="logo">
+      <div class="logo-mark">W</div>
+      <span class="logo-text">Wayforth</span>
+      <span class="logo-docs">docs</span>
+    </a>
+    <div class="header-links">
+      <a href="https://wayforth.io" class="header-link" target="_blank" rel="noopener">wayforth.io ↗</a>
+      <a href="https://gateway.wayforth.io" class="header-link" target="_blank" rel="noopener">gateway ↗</a>
+      <button class="menu-btn" id="menuBtn">☰ Menu</button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="search-wrap">
+      <span class="search-icon">⌕</span>
+      <input type="text" id="search" placeholder="Search docs…" autocomplete="off" spellcheck="false">
+      <div class="search-results" id="searchResults"></div>
+    </div>
+    <nav>
+      <div class="nav-group">
+        <span class="nav-label">Documentation</span>
+        <a href="index.html" class="nav-link"><em class="icon">⚡</em>Getting Started</a>
+        <a href="search.html" class="nav-link active"><em class="icon">🔍</em>Search &amp; Discovery</a>
+        <a href="execute.html" class="nav-link"><em class="icon">▶</em>Execution</a>
+        <a href="payment-rails.html" class="nav-link"><em class="icon">💳</em>Payment Rails</a>
+        <a href="sdk.html" class="nav-link"><em class="icon">{}</em>SDK Reference</a>
+        <a href="api.html" class="nav-link"><em class="icon">~</em>REST API</a>
+      </div>
+      <div class="nav-group">
+        <span class="nav-label">On this page</span>
+        <a href="#wayforth-search" class="toc-link">wayforth_search()</a>
+        <a href="#wayforthql" class="toc-link">WayforthQL v1.1</a>
+        <a href="#filters" class="toc-link">Filters</a>
+        <a href="#categories" class="toc-link">Categories</a>
+        <a href="#wri" class="toc-link">WRI Score</a>
+      </div>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="content-inner">
+      <div class="page-badge">Search &amp; Discovery</div>
+      <h1 class="page-title">Search &amp; Discovery</h1>
+      <p class="page-lead">Find the right service for any task using natural language or structured WayforthQL queries. Results are ranked by WRI — Wayforth's live reliability index.</p>
+
+      <!-- wayforth_search -->
+      <section id="wayforth-search">
+        <h2>wayforth_search()</h2>
+        <p>Natural language search across the Wayforth catalog. Returns services ranked by semantic relevance × WRI score.</p>
+
+        <div class="sig">
+          <span class="kw">def</span> <span class="fn">wayforth_search</span>(
+            query: <span class="tp">str</span>,
+            *,
+            tier: <span class="tp">int | None</span> <span class="df">= None</span>,
+            max_price_usd: <span class="tp">float | None</span> <span class="df">= None</span>,
+            max_latency_ms: <span class="tp">int | None</span> <span class="df">= None</span>,
+            region: <span class="tp">str | None</span> <span class="df">= None</span>,
+            payment_rail: <span class="tp">str | None</span> <span class="df">= None</span>,
+            limit: <span class="tp">int</span> <span class="df">= 10</span>
+          ) -&gt; <span class="ret">list[ServiceResult]</span>
+        </div>
+
+        <h3>Parameters</h3>
+        <div class="params">
+          <div class="param-row">
+            <span class="pname">query</span>
+            <span class="ptype">str</span>
+            <span class="pdesc">Natural language description of what you need. <span class="pill pill-req">required</span></span>
+          </div>
+          <div class="param-row">
+            <span class="pname">tier</span>
+            <span class="ptype">int</span>
+            <span class="pdesc">Minimum service tier (1–5). Higher tiers have stronger uptime SLAs. <span class="pill pill-opt">optional</span></span>
+          </div>
+          <div class="param-row">
+            <span class="pname">max_price_usd</span>
+            <span class="ptype">float</span>
+            <span class="pdesc">Maximum cost per call in USD. <span class="pill pill-opt">optional</span></span>
+          </div>
+          <div class="param-row">
+            <span class="pname">max_latency_ms</span>
+            <span class="ptype">int</span>
+            <span class="pdesc">Maximum P95 response time in milliseconds. <span class="pill pill-opt">optional</span></span>
+          </div>
+          <div class="param-row">
+            <span class="pname">region</span>
+            <span class="ptype">str</span>
+            <span class="pdesc">Preferred region: <code>us-east</code>, <code>us-west</code>, <code>eu-west</code>, <code>ap-east</code>. <span class="pill pill-opt">optional</span></span>
+          </div>
+          <div class="param-row">
+            <span class="pname">payment_rail</span>
+            <span class="ptype">str</span>
+            <span class="pdesc">Filter by supported payment method: <code>card</code>, <code>usdc</code>, <code>x402</code>. <span class="pill pill-opt">optional</span></span>
+          </div>
+          <div class="param-row">
+            <span class="pname">limit</span>
+            <span class="ptype">int</span>
+            <span class="pdesc">Maximum results to return. Default <code>10</code>, max <code>50</code>. <span class="pill pill-opt">optional</span></span>
+          </div>
+        </div>
+
+        <h3>Return type: <code>ServiceResult</code></h3>
+        <div class="params">
+          <div class="param-row">
+            <span class="pname">slug</span>
+            <span class="ptype">str</span>
+            <span class="pdesc">Unique service identifier used in <code>wayforth_execute(slug=...)</code></span>
+          </div>
+          <div class="param-row">
+            <span class="pname">name</span>
+            <span class="ptype">str</span>
+            <span class="pdesc">Human-readable service name</span>
+          </div>
+          <div class="param-row">
+            <span class="pname">description</span>
+            <span class="ptype">str</span>
+            <span class="pdesc">Short description of what the service does</span>
+          </div>
+          <div class="param-row">
+            <span class="pname">wri_score</span>
+            <span class="ptype">int</span>
+            <span class="pdesc">Wayforth Reliability Index, 0–100</span>
+          </div>
+          <div class="param-row">
+            <span class="pname">tier</span>
+            <span class="ptype">int</span>
+            <span class="pdesc">Service tier, 1–5</span>
+          </div>
+          <div class="param-row">
+            <span class="pname">category</span>
+            <span class="ptype">str</span>
+            <span class="pdesc">Category slug (e.g. <code>translation</code>, <code>vision</code>)</span>
+          </div>
+          <div class="param-row">
+            <span class="pname">payment_rails</span>
+            <span class="ptype">list[str]</span>
+            <span class="pdesc">Supported payment methods</span>
+          </div>
+          <div class="param-row">
+            <span class="pname">price_per_call</span>
+            <span class="ptype">float</span>
+            <span class="pdesc">Cost per API call in USD</span>
+          </div>
+        </div>
+
+        <h3>Examples</h3>
+
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">mcp tool</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-python"># Basic search
+wayforth_search("image classification")
+
+# With filters
+wayforth_search(
+    "transcribe audio to text",
+    max_price_usd=0.05,
+    max_latency_ms=3000,
+    region="us-east"
+)
+
+# By payment rail
+wayforth_search("generate embeddings", payment_rail="x402")
+
+# Top 3 results
+wayforth_search("code review", tier=3, limit=3)</code></pre>
+        </div>
+      </section>
+
+      <!-- WayforthQL -->
+      <section id="wayforthql">
+        <h2>WayforthQL v1.1</h2>
+        <p>WayforthQL is a structured query language for precise service discovery. Use it when you need exact filtering, complex conditions, or reproducible queries.</p>
+
+        <h3>Syntax</h3>
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">wayforthql</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-bash"># Field filter
+category:translation
+
+# Comparison operators: :, :>, :>=, :<, :<=, :!=
+tier:>=2
+max_price_usd:<=0.05
+
+# Boolean operators (AND, OR, NOT)
+category:nlp AND tier:>=2
+category:translation OR category:nlp
+NOT category:storage
+
+# Sort  (SORT BY field ASC|DESC)
+category:vision SORT BY wri_score DESC
+
+# Limit
+category:audio LIMIT 5
+
+# Slug lookup
+slug:deepl
+
+# Full example
+category:translation AND tier:>=2 AND region:eu-west SORT BY wri_score DESC LIMIT 10</code></pre>
+        </div>
+
+        <h3>Using WayforthQL via MCP</h3>
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">mcp tool</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-python">wayforth_query("category:translation AND tier:>=2 SORT BY wri_score DESC")</code></pre>
+        </div>
+
+        <h3>Via SDK</h3>
+        <div class="code-block">
+          <div class="cb-header">
+            <span class="cb-lang">python</span>
+            <button class="copy-btn">Copy</button>
+          </div>
+          <pre><code class="language-python">from wayforth import Wayforth
+
+client = Wayforth(api_key="wf_live_...")
+results = client.query("category:vision AND max_price_usd:<=0.01 SORT BY wri_score DESC LIMIT 5")</code></pre>
+        </div>
+
+        <h3>Field reference</h3>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Field</th><th>Type</th><th>Description</th><th>Example</th></tr></thead>
+            <tbody>
+              <tr><td><code>category</code></td><td>string</td><td>Category slug</td><td><code>category:translation</code></td></tr>
+              <tr><td><code>slug</code></td><td>string</td><td>Exact service slug</td><td><code>slug:deepl</code></td></tr>
+              <tr><td><code>tier</code></td><td>int (1–5)</td><td>Service tier</td><td><code>tier:>=3</code></td></tr>
+              <tr><td><code>wri_score</code></td><td>int (0–100)</td><td>Reliability index</td><td><code>wri_score:>=80</code></td></tr>
+              <tr><td><code>max_price_usd</code></td><td>float</td><td>Cost per call</td><td><code>max_price_usd:<=0.05</code></td></tr>
+              <tr><td><code>max_latency_ms</code></td><td>int</td><td>P95 latency in ms</td><td><code>max_latency_ms:<=2000</code></td></tr>
+              <tr><td><code>region</code></td><td>string</td><td>Serving region</td><td><code>region:eu-west</code></td></tr>
+              <tr><td><code>payment_rail</code></td><td>string</td><td>Payment method</td><td><code>payment_rail:x402</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout cn">
+          <p><strong>Tip:</strong> WayforthQL is case-insensitive for field names and operators. <code>CATEGORY:Translation</code> and <code>category:translation</code> are equivalent.</p>
+        </div>
+      </section>
+
+      <!-- Filters -->
+      <section id="filters">
+        <h2>Search filters</h2>
+        <p>All filters apply to both <code>wayforth_search()</code> (as kwargs) and WayforthQL (as field conditions).</p>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Filter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><code>tier</code></td>
+                <td>int 1–5</td>
+                <td>Service tier. <strong>1</strong> = community, <strong>3</strong> = production-ready (WRI ≥ 80), <strong>5</strong> = enterprise SLA.</td>
+              </tr>
+              <tr>
+                <td><code>max_price_usd</code></td>
+                <td>float</td>
+                <td>Maximum cost per successful call. Calls that fail before execution are not charged.</td>
+              </tr>
+              <tr>
+                <td><code>max_latency_ms</code></td>
+                <td>int</td>
+                <td>Maximum P95 round-trip latency in milliseconds, measured at the gateway.</td>
+              </tr>
+              <tr>
+                <td><code>region</code></td>
+                <td>string</td>
+                <td>
+                  Preferred region:
+                  <code>us-east</code>, <code>us-west</code>, <code>eu-west</code>, <code>eu-central</code>, <code>ap-east</code>, <code>ap-south</code>
+                </td>
+              </tr>
+              <tr>
+                <td><code>payment_rail</code></td>
+                <td>string</td>
+                <td>
+                  Accepted payment method:
+                  <code>card</code> (Stripe), <code>usdc</code> (Base L2), <code>x402</code> (HTTP-native).
+                  See <a href="payment-rails.html">Payment Rails</a>.
+                </td>
+              </tr>
+              <tr>
+                <td><code>limit</code></td>
+                <td>int</td>
+                <td>Number of results to return. Default 10, max 50.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Categories -->
+      <section id="categories">
+        <h2>Categories</h2>
+        <p>All 19 categories available in the catalog. Use the <code>category</code> field in WayforthQL or browse with <code>wayforth_services(category="...")</code>.</p>
+
+        <div class="cat-grid">
+          <div class="cat-item"><span class="cat-slug">translation</span></div>
+          <div class="cat-item"><span class="cat-slug">nlp</span></div>
+          <div class="cat-item"><span class="cat-slug">generation</span></div>
+          <div class="cat-item"><span class="cat-slug">vision</span></div>
+          <div class="cat-item"><span class="cat-slug">audio</span></div>
+          <div class="cat-item"><span class="cat-slug">code</span></div>
+          <div class="cat-item"><span class="cat-slug">embeddings</span></div>
+          <div class="cat-item"><span class="cat-slug">search</span></div>
+          <div class="cat-item"><span class="cat-slug">extraction</span></div>
+          <div class="cat-item"><span class="cat-slug">summarization</span></div>
+          <div class="cat-item"><span class="cat-slug">classification</span></div>
+          <div class="cat-item"><span class="cat-slug">moderation</span></div>
+          <div class="cat-item"><span class="cat-slug">finance</span></div>
+          <div class="cat-item"><span class="cat-slug">geo</span></div>
+          <div class="cat-item"><span class="cat-slug">identity</span></div>
+          <div class="cat-item"><span class="cat-slug">notifications</span></div>
+          <div class="cat-item"><span class="cat-slug">storage</span></div>
+          <div class="cat-item"><span class="cat-slug">analytics</span></div>
+          <div class="cat-item"><span class="cat-slug">data</span></div>
+        </div>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Slug</th><th>Full name</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>translation</code></td><td>Translation &amp; Localization</td><td>Machine translation, language detection, locale adaption</td></tr>
+              <tr><td><code>nlp</code></td><td>Natural Language Processing</td><td>Named entity recognition, sentiment, POS tagging</td></tr>
+              <tr><td><code>generation</code></td><td>AI Content Generation</td><td>Text, image, and structured content generation</td></tr>
+              <tr><td><code>vision</code></td><td>Computer Vision</td><td>Image classification, object detection, OCR</td></tr>
+              <tr><td><code>audio</code></td><td>Audio &amp; Speech</td><td>Transcription, TTS, speaker diarization, voice cloning</td></tr>
+              <tr><td><code>code</code></td><td>Code Intelligence</td><td>Code review, completion, vulnerability scanning, docgen</td></tr>
+              <tr><td><code>embeddings</code></td><td>Embeddings &amp; Vectors</td><td>Dense/sparse embeddings, semantic similarity, reranking</td></tr>
+              <tr><td><code>search</code></td><td>Search &amp; Retrieval</td><td>Web search, news retrieval, SERP, knowledge bases</td></tr>
+              <tr><td><code>extraction</code></td><td>Data Extraction &amp; Parsing</td><td>Document parsing, table extraction, HTML scraping</td></tr>
+              <tr><td><code>summarization</code></td><td>Summarization</td><td>Long document summarization, abstractive &amp; extractive</td></tr>
+              <tr><td><code>classification</code></td><td>Classification &amp; Tagging</td><td>Intent classification, tagging, zero-shot classification</td></tr>
+              <tr><td><code>moderation</code></td><td>Content Moderation</td><td>Toxicity detection, NSFW filtering, policy enforcement</td></tr>
+              <tr><td><code>finance</code></td><td>Financial Data</td><td>Market data, earnings, company filings, FX rates</td></tr>
+              <tr><td><code>geo</code></td><td>Geolocation &amp; Maps</td><td>Geocoding, IP geolocation, routing, place search</td></tr>
+              <tr><td><code>identity</code></td><td>Identity &amp; Verification</td><td>Email verification, phone lookup, ID document checks</td></tr>
+              <tr><td><code>notifications</code></td><td>Notifications &amp; Messaging</td><td>SMS, email, push, webhook delivery</td></tr>
+              <tr><td><code>storage</code></td><td>File &amp; Storage</td><td>Object storage, file conversion, CDN delivery</td></tr>
+              <tr><td><code>analytics</code></td><td>Analytics &amp; Intelligence</td><td>Web analytics, cohort analysis, funnel tracking</td></tr>
+              <tr><td><code>data</code></td><td>Data Processing &amp; ETL</td><td>Transformation, deduplication, enrichment pipelines</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- WRI -->
+      <section id="wri">
+        <h2>WRI Score</h2>
+        <p>The <strong>Wayforth Reliability Index (WRI)</strong> is a live 0–100 score that measures how trustworthy a service is for production use. It is recalculated continuously from real call data.</p>
+
+        <h3>Score components</h3>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Signal</th><th>Weight</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>Uptime reliability</td><td>35%</td><td>Rolling 30-day successful response rate</td></tr>
+              <tr><td>Payment success rate</td><td>25%</td><td>Fraction of billing events that settled without retry</td></tr>
+              <tr><td>Latency consistency</td><td>20%</td><td>P95 / P50 ratio — lower variance = higher score</td></tr>
+              <tr><td>Call volume</td><td>15%</td><td>Log-scaled volume signal; higher usage = more trust</td></tr>
+              <tr><td>Tier multiplier</td><td>+5%</td><td>Tier 2+ services receive a reliability bonus</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Score thresholds</h3>
+        <div style="margin: 1.25rem 0; max-width: 480px;">
+          <div class="wri-row">
+            <span class="wri-label">90–100</span>
+            <div class="wri-bar"><div class="wri-fill" style="width:100%; background:var(--green)"></div></div>
+            <span class="wri-val" style="color:var(--green)">Elite</span>
+          </div>
+          <div class="wri-row">
+            <span class="wri-label">80–89</span>
+            <div class="wri-bar"><div class="wri-fill" style="width:89%; background:var(--cyan)"></div></div>
+            <span class="wri-val" style="color:var(--cyan)">Prod</span>
+          </div>
+          <div class="wri-row">
+            <span class="wri-label">70–79</span>
+            <div class="wri-bar"><div class="wri-fill" style="width:79%; background:var(--accent-light)"></div></div>
+            <span class="wri-val" style="color:var(--accent-light)">Stable</span>
+          </div>
+          <div class="wri-row">
+            <span class="wri-label">50–69</span>
+            <div class="wri-bar"><div class="wri-fill" style="width:69%; background:var(--yellow)"></div></div>
+            <span class="wri-val" style="color:var(--yellow)">Beta</span>
+          </div>
+          <div class="wri-row">
+            <span class="wri-label">&lt;50</span>
+            <div class="wri-bar"><div class="wri-fill" style="width:40%; background:var(--red)"></div></div>
+            <span class="wri-val" style="color:var(--red)">Dev</span>
+          </div>
+        </div>
+
+        <p>Services with WRI ≥ 80 are recommended for production workloads. The default search results are sorted by a weighted combination of semantic relevance and WRI score.</p>
+
+        <div class="callout cn">
+          <p><strong>Note:</strong> WRI is computed for each service independently. A service can drop below 80 if its upstream provider degrades. Wayforth's self-healing payment layer will automatically retry or reroute calls to a backup provider when this happens.</p>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+<footer class="docs-footer">
+  <span>&copy; 2025 Wayforth Technologies Inc.</span>
+  <nav class="docs-footer-links" aria-label="Legal">
+    <a href="https://wayforth.io/privacy">Privacy</a>
+    <a href="https://wayforth.io/terms">Terms</a>
+    <a href="https://wayforth.io/acceptable-use">Acceptable Use</a>
+    <a href="https://wayforth.io/cookies">Cookies</a>
+    <a href="https://wayforth.io/risk">Risk Disclosure</a>
+    <a href="https://wayforth.io/compliance">Compliance</a>
+  </nav>
+</footer>
+<script src="main.js"></script>
+</body>
+</html>
