@@ -1303,6 +1303,29 @@ async def get_chain_info():
 
 _CHANGELOG_ENTRIES = [
     {
+        "version": "0.7.0",
+        "title": "Hardened",
+        "date": "Fri, 22 May 2026 00:00:00 +0000",
+        "link": "https://wayforth.io/changelog#v0.7.0",
+        "description": (
+            "Professional penetration test completed; all findings resolved. "
+            "Fail-closed USDC tx verification (was fail-open on RPC error). "
+            "Stripe webhook idempotency via stripe_events(event_id PK) dedup table. "
+            "Atomic check-and-increment on monthly api_key quota (TOCTOU fixed at all 3 auth sites). "
+            "Provider session tokens now hashed at rest (sha256), matching admin sessions. "
+            "/auth/register requires a verified Supabase Bearer JWT — body identity claims no longer trusted. "
+            "MFA hardening: setup refuses overwrite when already enabled; developer disable requires Supabase JWT. "
+            "BYOK /execute path: validate_external_url, header allow-list, 1 MB response cap, follow_redirects=False. "
+            "Webhook delivery re-validates URLs at dispatch (DNS-rebinding defense). "
+            "Admin role gates added on add-credits, regenerate-key, change-tier, reset-usage, suspend. "
+            "x402: per-process replay store moved to Redis (SET NX); payment tolerance tightened 2% → 0.5%. "
+            "CORS: dropped broad lovable.app wildcard regex with credentials=true. "
+            "Login lockout now also keyed per-IP (credential stuffing defense). "
+            "Global request body size middleware: 1 MB default, 4 MB on /run and /execute. "
+            "186 tests passing, 0 failures."
+        ),
+    },
+    {
         "version": "0.6.14",
         "title": "Economics",
         "date": "Mon, 19 May 2026 00:00:00 +0000",
