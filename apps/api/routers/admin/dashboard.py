@@ -27,12 +27,29 @@ ADMIN_ROLES = {
 
 
 async def get_admin_session(request: Request, db):
+    import os as _os
     from main import ADMIN_KEY
-    # X-Admin-Key grants full ceo-level access without a JWT session
+    # X-Admin-Key grants full ceo-level access without a JWT session and without
+    # MFA. This is a break-glass mechanism — gate it on an explicit env opt-in
+    # so it cannot be used in a hardened production deploy. Always log when it
+    # IS used, so abuse leaves a trail (sessioned admin paths produce one too).
     admin_key = request.headers.get("X-Admin-Key", "")
-    if admin_key and ADMIN_KEY and secrets.compare_digest(admin_key, ADMIN_KEY):
-        return {"role": "ceo", "email": "admin", "full_name": "Admin", "is_active": True,
-                "admin_user_id": None}
+    if admin_key and ADMIN_KEY:
+        admin_key_enabled = _os.environ.get("WAYFORTH_ADMIN_KEY_ENABLED", "true").lower() == "true"
+        env_name = _os.environ.get("ENVIRONMENT", "development").lower()
+        if not admin_key_enabled:
+            logger.warning("X-Admin-Key presented but disabled by WAYFORTH_ADMIN_KEY_ENABLED=false")
+            raise HTTPException(status_code=404, detail="Not found")
+        if secrets.compare_digest(admin_key, ADMIN_KEY):
+            logger.warning(
+                "ADMIN_KEY break-glass used env=%s ip=%s ua=%s path=%s",
+                env_name,
+                request.client.host if request.client else "?",
+                request.headers.get("user-agent", "?")[:80],
+                request.url.path,
+            )
+            return {"role": "ceo", "email": "admin", "full_name": "Admin", "is_active": True,
+                    "admin_user_id": None}
 
     token = request.headers.get("X-Admin-Token", "")
     if not token:
@@ -66,15 +83,17 @@ async def admin_login(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=400, detail="Email and password required")
 
     from core.tier_gates import _get_redis
+    from core.rate_limit import get_real_ip
     redis = _get_redis()
-    await check_login_lockout(email, redis)
+    ip = get_real_ip(request)
+    await check_login_lockout(email, redis, ip=ip)
 
     user = await db.fetchrow(
         "SELECT * FROM admin_users WHERE email = $1 AND is_active = true", email
     )
 
     if not user or not bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
-        await record_login_failure(email, redis)
+        await record_login_failure(email, redis, ip=ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     await clear_login_failures(email, redis)
@@ -429,12 +448,15 @@ async def admin_get_user(request: Request, user_id: str, db=Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Scope to THIS user — the original query had no user_id filter and would
+    # return arbitrary users' search history when an admin viewed any profile.
     searches = await db.fetch("""
         SELECT query, created_at, top_result_id
         FROM search_analytics
-        WHERE created_at > NOW() - INTERVAL '30 days'
+        WHERE user_id = $1::uuid
+          AND created_at > NOW() - INTERVAL '30 days'
         ORDER BY created_at DESC LIMIT 10
-    """)
+    """, user_id)
 
     service_keys = await db.fetch("""
         SELECT service_slug, service_name, key_preview,
@@ -463,6 +485,11 @@ async def admin_get_user(request: Request, user_id: str, db=Depends(get_db)):
 async def admin_change_tier(request: Request, user_id: str, db=Depends(get_db)):
     from core.credits import PLANS
     session = await get_admin_session(request, db)
+    # Tier changes affect billing and feature gates — restrict to roles that
+    # legitimately operate on customer plans. Previously any authenticated
+    # admin (e.g. an `analytics` viewer) could rewrite any user's tier.
+    if session["role"] not in ("ceo", "support", "operations"):
+        raise HTTPException(status_code=403, detail="Insufficient admin role")
     body = await request.json()
     new_tier = body.get("tier")
     reason = body.get("reason", "Admin manual change")
@@ -529,6 +556,8 @@ async def admin_change_tier(request: Request, user_id: str, db=Depends(get_db)):
 @router.post("/admin-api/users/{user_id}/reset-usage")
 async def admin_reset_usage(request: Request, user_id: str, db=Depends(get_db)):
     session = await get_admin_session(request, db)
+    if session["role"] not in ("ceo", "support", "operations"):
+        raise HTTPException(status_code=403, detail="Insufficient admin role")
     body = await request.json()
     reason = body.get("reason", "Admin reset")
 
@@ -543,6 +572,10 @@ async def admin_reset_usage(request: Request, user_id: str, db=Depends(get_db)):
 @router.post("/admin-api/users/{user_id}/add-credits")
 async def admin_add_credits(request: Request, user_id: str, db=Depends(get_db)):
     session = await get_admin_session(request, db)
+    # Granting up to 1M credits per call is the same as minting money — restrict
+    # to ceo or support roles. Previously any admin role could grant credits.
+    if session["role"] not in ("ceo", "support"):
+        raise HTTPException(status_code=403, detail="Insufficient admin role")
     body = await request.json()
     credits = int(body.get("credits", 0))
     reason = body.get("reason", "Admin grant")
@@ -588,6 +621,11 @@ async def admin_add_credits(request: Request, user_id: str, db=Depends(get_db)):
 @router.post("/admin-api/users/{user_id}/regenerate-key")
 async def admin_regenerate_key(request: Request, user_id: str, db=Depends(get_db)):
     session = await get_admin_session(request, db)
+    # The new key value is returned in the response — anyone calling this can
+    # impersonate the target user until the user notices and re-rotates.
+    # Restrict to CEO and support roles.
+    if session["role"] not in ("ceo", "support"):
+        raise HTTPException(status_code=403, detail="Insufficient admin role")
     body = await request.json()
     reason = body.get("reason", "Admin revoked")
 
@@ -622,6 +660,8 @@ async def admin_regenerate_key(request: Request, user_id: str, db=Depends(get_db
 @router.patch("/admin-api/users/{user_id}/suspend")
 async def admin_suspend_user(request: Request, user_id: str, db=Depends(get_db)):
     session = await get_admin_session(request, db)
+    if session["role"] not in ("ceo", "support", "operations"):
+        raise HTTPException(status_code=403, detail="Insufficient admin role")
     body = await request.json()
     suspended = body.get("suspended", True)
     reason = body.get("reason", "")
@@ -663,11 +703,14 @@ async def admin_user_searches(request: Request, user_id: str, limit: int = 50, d
     if not key:
         return {"searches": [], "total": 0}
 
+    # Scope to the target user — the original query returned global search
+    # history regardless of user_id.
     searches = await db.fetch("""
         SELECT query, created_at, top_result_id, led_to_payment
         FROM search_analytics
-        ORDER BY created_at DESC LIMIT $1
-    """, limit)
+        WHERE user_id = $1::uuid
+        ORDER BY created_at DESC LIMIT $2
+    """, user_id, limit)
 
     return {
         "searches": [dict(s) for s in searches],

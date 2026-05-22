@@ -62,7 +62,7 @@ async def _fire_wri_alerts(pool, scored: list[dict]) -> int:
     async with pool.acquire() as db:
         alerts = await db.fetch("""
             SELECT a.id, a.api_key_id, a.category, a.threshold_score, a.min_signals,
-                   a.notify_url, a.last_fired_at
+                   a.notify_url, a.last_fired_at, a.hmac_secret
             FROM wri_alerts a
             WHERE a.active = true
         """)
@@ -130,8 +130,12 @@ async def _fire_wri_alerts(pool, scored: list[dict]) -> int:
             }
             body = json_lib.dumps(payload)
 
-            # HMAC-SHA256 using api_key_id as the signing secret (stable per key)
-            secret = str(alert["api_key_id"])
+            # HMAC-SHA256 using a per-alert random secret. Falls back to
+            # api_key_id only for legacy alerts that pre-date hmac_secret —
+            # those will rotate to the new format on next /webhooks/wri-alerts
+            # POST. Verifiers signed against api_key_id keep working in the
+            # meantime.
+            secret = alert["hmac_secret"] or str(alert["api_key_id"])
             sig = hmac.new(
                 secret.encode(),
                 f"{timestamp}.{body}".encode(),
@@ -140,8 +144,17 @@ async def _fire_wri_alerts(pool, scored: list[dict]) -> int:
 
             status_code = None
             success = False
+            # Re-validate notify_url at delivery time (defense against DNS
+            # rebinding between registration and fire).
             try:
-                async with httpx.AsyncClient(timeout=8.0) as client:
+                from core.url_validation import validate_external_url
+                validate_external_url(alert["notify_url"], field_name="notify_url")
+            except Exception as _vexc:
+                logger.warning("wri_alert refused alert=%s url=%s: %s",
+                               alert["id"], alert["notify_url"], _vexc)
+                continue
+            try:
+                async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
                     resp = await client.post(
                         alert["notify_url"],
                         content=body,
@@ -296,12 +309,13 @@ async def create_wri_alert(request: Request, db=Depends(get_db)):
         })
     validate_external_url(notify_url, field_name="notify_url")
 
+    alert_secret = secrets.token_hex(32)  # 256 bits, distinct from api_key_id
     row = await db.fetchrow("""
         INSERT INTO wri_alerts
-            (api_key_id, category, threshold_score, min_signals, notify_url)
-        VALUES ($1, $2, $3, $4, $5)
+            (api_key_id, category, threshold_score, min_signals, notify_url, hmac_secret)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id, category, threshold_score, min_signals, notify_url, active, created_at
-    """, api_key_id, category, float(threshold), min_signals, notify_url)
+    """, api_key_id, category, float(threshold), min_signals, notify_url, alert_secret)
 
     return {
         "id": str(row["id"]),
@@ -311,6 +325,9 @@ async def create_wri_alert(request: Request, db=Depends(get_db)):
         "notify_url": row["notify_url"],
         "active": row["active"],
         "created_at": row["created_at"].isoformat(),
+        # Returned ONCE — store it; we sign every wri.threshold_crossed payload
+        # with this. Verify with HMAC-SHA256 over `"{timestamp}.{body}"`.
+        "hmac_secret": alert_secret,
     }
 
 

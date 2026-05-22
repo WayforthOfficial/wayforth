@@ -323,6 +323,15 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS wri_alerts_api_key_idx
                 ON wri_alerts(api_key_id) WHERE active = true
             """)
+            # Per-alert HMAC secret. Previously alerts were signed with the
+            # api_key_id (a UUID, low entropy AND leakable via admin views), so
+            # an attacker who learned the api_key_id could forge `wri.threshold_
+            # crossed` callbacks to the user's notify_url. New alerts generate a
+            # 32-byte random secret returned once at creation.
+            await _mconn.execute("""
+                ALTER TABLE wri_alerts
+                    ADD COLUMN IF NOT EXISTS hmac_secret TEXT
+            """)
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS wri_alert_logs (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -424,6 +433,40 @@ async def lifespan(app: FastAPI):
             """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS provider_sessions_token_idx ON provider_sessions(token)
+            """)
+            # 040 (inline) — hash provider session tokens at rest. Previously the
+            # raw token was stored in the `token` column and matched directly on
+            # lookup, so anyone reading provider_sessions (backup leak, replica
+            # access) could hijack any active provider session. We add a
+            # `token_hash` column, backfill it from the existing raw token for
+            # any rows that don't have one yet, and update routers/provider.py +
+            # routers/mfa.py to look up by hash. New sessions write only the
+            # hash; the raw `token` column is left in place but is no longer
+            # consulted, and will be dropped in a follow-up migration once all
+            # existing sessions have rotated out.
+            # Stripe webhook idempotency: every event we successfully process
+            # is recorded by event id. On replay (Stripe retries on 5xx /
+            # network issues by design), we look the id up and short-circuit.
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS stripe_events (
+                    event_id        TEXT PRIMARY KEY,
+                    event_type      TEXT NOT NULL,
+                    processed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                ALTER TABLE provider_sessions
+                    ADD COLUMN IF NOT EXISTS token_hash TEXT
+            """)
+            await _mconn.execute("""
+                UPDATE provider_sessions
+                SET token_hash = encode(sha256(token::bytea), 'hex')
+                WHERE token_hash IS NULL AND token IS NOT NULL
+            """)
+            await _mconn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS provider_sessions_token_hash_uniq
+                ON provider_sessions(token_hash)
+                WHERE token_hash IS NOT NULL
             """)
             await _mconn.execute("""
                 ALTER TABLE api_keys
@@ -652,6 +695,16 @@ https://wayforth.io/contact
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+# CORS:
+# - With `allow_credentials=True`, a cookie-bearing request from any origin in
+#   `allow_origins` or matching `allow_origin_regex` will succeed. The previous
+#   regex `r"https://[^.]+\.lovable\.app"` admitted ANY subdomain of lovable.app
+#   — a shared third-party hosting service. Anyone who can publish a site there
+#   could issue authenticated XHRs against the API from a browser session.
+#   We keep the two explicit Lovable preview origins that the dashboard uses
+#   and drop the wildcard regex. Auth is primarily header-based
+#   (X-Wayforth-API-Key), so cookie CSRF surface is limited, but tightening
+#   this is defense in depth.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -662,7 +715,6 @@ app.add_middleware(
         "https://id-preview--1f7c5e7e-c191-4274-b4a6-f6e732da08d9.lovable.app",
         "https://intent-exchange.lovable.app",
     ],
-    allow_origin_regex=r"https://[^.]+\.lovable\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS", "DELETE", "PUT"],
     allow_headers=["*"],
@@ -735,20 +787,29 @@ async def check_auth(request: Request) -> dict:
             raise HTTPException(status_code=503, detail="Database unavailable")
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         async with pool.acquire() as db:
+            # Atomic check-and-increment (see core/auth.py for rationale).
             key = await db.fetchrow("""
-                SELECT id, user_id, tier, rate_limit_per_minute, monthly_quota,
-                       usage_this_month, quota_reset_at, active,
-                       payment_rail, subscription_expires_at
-                FROM api_keys WHERE key_hash = $1
+                UPDATE api_keys
+                SET usage_this_month = usage_this_month + 1,
+                    last_used_at = NOW()
+                WHERE key_hash = $1
+                  AND active = TRUE
+                  AND (monthly_quota = 0 OR usage_this_month < monthly_quota)
+                RETURNING id, user_id, tier, rate_limit_per_minute, monthly_quota,
+                          usage_this_month, quota_reset_at, active,
+                          payment_rail, subscription_expires_at
             """, key_hash)
 
-        if not key or not key["active"]:
-            raise _AuthError(401, {
-                "error": "invalid_key",
-                "message": "Invalid API key. Get yours at wayforth.io/dashboard",
-            })
-
-        if key["monthly_quota"] > 0 and key["usage_this_month"] >= key["monthly_quota"]:
+        if not key:
+            async with pool.acquire() as db:
+                existing = await db.fetchrow(
+                    "SELECT active FROM api_keys WHERE key_hash = $1", key_hash,
+                )
+            if not existing or not existing["active"]:
+                raise _AuthError(401, {
+                    "error": "invalid_key",
+                    "message": "Invalid API key. Get yours at wayforth.io/dashboard",
+                })
             raise _AuthError(429, {
                 "error": "quota_exceeded",
                 "message": "Monthly quota exceeded. Upgrade at wayforth.io/pricing",
@@ -758,22 +819,13 @@ async def check_auth(request: Request) -> dict:
         # Graceful USDC subscription expiry
         if (key.get("payment_rail") == "usdc" and key.get("subscription_expires_at")
                 and key["subscription_expires_at"] < datetime.now(timezone.utc)):
-            from routers.billing import _activate_usdc_subscription
-            # _downgrade_expired_usdc uses app.state.pool — defer to billing module
             from core.credits import _downgrade_expired_usdc
             asyncio.create_task(_downgrade_expired_usdc(str(key["id"])))
-
-        async with pool.acquire() as db:
-            await db.execute("""
-                UPDATE api_keys SET usage_this_month = usage_this_month + 1,
-                                    last_used_at = NOW()
-                WHERE id = $1
-            """, key["id"])
 
         rpm = _TIER_RPM.get(key["tier"], 10)
         tier = key["tier"] or "free"
         calls_included = PLANS.get(tier, {}).get("calls_included", 100)
-        usage = key["usage_this_month"] + 1
+        usage = key["usage_this_month"]
         request.state.rate_limit_tier = tier
         request.state.rate_limit_rpm = rpm
         request.state.ratelimit_remaining = max(0, calls_included - usage)

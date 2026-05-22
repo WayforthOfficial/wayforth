@@ -63,8 +63,11 @@ async def _verify_x402_payment(payment_header: str, payto: str, expected_price_s
                 "received_micro": received_micro,
                 "error": "payee_mismatch",
             }
-        # Allow 2% tolerance for gas variance
-        within_tolerance = received_micro >= int(expected_micro * 0.98)
+        # Tightened from 2% to 0.5%. Gas variance does not apply to the
+        # USDC.transferWithAuthorization `value` field — `value` is the
+        # amount being authorized, not what's deducted after fees — so any
+        # meaningful underpayment is intentional.
+        within_tolerance = received_micro >= int(expected_micro * 0.995)
         return {
             "valid": within_tolerance,
             "from_address": from_address,
@@ -86,7 +89,14 @@ async def _verify_x402_payment(payment_header: str, payto: str, expected_price_s
 
 
 async def _verify_payment_async(payment_header: str, service_slug: str):
-    """Background verification after optimistic acceptance. Flags account on failure."""
+    """Background verification after optimistic acceptance.
+
+    When the synchronous verification times out (5s), the call has already been
+    served. We re-verify here and, on failure, flag the payer's wallet so
+    subsequent x402 calls from it are subject to closer scrutiny / blocking. A
+    determined attacker who can repeatedly trigger verify timeouts could
+    otherwise execute services for free and only ever be logged.
+    """
     await asyncio.sleep(10)  # allow chain to confirm
     try:
         from services.x402_pricing import X402_PRICES_USDC
@@ -95,10 +105,32 @@ async def _verify_payment_async(payment_header: str, service_slug: str):
             payment_header, os.environ.get("WAYFORTH_BASE_WALLET", ""), price_str
         )
         if not result.get("valid"):
+            payer = (result.get("from_address") or "").lower()
             logger.warning(
-                "x402 optimistic payment failed post-verification: service=%s payment_status=pending_verification",
-                service_slug,
+                "x402 optimistic payment failed post-verification: service=%s payer=%s reason=%s",
+                service_slug, payer or "(unknown)", result.get("error") or "invalid",
             )
+            if payer:
+                try:
+                    from main import app as _app
+                    pool = getattr(_app.state, "pool", None)
+                    if pool:
+                        async with pool.acquire() as _db:
+                            await _db.execute(
+                                """
+                                INSERT INTO x402_agent_identities
+                                    (wallet_address, flagged, flag_reason, last_seen)
+                                VALUES ($1, true, $2, NOW())
+                                ON CONFLICT (wallet_address) DO UPDATE
+                                SET flagged = true,
+                                    flag_reason = EXCLUDED.flag_reason,
+                                    last_seen = NOW()
+                                """,
+                                payer,
+                                f"optimistic_unverified:{service_slug}",
+                            )
+                except Exception as _flag_err:
+                    logger.error("x402 flag-wallet failed: %s", _flag_err)
     except Exception as _e:
         logger.error("_verify_payment_async error: %s", _e)
 
@@ -196,24 +228,47 @@ async def x402_execute(request):
         })
 
     # Replay prevention: reject payment headers seen within the last 5 minutes.
+    # In a multi-replica deploy, the per-process dict is not sufficient — an
+    # attacker can replay against a different worker. Use Redis when available;
+    # the in-memory dict remains as a fallback for single-process / dev.
     _ph_hash = _hl.sha256(payment_header.encode()).hexdigest()
     _now = _time.time()
-    # Prune expired entries by removing keys; previous `update` form re-added
-    # the same keys and never actually removed anything.
-    expired = [k for k, v in _x402_seen.items() if _now - v >= _X402_NONCE_TTL]
-    for k in expired:
-        _x402_seen.pop(k, None)
-    # Hard cap so a flood of unique payments can't OOM the worker if prune is
-    # somehow bypassed; oldest entries get evicted first.
-    if len(_x402_seen) > _X402_SEEN_MAX:
-        for k in sorted(_x402_seen, key=_x402_seen.get)[: len(_x402_seen) - _X402_SEEN_MAX]:
+    _replay_blocked = False
+    from core.tier_gates import _get_redis as _x402_get_redis
+    _redis = _x402_get_redis()
+    if _redis is not None:
+        try:
+            # SET NX with TTL: returns truthy on first write, None on replay.
+            _set_ok = await _redis.set(
+                f"wf:x402:nonce:{_ph_hash}",
+                "1",
+                ex=_X402_NONCE_TTL,
+                nx=True,
+            )
+            _replay_blocked = _set_ok is None
+        except Exception as _redis_err:
+            logger.warning("x402 replay redis check failed, falling back to memory: %s", _redis_err)
+            _redis = None
+    if _redis is None:
+        # In-process fallback. Prune expired entries by removing keys; the
+        # previous `update` form re-added the same keys and never removed.
+        expired = [k for k, v in _x402_seen.items() if _now - v >= _X402_NONCE_TTL]
+        for k in expired:
             _x402_seen.pop(k, None)
-    if _ph_hash in _x402_seen:
+        # Hard cap so a flood of unique payments can't OOM the worker if prune
+        # is somehow bypassed; oldest entries get evicted first.
+        if len(_x402_seen) > _X402_SEEN_MAX:
+            for k in sorted(_x402_seen, key=_x402_seen.get)[: len(_x402_seen) - _X402_SEEN_MAX]:
+                _x402_seen.pop(k, None)
+        if _ph_hash in _x402_seen:
+            _replay_blocked = True
+        else:
+            _x402_seen[_ph_hash] = _now
+    if _replay_blocked:
         return JSONResponse(status_code=400, content={
             "error": "replay_rejected",
             "message": "This payment has already been processed. Each payment header can only be used once.",
         })
-    _x402_seen[_ph_hash] = _now
 
     # Verify payment with 5s timeout; accept optimistically on timeout
     payer_address = None
@@ -251,9 +306,17 @@ async def x402_execute(request):
         try:
             async with app.state.pool.acquire() as _id_db:
                 id_row = await _id_db.fetchrow(
-                    "SELECT tier FROM x402_agent_identities WHERE wallet_address=$1", wallet_lower
+                    "SELECT tier, flagged FROM x402_agent_identities WHERE wallet_address=$1",
+                    wallet_lower,
                 )
             wallet_tier = id_row["tier"] if id_row else "unknown"
+            # Refuse calls from wallets flagged for prior unverified payments.
+            if id_row and id_row.get("flagged"):
+                return JSONResponse(status_code=403, content={
+                    "error": "wallet_flagged",
+                    "message": "This wallet has been flagged for prior unverified payments. "
+                               "Contact support@wayforth.io if you believe this is an error.",
+                })
         except Exception:
             wallet_tier = "unknown"
         allowed, retry_after = _check_x402_rate_limit(wallet_lower, wallet_tier)

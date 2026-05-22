@@ -115,26 +115,32 @@ async def get_api_key(request: Request, db=Depends(get_db)):
         return {"tier": "anonymous", "rpm": 10, "quota": None}
 
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    # Atomic check-and-increment (see core/auth.py:check_auth for rationale).
     key = await db.fetchrow("""
-        SELECT id, tier, rate_limit_per_minute, monthly_quota, usage_this_month,
-               quota_reset_at, active
-        FROM api_keys WHERE key_hash = $1
-    """, key_hash)
-
-    if not key or not key["active"]:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    if key["monthly_quota"] > 0 and key["usage_this_month"] >= key["monthly_quota"]:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Monthly quota of {key['monthly_quota']} requests exceeded. Resets {key['quota_reset_at'].strftime('%Y-%m-%d')}",
-        )
-
-    await db.execute("""
         UPDATE api_keys
         SET usage_this_month = usage_this_month + 1, last_used_at = NOW()
-        WHERE id = $1
-    """, key["id"])
+        WHERE key_hash = $1
+          AND active = TRUE
+          AND (monthly_quota = 0 OR usage_this_month < monthly_quota)
+        RETURNING id, tier, rate_limit_per_minute, monthly_quota, usage_this_month,
+                  quota_reset_at, active
+    """, key_hash)
+
+    if not key:
+        existing = await db.fetchrow(
+            "SELECT active, monthly_quota, quota_reset_at "
+            "FROM api_keys WHERE key_hash = $1", key_hash,
+        )
+        if not existing or not existing["active"]:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        reset_str = (
+            existing["quota_reset_at"].strftime("%Y-%m-%d")
+            if existing["quota_reset_at"] else "next billing cycle"
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"Monthly quota of {existing['monthly_quota']} requests exceeded. Resets {reset_str}",
+        )
 
     request.state.rate_limit_tier = key["tier"]
     request.state.rate_limit_rpm = key["rate_limit_per_minute"]
@@ -239,20 +245,55 @@ async def key_usage(request: Request, db=Depends(get_db)):
 @router.post("/auth/register")
 @limiter.limit("5/minute")
 async def register_user(request: Request, db=Depends(get_db)):
-    from notifications import send_welcome_email
-    body = await request.json()
-    email = body.get("email")
-    supabase_id = body.get("supabase_id")
+    """Register a new Wayforth account.
 
-    if not email or not supabase_id:
-        raise HTTPException(status_code=400, detail="email and supabase_id required")
+    Requires a valid Supabase Bearer JWT in the `Authorization` header — the
+    request body's email/supabase_id are read FROM the verified JWT claims, not
+    trusted from the body. Before this guard, anyone could POST {email,
+    supabase_id} for any email/UUID4 string and squat the account (and receive
+    a working `wf_live_*` API key with free credits in the response).
+    """
+    from notifications import send_welcome_email
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail={
+            "error": "supabase_session_required",
+            "message": "Provide Authorization: Bearer <supabase_jwt> to register.",
+        })
+    token = auth_header.removeprefix("Bearer ").strip()
+    try:
+        claims = verify_supabase_jwt(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail={"error": "invalid_supabase_token"})
+
+    supabase_id = (claims.get("sub") or "").strip()
+    email = (claims.get("email") or "").strip().lower()
+    if not supabase_id or not email:
+        raise HTTPException(status_code=401, detail={
+            "error": "invalid_supabase_token",
+            "message": "Token is missing sub/email claims.",
+        })
+
+    # Optionally allow the body to specify a fallback email for callers that
+    # use phone-based Supabase auth — but the JWT claim still wins when present.
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body_email = (body.get("email") or "").strip().lower() if isinstance(body, dict) else ""
+    if body_email and body_email != email:
+        raise HTTPException(status_code=400, detail={
+            "error": "email_mismatch",
+            "message": "Body email does not match the Supabase token's email claim.",
+        })
 
     # Guard a: block @wayforth.io (and any other reserved domains)
     domain = email.split('@')[-1].lower() if '@' in email else ''
     if domain in _BLOCKED_DOMAINS:
         raise HTTPException(status_code=403, detail="invalid_email_domain")
 
-    # Guard b: supabase_id must be a valid UUID v4
+    # Guard b: supabase_id must be a valid UUID v4 (sanity check — Supabase issues UUIDv4)
     if not _UUID4_RE.match(supabase_id.lower()):
         raise HTTPException(status_code=400, detail="invalid_supabase_id")
 

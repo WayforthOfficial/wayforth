@@ -112,20 +112,38 @@ async def check_auth(request: Request) -> dict:
             raise HTTPException(status_code=503, detail="Database unavailable")
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         async with pool.acquire() as db:
+            # Atomic check-and-increment: previously this was SELECT, Python-side
+            # quota check, then a separate UPDATE in a second connection. Under
+            # concurrent burst, N callers all read usage_this_month=quota-1, all
+            # passed the check, then all incremented — letting a caller exceed
+            # their monthly quota by N. The conditional UPDATE below returns
+            # zero rows when the limit would be crossed, which we map to 429.
             key = await db.fetchrow("""
-                SELECT id, user_id, tier, rate_limit_per_minute, monthly_quota,
-                       usage_this_month, quota_reset_at, active,
-                       payment_rail, subscription_expires_at
-                FROM api_keys WHERE key_hash = $1
+                UPDATE api_keys
+                SET usage_this_month = usage_this_month + 1,
+                    last_used_at = NOW()
+                WHERE key_hash = $1
+                  AND active = TRUE
+                  AND (monthly_quota = 0 OR usage_this_month < monthly_quota)
+                RETURNING id, user_id, tier, rate_limit_per_minute, monthly_quota,
+                          usage_this_month, quota_reset_at, active,
+                          payment_rail, subscription_expires_at
             """, key_hash)
 
-        if not key or not key["active"]:
-            raise _AuthError(401, {
-                "error": "invalid_key",
-                "message": "Invalid API key. Get yours at wayforth.io/dashboard",
-            })
-
-        if key["monthly_quota"] > 0 and key["usage_this_month"] >= key["monthly_quota"]:
+        if not key:
+            # Either key is invalid/inactive or quota would be exceeded. Probe to
+            # distinguish so we return the correct status code without ever
+            # producing a stale "ok" result for a quota-exhausted key.
+            async with pool.acquire() as db:
+                existing = await db.fetchrow(
+                    "SELECT active, monthly_quota, usage_this_month "
+                    "FROM api_keys WHERE key_hash = $1", key_hash,
+                )
+            if not existing or not existing["active"]:
+                raise _AuthError(401, {
+                    "error": "invalid_key",
+                    "message": "Invalid API key. Get yours at wayforth.io/dashboard",
+                })
             raise _AuthError(429, {
                 "error": "quota_exceeded",
                 "message": "Monthly quota exceeded. Upgrade at wayforth.io/pricing",
@@ -137,16 +155,10 @@ async def check_auth(request: Request) -> dict:
                 and key["subscription_expires_at"] < datetime.now(timezone.utc)):
             asyncio.create_task(_downgrade_expired_usdc(str(key["id"])))
 
-        async with pool.acquire() as db:
-            await db.execute("""
-                UPDATE api_keys SET usage_this_month = usage_this_month + 1,
-                                    last_used_at = NOW()
-                WHERE id = $1
-            """, key["id"])
-
         rpm = _TIER_RPM.get(key["tier"], 10)
         tier = key["tier"] or "free"
-        usage = key["usage_this_month"] + 1
+        # RETURNING clause above gave us the POST-increment value already.
+        usage = key["usage_this_month"]
         from core.credits import PLANS
         calls_included = PLANS.get(tier, {}).get("calls_included", 100)
         request.state.rate_limit_tier = tier

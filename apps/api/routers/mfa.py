@@ -57,13 +57,14 @@ async def _resolve_caller(request: Request, db) -> tuple[str, object, str, str, 
 
     if request.headers.get("X-Provider-Token"):
         token = request.headers["X-Provider-Token"]
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
         row = await db.fetchrow("""
             SELECT p.id, p.email, p.password_hash, p.mfa_secret,
                    p.mfa_enabled, p.mfa_backup_codes, p.mfa_enabled_at
             FROM provider_sessions ps
             JOIN providers p ON p.id = ps.provider_id
-            WHERE ps.token = $1 AND ps.expires_at > NOW()
-        """, token)
+            WHERE ps.token_hash = $1 AND ps.expires_at > NOW()
+        """, token_hash)
         if not row:
             raise HTTPException(status_code=401, detail="Invalid provider session")
         return "provider", row["id"], row["email"], "provider", dict(row)
@@ -143,8 +144,20 @@ class MFAResetBody(BaseModel):
 @router.post("/setup")
 @limiter.limit("5/minute")
 async def mfa_setup(request: Request, db=Depends(get_db)):
-    """Generate TOTP secret and QR code. Does not enable MFA until verify-setup."""
+    """Generate TOTP secret and QR code. Does not enable MFA until verify-setup.
+
+    Refuses if MFA is already enabled on this account — re-enrolling must go through
+    /auth/mfa/disable first. Without this guard, an attacker holding a valid session
+    could overwrite the legitimate user's secret and then disable MFA using a TOTP
+    code from the new secret they control.
+    """
     user_type, user_id, email, dashboard_type, row = await _resolve_caller(request, db)
+
+    if row.get("mfa_enabled"):
+        raise HTTPException(status_code=409, detail={
+            "error": "mfa_already_enabled",
+            "message": "MFA is already enabled. Disable it via /auth/mfa/disable before re-enrolling.",
+        })
 
     secret = pyotp.random_base32()
     issuer = _dashboard_issuer(dashboard_type)
@@ -244,10 +257,11 @@ async def mfa_verify(request: Request, body: MFAVerifyBody, db=Depends(get_db)):
 
     if user_type == "provider":
         raw_token = "pvdr_" + secrets.token_hex(32)
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
         expires_at = datetime.now(timezone.utc) + timedelta(days=7)
         await db.execute(
-            "INSERT INTO provider_sessions (provider_id, token, expires_at) VALUES ($1, $2, $3)",
-            user_id, raw_token, expires_at,
+            "INSERT INTO provider_sessions (provider_id, token_hash, expires_at) VALUES ($1, $2, $3)",
+            user_id, token_hash, expires_at,
         )
         return {"token": raw_token, "token_type": "provider", "expires_at": expires_at.isoformat()}
 
@@ -257,8 +271,14 @@ async def mfa_verify(request: Request, body: MFAVerifyBody, db=Depends(get_db)):
 @router.post("/disable")
 @limiter.limit("5/minute")
 async def mfa_disable(request: Request, body: MFADisableBody, db=Depends(get_db)):
-    """Disable MFA. Requires valid TOTP code; also requires password for provider/admin."""
-    user_type, user_id, _email, _dt, row = await _resolve_caller(request, db)
+    """Disable MFA. Requires valid TOTP code.
+
+    Provider/admin accounts must additionally confirm their password. Developer
+    accounts (Supabase-managed, no local password) must present a valid Supabase
+    Bearer JWT in the `Authorization` header — an attacker holding only the API
+    key cannot disable MFA without separately compromising the Supabase session.
+    """
+    user_type, user_id, email, _dt, row = await _resolve_caller(request, db)
 
     if not row.get("mfa_enabled"):
         raise HTTPException(status_code=400, detail="MFA is not enabled")
@@ -273,6 +293,32 @@ async def mfa_disable(request: Request, body: MFADisableBody, db=Depends(get_db)
             raise HTTPException(status_code=400, detail="Password required")
         if not bcrypt.checkpw(body.password.encode(), password_hash.encode()):
             raise HTTPException(status_code=401, detail="Invalid password")
+    elif user_type == "user":
+        # Developer accounts have no local password — require a fresh Supabase JWT
+        # whose sub matches the account being modified.
+        from core.auth import verify_supabase_jwt
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail={
+                "error": "supabase_session_required",
+                "message": "Provide Authorization: Bearer <supabase_jwt> to disable MFA.",
+            })
+        token = auth_header.removeprefix("Bearer ").strip()
+        try:
+            claims = verify_supabase_jwt(token)
+            sub = claims.get("sub", "")
+            if not sub:
+                raise ValueError("no sub")
+        except Exception:
+            raise HTTPException(status_code=401, detail={"error": "invalid_supabase_token"})
+        owner_sub = await db.fetchval(
+            "SELECT supabase_id FROM users WHERE id = $1::uuid", user_id,
+        )
+        if not owner_sub or str(owner_sub).lower() != sub.lower():
+            raise HTTPException(status_code=403, detail={
+                "error": "session_account_mismatch",
+                "message": "Supabase session does not match the account whose MFA is being disabled.",
+            })
 
     table = _TABLE[user_type]
     await db.execute(

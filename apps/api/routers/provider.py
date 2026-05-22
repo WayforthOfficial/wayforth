@@ -27,17 +27,24 @@ _PROVIDER_TIER_PRICES = {
 
 
 async def _get_provider(request: Request, db):
-    """Resolve X-Provider-Token → provider row. Raises 401 if invalid/expired."""
+    """Resolve X-Provider-Token → provider row. Raises 401 if invalid/expired.
+
+    Tokens are stored hashed (sha256) in provider_sessions.token_hash; we hash
+    the inbound token and look that up. Constant-time comparison is enforced by
+    the unique-index lookup in Postgres.
+    """
+    import hashlib as _hashlib
     token = request.headers.get("X-Provider-Token", "")
     if not token:
         raise HTTPException(status_code=401, detail={"error": "X-Provider-Token required"})
+    token_hash = _hashlib.sha256(token.encode()).hexdigest()
     row = await db.fetchrow("""
         SELECT ps.provider_id, p.company_name, p.email, p.tier, p.verified,
                p.stripe_customer_id, p.stripe_subscription_id
         FROM provider_sessions ps
         JOIN providers p ON p.id = ps.provider_id
-        WHERE ps.token = $1 AND ps.expires_at > NOW()
-    """, token)
+        WHERE ps.token_hash = $1 AND ps.expires_at > NOW()
+    """, token_hash)
     if not row:
         raise HTTPException(status_code=401, detail={"error": "invalid_or_expired_token"})
     return row
@@ -77,11 +84,22 @@ async def _verify_dns_txt(domain: str, code: str) -> bool:
 
 
 async def _verify_header_check(endpoint_url: str, code: str) -> bool:
-    """Call endpoint_url and check for X-Wayforth-Verify: {code} response header."""
+    """Call endpoint_url and check for X-Wayforth-Verify: {code} response header.
+
+    Re-validates the URL (external https, no private/loopback/metadata IPs) and
+    refuses to follow redirects — previously `follow_redirects=True` allowed an
+    attacker-controlled catalog endpoint to bounce the request to an internal
+    host whose response headers could then be probed by side-effect.
+    """
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(endpoint_url, follow_redirects=True)
+        from core.url_validation import validate_external_url
+        validate_external_url(endpoint_url, field_name="endpoint_url")
+    except Exception:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+            resp = await client.get(endpoint_url)
             return resp.headers.get("X-Wayforth-Verify", "") == code
     except Exception:
         return False
@@ -152,15 +170,17 @@ async def provider_login(request: Request, db=Depends(get_db)):
     password = body.get("password") or ""
 
     from core.tier_gates import _get_redis
+    from core.rate_limit import get_real_ip
     redis = _get_redis()
-    await check_login_lockout(email, redis)
+    ip = get_real_ip(request)
+    await check_login_lockout(email, redis, ip=ip)
 
     provider = await db.fetchrow(
         "SELECT id, company_name, email, password_hash, tier, verified, mfa_enabled FROM providers WHERE email = $1",
         email,
     )
     if not provider or not bcrypt.checkpw(password.encode(), provider["password_hash"].encode()):
-        await record_login_failure(email, redis)
+        await record_login_failure(email, redis, ip=ip)
         raise HTTPException(status_code=401, detail={"error": "invalid_credentials"})
 
     await clear_login_failures(email, redis)
@@ -171,12 +191,14 @@ async def provider_login(request: Request, db=Depends(get_db)):
         return {"mfa_required": True, "mfa_challenge": challenge, "token": None}
 
     token = "pvdr_" + secrets.token_hex(32)
+    import hashlib as _hashlib
+    token_hash = _hashlib.sha256(token.encode()).hexdigest()
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
 
     await db.execute("""
-        INSERT INTO provider_sessions (provider_id, token, expires_at)
+        INSERT INTO provider_sessions (provider_id, token_hash, expires_at)
         VALUES ($1, $2, $3)
-    """, provider["id"], token, expires_at)
+    """, provider["id"], token_hash, expires_at)
 
     await db.execute(
         "UPDATE providers SET last_login_at = NOW() WHERE id = $1", provider["id"]
