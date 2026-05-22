@@ -3,9 +3,9 @@
 [![PyPI](https://img.shields.io/pypi/v/wayforth-mcp)](https://pypi.org/project/wayforth-mcp/)
 [![smithery badge](https://smithery.ai/badge/support-9ef4/Wayforth)](https://smithery.ai/servers/support-9ef4/Wayforth)
 
-**v0.6.14** · Search engine and payment rail for AI agents.
+**v0.7.0 — Hardened** · Search engine and payment rail for AI agents.
 
-3,271 verified API endpoints across 19 categories. Pay via card or crypto. One MCP install.
+4,974 verified API endpoints across 19 categories. Pay via card or crypto. One MCP install.
 
 ```bash
 uvx wayforth-mcp
@@ -39,8 +39,8 @@ POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 
 ## Live Now
 
-- **3,271 verified API endpoints** across 19 categories
-- **800+ Tier 2 verified endpoints** — probed and confirmed reachable
+- **4,974 verified API endpoints** across 19 categories
+- **3,552 Tier 2 verified endpoints** — probed and confirmed reachable
 - **250+ x402-native services** — pay-per-call via HTTP 402 protocol
 - **18 managed services (13 active with API keys)** — Groq, Together AI, DeepL, Brave Search, Perplexity, OpenWeatherMap, NewsAPI, Serper, Tavily, Jina AI, Alpha Vantage, AssemblyAI, Stability AI, Resend, Firecrawl, Mistral, Gemini, ElevenLabs
 - **WayforthQL v1.1** — filter by latency, region, payment rail, price, tier, and protocol with pagination
@@ -48,8 +48,10 @@ POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 - **Live service health** — response time and reliability tracked per service, affects ranking
 - **BYOK** — bring your own API key for any service, AES-128 encrypted
 - **Triple-track payments** — card, USDC on Base, x402 protocol
+- **MFA** — TOTP-based multi-factor authentication available across developer, provider, and admin dashboards
+- **Security** — professional penetration test completed, all findings resolved (v0.7.0)
 - **3 provisional patents** filed
-- **216 tests** passing
+- **186 tests** passing
 
 ## Install
 
