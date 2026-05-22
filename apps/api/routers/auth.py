@@ -398,16 +398,200 @@ async def regenerate_api_key(request: Request, db=Depends(get_db)):
     return response
 
 
+# ── Browser session proxy (wf_session cookie) ────────────────────────────────
+#
+# The dashboard exchanges its Supabase JWT for an opaque server-issued session
+# token, delivered ONLY as an HttpOnly/Secure/SameSite=Strict cookie. JS cannot
+# read HttpOnly cookies, so XSS on any wayforth.io subdomain can no longer
+# exfiltrate the dashboard session. API key flows (X-Wayforth-API-Key) and
+# non-browser Bearer JWT flows are unaffected.
+
+def _redis_for_session():
+    """Resolve the same Redis client the rate limiter / lockout use.
+    Returns None if Redis is unreachable / unconfigured — caller must 503."""
+    from core.tier_gates import _get_redis
+    return _get_redis()
+
+
+@router.post("/auth/session")
+@limiter.limit("10/minute")
+async def auth_session_create(request: Request, db=Depends(get_db)):
+    """Exchange a Supabase JWT for an HttpOnly session cookie.
+
+    Body: {"supabase_jwt": "<jwt>"}
+    Response: {"ok": true} — the cookie is the only out-of-band credential.
+    The raw token is never echoed in the response body, so a page-rendered
+    response leak (logging frameworks, error reporters) cannot expose it.
+
+    Validates the JWT with the same JWKS-backed verifier the rest of the
+    codebase uses, then looks up the local user row by `supabase_id`. The
+    session record stores user_id / email / tier / supabase_id so subsequent
+    middleware-resolved auth has everything it needs without a DB hit.
+    """
+    redis = _redis_for_session()
+    if redis is None:
+        raise HTTPException(status_code=503, detail={
+            "error": "session_unavailable",
+            "message": "Session store is not reachable. Try again shortly.",
+        })
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    supabase_jwt = (body.get("supabase_jwt") or "").strip() if isinstance(body, dict) else ""
+    if not supabase_jwt:
+        raise HTTPException(status_code=400, detail={
+            "error": "supabase_jwt_required",
+            "message": "POST {\"supabase_jwt\": \"<token>\"}",
+        })
+
+    try:
+        claims = verify_supabase_jwt(supabase_jwt)
+    except Exception:
+        raise HTTPException(status_code=401, detail={"error": "invalid_supabase_jwt"})
+
+    supabase_sub = (claims.get("sub") or "").strip()
+    claim_email = (claims.get("email") or "").strip().lower()
+    if not supabase_sub:
+        raise HTTPException(status_code=401, detail={"error": "invalid_supabase_jwt"})
+
+    row = await db.fetchrow("""
+        SELECT u.id, u.email, u.supabase_id, k.tier,
+               uc.package_tier, uc.lifetime_credits
+        FROM users u
+        LEFT JOIN api_keys k ON k.user_id = u.id AND k.active = true
+        LEFT JOIN user_credits uc ON uc.user_id = u.id
+        WHERE u.supabase_id = $1
+        ORDER BY (k.encrypted_key IS NOT NULL) DESC NULLS LAST, k.created_at DESC NULLS LAST
+        LIMIT 1
+    """, supabase_sub)
+
+    if not row:
+        raise HTTPException(status_code=401, detail={
+            "error": "account_not_found",
+            "message": "No Wayforth account is linked to this Supabase identity. Register first.",
+        })
+    # Belt-and-braces: confirm the JWT email matches the row email so a JWT
+    # whose `email` claim was tampered with (and somehow passed signature)
+    # cannot ride someone else's account.
+    if claim_email and row["email"].lower() != claim_email:
+        raise HTTPException(status_code=401, detail={"error": "email_mismatch"})
+
+    tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
+
+    from core.session import create_session, set_session_cookie
+    raw_token = await create_session(
+        redis=redis,
+        user_id=str(row["id"]),
+        email=row["email"],
+        tier=tier,
+        supabase_id=supabase_sub,
+    )
+
+    response = JSONResponse(content={"ok": True})
+    response.headers["Cache-Control"] = "no-store, no-cache"
+    set_session_cookie(response, raw_token)
+    return response
+
+
+@router.post("/auth/session/refresh")
+@limiter.limit("60/minute")
+async def auth_session_refresh(request: Request):
+    """Extend the session's Redis TTL and re-issue the cookie's Max-Age.
+
+    Called by the dashboard periodically while the user is active. The cookie
+    value does NOT rotate — only the TTL extends. See core/session.py for
+    the rationale (token rotation on refresh does not meaningfully shrink the
+    exposure window of a stolen cookie while it does multiply token-handling
+    surface).
+    """
+    from core.session import (
+        get_request_session, get_request_session_token,
+        refresh_session, set_session_cookie,
+    )
+    record = get_request_session(request)
+    raw_token = get_request_session_token(request)
+    if not record or not raw_token:
+        raise HTTPException(status_code=401, detail={"error": "session_not_found"})
+
+    redis = _redis_for_session()
+    if redis is None:
+        raise HTTPException(status_code=503, detail={"error": "session_unavailable"})
+
+    refreshed = await refresh_session(redis, raw_token)
+    if not refreshed:
+        # Expired between middleware lookup and now — extremely rare but treat
+        # as a fresh-login required.
+        raise HTTPException(status_code=401, detail={"error": "session_expired"})
+
+    response = JSONResponse(content={"ok": True})
+    response.headers["Cache-Control"] = "no-store, no-cache"
+    set_session_cookie(response, raw_token)
+    return response
+
+
+@router.post("/auth/session/logout")
+@limiter.limit("30/minute")
+async def auth_session_logout(request: Request):
+    """Server-side revocation + cookie expiry.
+
+    Idempotent: callable without a valid cookie (browser clears its cookie
+    regardless). Always returns 200 so logout flows don't surface noisy 4xxs
+    on already-cleared sessions.
+    """
+    from core.session import (
+        get_request_session_token, revoke_session, clear_session_cookie,
+    )
+    raw_token = get_request_session_token(request)
+    if raw_token:
+        redis = _redis_for_session()
+        if redis is not None:
+            await revoke_session(redis, raw_token)
+
+    response = JSONResponse(content={"ok": True})
+    response.headers["Cache-Control"] = "no-store, no-cache"
+    clear_session_cookie(response)
+    return response
+
+
 @router.get("/auth/me")
 @limiter.limit("10/minute")
 async def auth_me(request: Request, db=Depends(get_db)):
     """Return email, tier, and credits. API key is NOT returned here — use GET /account/api-key.
 
-    Accepts either:
-      - Authorization: Bearer <supabase_jwt>
-      - X-Wayforth-API-Key: <api_key>
+    Accepts (in priority order):
+      - wf_session HttpOnly cookie (browser dashboard, preferred)
+      - Authorization: Bearer <supabase_jwt> (legacy / non-browser)
+      - X-Wayforth-API-Key: <api_key> (programmatic clients)
     """
-    # Fast path: API key header
+    # Fastest path: validated session cookie (middleware already looked it up).
+    from core.session import get_request_session
+    session = get_request_session(request)
+    if session:
+        row = await db.fetchrow("""
+            SELECT u.email, k.tier,
+                   uc.package_tier, uc.credits_balance, uc.lifetime_credits
+            FROM users u
+            LEFT JOIN api_keys k ON k.user_id = u.id AND k.active = true
+            LEFT JOIN user_credits uc ON uc.user_id = u.id
+            WHERE u.id = $1::uuid
+            ORDER BY (k.encrypted_key IS NOT NULL) DESC NULLS LAST, k.created_at DESC NULLS LAST
+            LIMIT 1
+        """, session["user_id"])
+        if row:
+            tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
+            response = JSONResponse(content={
+                "email": row["email"],
+                "tier": tier,
+                "credits_remaining": row["credits_balance"] or 0,
+            })
+            response.headers["Cache-Control"] = "no-store, no-cache"
+            return response
+        # Session is valid but the underlying account is gone — treat as logout.
+        raise HTTPException(status_code=401, detail={"error": "account_not_found"})
+
+    # API key header path
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
     if raw_key:
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
@@ -484,12 +668,42 @@ async def auth_me(request: Request, db=Depends(get_db)):
 async def get_api_key(request: Request, db=Depends(get_db)):
     """Return the caller's API key — called only on explicit user action (Reveal button).
 
-    Requires Authorization: Bearer <supabase_jwt>.
+    Accepts:
+      - wf_session HttpOnly cookie (browser, preferred)
+      - Authorization: Bearer <supabase_jwt> (legacy / non-browser)
     Never exposed in the default /auth/me response.
     """
+    from core.session import get_request_session
+    session = get_request_session(request)
+    if session:
+        row = await db.fetchrow("""
+            SELECT k.key_prefix, k.encrypted_key, k.created_at, k.last_used_at
+            FROM api_keys k
+            WHERE k.user_id = $1::uuid AND k.active = true
+            ORDER BY (k.encrypted_key IS NOT NULL) DESC, k.created_at DESC
+            LIMIT 1
+        """, session["user_id"])
+        if not row:
+            raise HTTPException(status_code=401, detail={"code": "account_not_found"})
+        if row["encrypted_key"]:
+            try:
+                _f = get_fernet()
+                api_key = _f.decrypt(row["encrypted_key"].encode()).decode()
+            except Exception:
+                raise HTTPException(status_code=500, detail="Key decryption failed")
+        else:
+            api_key = row["key_prefix"] + "..."
+        response = JSONResponse(content={
+            "api_key": api_key,
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None,
+        })
+        response.headers["Cache-Control"] = "no-store, no-cache"
+        return response
+
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authorization: Bearer <token> required")
+        raise HTTPException(status_code=401, detail="Authorization: Bearer <token> or wf_session cookie required")
 
     token = auth_header.removeprefix("Bearer ").strip()
     try:

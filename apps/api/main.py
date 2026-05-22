@@ -837,6 +837,77 @@ app.add_middleware(
 )
 
 
+class SessionCookieMiddleware:
+    """ASGI middleware: resolve the wf_session cookie against Redis on every
+    request, stash the session record on scope for endpoints that want it.
+
+    Never raises on missing / invalid / expired cookies — the result is just
+    that `request.scope["wayforth_session"]` is unset. Endpoints that want
+    cookie auth call `core.session.get_request_session(request)` and fall
+    back to Bearer JWT or X-Wayforth-API-Key as before.
+
+    Hard requirement: Redis. If Redis is unavailable we attach no session and
+    the request proceeds anonymously through the existing auth code paths.
+    This is the right fail-mode — refusing every request because we can't
+    look up sessions would be a self-inflicted outage when the cookie is
+    only one of several auth options.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        raw_token = _extract_wf_session_cookie(scope.get("headers", []))
+        if raw_token:
+            from core.tier_gates import _get_redis as _session_get_redis
+            from core.session import get_session, _stash_on_scope
+            redis = _session_get_redis()
+            if redis is not None:
+                try:
+                    record = await get_session(redis, raw_token)
+                    if record:
+                        _stash_on_scope(scope, record, raw_token)
+                except Exception as exc:
+                    # Lookup failure is non-fatal — endpoints fall back to JWT
+                    # or API-key auth. We just log so silent Redis flakiness
+                    # is observable.
+                    logger.warning("SessionCookieMiddleware redis lookup failed: %s", exc)
+
+        await self.app(scope, receive, send)
+
+
+def _extract_wf_session_cookie(headers: list) -> str | None:
+    """Pull `wf_session` out of the request's Cookie header(s)."""
+    from http.cookies import SimpleCookie
+    raw_token: str | None = None
+    for hname, hval in headers:
+        if hname != b"cookie":
+            continue
+        try:
+            cookie_str = hval.decode("latin-1")
+        except UnicodeDecodeError:
+            continue
+        try:
+            jar: SimpleCookie = SimpleCookie()
+            jar.load(cookie_str)
+            morsel = jar.get("wf_session")
+            if morsel and morsel.value:
+                raw_token = morsel.value
+                break
+        except Exception:
+            # Malformed Cookie header → ignore this header line; another
+            # one may carry a valid session.
+            continue
+    return raw_token
+
+
+app.add_middleware(SessionCookieMiddleware)
+
+
 @app.middleware("http")
 async def docs_redirect(request: Request, call_next):
     if request.headers.get("host", "").startswith("docs.wayforth.io"):

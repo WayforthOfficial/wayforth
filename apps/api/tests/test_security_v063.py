@@ -423,23 +423,25 @@ async def test_T230b_anon_query_blocked_by_tier_gate(c):
 async def test_T231_auth_register_blocks_pentest_domains(c):
     """Registration with pentest domains must never create DB records.
 
-    Two independent guards prevent persistence:
-    1. supabase_id format validation (UUID4 regex) → 400 on any server version
-    2. Domain blocklist (@example.invalid) → 403 once deployed
+    Three independent guards prevent persistence:
+    1. Supabase JWT verification (v0.7.0+) → 401 when no Bearer header is sent
+    2. supabase_id format validation (UUID4 regex) → 400 on any pre-v0.7.0 server
+    3. Domain blocklist (@example.invalid) → 403 once deployed
 
-    Using a non-UUID supabase_id guarantees rejection before any INSERT,
-    so the test never writes to production regardless of deployment state.
-    403 is accepted if the domain block is also active.
+    Using a non-UUID supabase_id AND omitting the Bearer header guarantees
+    rejection before any INSERT, so this test never writes to production
+    regardless of which guard fires first.
     """
     statuses = set()
     for i in range(3):
         r = await c.post("/auth/register", json={
             "email": f"ratelimit-test-{i}@example.invalid",
-            "supabase_id": f"not-a-uuid-{i}",  # fails UUID4 guard → 400, no INSERT
+            "supabase_id": f"not-a-uuid-{i}",  # fails UUID4 guard if JWT guard misses
         })
         statuses.add(r.status_code)
-    # 409 = already exists from a previous run — no new account created, acceptable
-    assert statuses <= {400, 403, 409, 429}, (
+    # 401 = JWT guard (v0.7.0); 400 = UUID guard; 403 = domain block; 409 = preexisting;
+    # 429 = rate limit. ANY of these is acceptable — the assertion is "must not 2xx".
+    assert statuses <= {400, 401, 403, 409, 429}, (
         f"Pentest-domain registration must be rejected (not 200/201/2xx), got: {statuses}"
     )
 

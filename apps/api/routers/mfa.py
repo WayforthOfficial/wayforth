@@ -294,31 +294,41 @@ async def mfa_disable(request: Request, body: MFADisableBody, db=Depends(get_db)
         if not bcrypt.checkpw(body.password.encode(), password_hash.encode()):
             raise HTTPException(status_code=401, detail="Invalid password")
     elif user_type == "user":
-        # Developer accounts have no local password — require a fresh Supabase JWT
-        # whose sub matches the account being modified.
-        from core.auth import verify_supabase_jwt
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail={
-                "error": "supabase_session_required",
-                "message": "Provide Authorization: Bearer <supabase_jwt> to disable MFA.",
-            })
-        token = auth_header.removeprefix("Bearer ").strip()
-        try:
-            claims = verify_supabase_jwt(token)
-            sub = claims.get("sub", "")
-            if not sub:
-                raise ValueError("no sub")
-        except Exception:
-            raise HTTPException(status_code=401, detail={"error": "invalid_supabase_token"})
-        owner_sub = await db.fetchval(
-            "SELECT supabase_id FROM users WHERE id = $1::uuid", user_id,
-        )
-        if not owner_sub or str(owner_sub).lower() != sub.lower():
-            raise HTTPException(status_code=403, detail={
-                "error": "session_account_mismatch",
-                "message": "Supabase session does not match the account whose MFA is being disabled.",
-            })
+        # Developer accounts have no local password — require a verified
+        # session (browser cookie) OR a fresh Supabase Bearer JWT, in either
+        # case bound to the same account whose MFA is being disabled.
+        from core.session import get_request_session
+        session = get_request_session(request)
+        sub = ""
+        if session and session.get("user_id") and str(session["user_id"]) == str(user_id):
+            # Cookie path: the middleware already validated the session against
+            # Redis. The session record's user_id matches the account being
+            # modified, so we don't need a separate sub comparison.
+            sub = (session.get("supabase_id") or "").strip()
+        if not sub:
+            from core.auth import verify_supabase_jwt
+            auth_header = request.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                raise HTTPException(status_code=401, detail={
+                    "error": "supabase_session_required",
+                    "message": "Provide wf_session cookie or Authorization: Bearer <supabase_jwt> to disable MFA.",
+                })
+            token = auth_header.removeprefix("Bearer ").strip()
+            try:
+                claims = verify_supabase_jwt(token)
+                sub = (claims.get("sub") or "").strip()
+                if not sub:
+                    raise ValueError("no sub")
+            except Exception:
+                raise HTTPException(status_code=401, detail={"error": "invalid_supabase_token"})
+            owner_sub = await db.fetchval(
+                "SELECT supabase_id FROM users WHERE id = $1::uuid", user_id,
+            )
+            if not owner_sub or str(owner_sub).lower() != sub.lower():
+                raise HTTPException(status_code=403, detail={
+                    "error": "session_account_mismatch",
+                    "message": "Supabase session does not match the account whose MFA is being disabled.",
+                })
 
     table = _TABLE[user_type]
     await db.execute(
