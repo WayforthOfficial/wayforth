@@ -1,10 +1,13 @@
-"""routers/billing/favorites.py — POST/GET/DELETE /account/favorites."""
+"""routers/billing/favorites.py — POST/GET/DELETE /account/favorites.
 
-import hashlib
+All three endpoints accept the dashboard's tri-mode auth (wf_session cookie,
+Bearer JWT, or X-Wayforth-API-Key) via core.auth.resolve_dashboard_caller —
+the cookie-only dashboard couldn't manage favorites otherwise."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from core.auth import resolve_dashboard_caller
 from core.db import get_db
 from core.rate_limit import limiter
 
@@ -15,26 +18,11 @@ class FavoriteRequest(BaseModel):
     slug: str
 
 
-def _auth_key_hash(request: Request) -> str:
-    raw = request.headers.get("X-Wayforth-API-Key", "")
-    if not raw:
-        raise HTTPException(status_code=401, detail="API key required")
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-
-async def _get_user_id(db, key_hash: str) -> str:
-    row = await db.fetchrow(
-        "SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true", key_hash
-    )
-    if not row:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    return str(row["user_id"])
-
-
 @router.post("/account/favorites", status_code=201)
 @limiter.limit("30/minute")
 async def add_favorite(body: FavoriteRequest, request: Request, db=Depends(get_db)):
-    user_id = await _get_user_id(db, _auth_key_hash(request))
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
 
     count = await db.fetchval(
         "SELECT COUNT(*) FROM service_favorites WHERE user_id = $1::uuid", user_id
@@ -59,7 +47,8 @@ async def add_favorite(body: FavoriteRequest, request: Request, db=Depends(get_d
 @router.delete("/account/favorites/{slug}")
 @limiter.limit("30/minute")
 async def remove_favorite(slug: str, request: Request, db=Depends(get_db)):
-    user_id = await _get_user_id(db, _auth_key_hash(request))
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
 
     result = await db.execute(
         "DELETE FROM service_favorites WHERE user_id = $1::uuid AND slug = $2",
@@ -73,7 +62,8 @@ async def remove_favorite(slug: str, request: Request, db=Depends(get_db)):
 @router.get("/account/favorites")
 @limiter.limit("30/minute")
 async def list_favorites(request: Request, db=Depends(get_db)):
-    user_id = await _get_user_id(db, _auth_key_hash(request))
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
 
     rows = await db.fetch(
         """

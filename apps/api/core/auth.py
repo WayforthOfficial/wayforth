@@ -229,6 +229,114 @@ async def _resolve_user(db, api_key: str):
     return key_record["user_id"], key_record["id"], key_record["tier"] or "free"
 
 
+async def resolve_dashboard_caller(request: Request, db) -> dict:
+    """Authenticate a dashboard /account/* caller.
+
+    Tries, in priority order:
+      1. wf_session cookie — preferred for browsers (set by /auth/session,
+         validated by SessionCookieMiddleware, available on request.scope).
+      2. Authorization: Bearer <supabase_jwt> — for non-browser callers that
+         still hold a Supabase JWT (legacy CLIs, the dashboard during the
+         cookie rollout, server-to-server).
+      3. X-Wayforth-API-Key header — programmatic clients.
+
+    Returns a uniform dict regardless of which path authenticated:
+        user_id                str (uuid)
+        api_key_id             uuid | None   — None only if the account has
+                                               no active API key (rare; new
+                                               accounts always get one)
+        tier                   str           — from the active api_key row,
+                                               or "free" if no active key
+        monthly_calls_count    int
+        monthly_calls_reset_at datetime | None
+        email                  str
+
+    Why a single helper instead of per-endpoint duplication:
+      Before the v0.7.0 session-cookie work, every /account/* endpoint did
+      its own `X-Wayforth-API-Key` check. After we moved the dashboard onto
+      the cookie session, /auth/me stopped returning the API key, which
+      meant the dashboard had nothing to send to /account/* — and every one
+      of those endpoints 401'd, silently falling back to "Free" tier in the
+      UI. This helper closes that gap once for every endpoint that consumes
+      it, without altering existing API-key behaviour.
+    """
+    from core.session import get_request_session
+
+    # ── 1. wf_session cookie (browser dashboard) ────────────────────────────
+    sess = get_request_session(request)
+    if sess:
+        return await _load_dashboard_user(db, sess["user_id"])
+
+    # ── 2. Authorization: Bearer <supabase_jwt> ─────────────────────────────
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.removeprefix("Bearer ").strip()
+        try:
+            claims = verify_supabase_jwt(token)
+            sub = (claims.get("sub") or "").strip()
+            if not sub:
+                raise ValueError("no sub")
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user_id = await db.fetchval("SELECT id FROM users WHERE supabase_id = $1", sub)
+        if not user_id:
+            raise HTTPException(status_code=401, detail={"error": "account_not_found"})
+        return await _load_dashboard_user(db, str(user_id))
+
+    # ── 3. X-Wayforth-API-Key header (programmatic) ─────────────────────────
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    if raw_key:
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        row = await db.fetchrow("""
+            SELECT k.id AS api_key_id, k.user_id, k.tier,
+                   k.monthly_calls_count, k.monthly_calls_reset_at, u.email
+            FROM api_keys k
+            JOIN users u ON u.id = k.user_id
+            WHERE k.key_hash = $1 AND k.active = TRUE
+        """, key_hash)
+        if not row:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        return {
+            "user_id": str(row["user_id"]),
+            "api_key_id": row["api_key_id"],
+            "tier": row["tier"] or "free",
+            "monthly_calls_count": row["monthly_calls_count"] or 0,
+            "monthly_calls_reset_at": row["monthly_calls_reset_at"],
+            "email": row["email"],
+        }
+
+    raise HTTPException(
+        status_code=401,
+        detail="Provide X-Wayforth-API-Key, Authorization: Bearer <supabase_jwt>, or wf_session cookie.",
+    )
+
+
+async def _load_dashboard_user(db, user_id: str) -> dict:
+    """Look up the standard dashboard caller shape for a user_id resolved via
+    cookie or JWT. Picks the user's most-recent active api_key for the api_key
+    fields; if no active key exists, returns a safe "free" shape so the
+    dashboard can still render without 500'ing."""
+    row = await db.fetchrow("""
+        SELECT k.id AS api_key_id, k.tier,
+               k.monthly_calls_count, k.monthly_calls_reset_at, u.email
+        FROM users u
+        LEFT JOIN api_keys k ON k.user_id = u.id AND k.active = TRUE
+        WHERE u.id = $1::uuid
+        ORDER BY (k.encrypted_key IS NOT NULL) DESC NULLS LAST, k.created_at DESC NULLS LAST
+        LIMIT 1
+    """, user_id)
+    if not row:
+        raise HTTPException(status_code=401, detail={"error": "account_not_found"})
+    return {
+        "user_id": str(user_id),
+        "api_key_id": row["api_key_id"],
+        "tier": row["tier"] or "free",
+        "monthly_calls_count": row["monthly_calls_count"] or 0,
+        "monthly_calls_reset_at": row["monthly_calls_reset_at"],
+        "email": row["email"],
+    }
+
+
 _AGENT_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
 
