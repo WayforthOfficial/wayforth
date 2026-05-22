@@ -143,9 +143,22 @@ def _load_template(name: str) -> str:
     return (_TEMPLATE_DIR / f"{name}.html").read_text(encoding="utf-8")
 
 
-def _render(text: str, data: dict[str, str]) -> str:
+# Variable names whose values are *pre-rendered HTML blocks* (built by
+# _build_founding_note / _build_upgrade_cta) and must be inserted verbatim. All
+# other variables are HTML-escaped before substitution so that any future caller
+# that passes user-controlled data through the template (display name, email,
+# etc.) cannot inject script tags or break out of attributes.
+_HTML_RAW_VARS = frozenset({"founding_note", "upgrade_cta"})
+
+
+def _render(text: str, data: dict[str, str], escape: bool = False) -> str:
+    import html as _html
     for key, value in data.items():
-        text = text.replace("{{" + key + "}}", value)
+        if escape and key not in _HTML_RAW_VARS:
+            safe = _html.escape(str(value), quote=True)
+        else:
+            safe = value
+        text = text.replace("{{" + key + "}}", safe)
     return text
 
 
@@ -168,13 +181,13 @@ async def send_email(to: str, template: str, data: dict[str, str]) -> str:
         logger.debug("RESEND_API_KEY unset — skipping %s email to %s", template, to)
         return ""
 
-    html = _render(_load_template(template), data)
-    subject = _render(_SUBJECTS.get(template, "Wayforth"), data)
+    html = _render(_load_template(template), data, escape=True)
+    subject = _render(_SUBJECTS.get(template, "Wayforth"), data, escape=False)
 
     # Build plain-text version; swap HTML block variables for their text equivalents
     # so callers don't need to maintain parallel text/HTML data dicts.
     text_data = {k: _HTML_TO_TEXT.get(v, v) for k, v in data.items()}
-    plain = _render(_PLAIN_TEXTS.get(template, subject), text_data)
+    plain = _render(_PLAIN_TEXTS.get(template, subject), text_data, escape=False)
 
     import resend as _resend  # imported lazily so tests can patch before import
 

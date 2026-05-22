@@ -24,14 +24,17 @@ router = APIRouter()
 async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amount_usdc: str) -> dict:
     """Verify a USDC transfer tx_hash on Base using eth_getTransactionReceipt.
 
-    Returns {valid, reason}. Accepts optimistically on RPC failure.
+    Returns {valid, reason}. **Fails closed** on RPC error/timeout/misconfig — credits
+    are real money, so an unverifiable transaction is treated as not-paid. Set
+    BASE_RPC_URL to a reliable endpoint in production.
     """
     BASE_RPC_URL = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
     USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
     TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
     if not BASE_RPC_URL:
-        return {"valid": True, "reason": "no_rpc_configured"}
+        logger.error("_verify_tx_on_base called with no BASE_RPC_URL — refusing to confirm")
+        return {"valid": False, "reason": "rpc_not_configured"}
 
     try:
         payload = {
@@ -42,7 +45,8 @@ async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amo
         async with httpx.AsyncClient(timeout=8.0) as client:
             r = await client.post(BASE_RPC_URL, json=payload)
         if r.status_code != 200:
-            return {"valid": True, "reason": "rpc_unavailable"}
+            logger.warning("_verify_tx_on_base RPC HTTP %d for %s", r.status_code, tx_hash[:12])
+            return {"valid": False, "reason": "rpc_unavailable"}
 
         receipt = r.json().get("result")
         if not receipt:
@@ -63,12 +67,14 @@ async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amo
             to_addr = "0x" + topics[2][-40:]
             if to_addr.lower() != expected_recipient.lower():
                 continue
-            # Amount is in log data (USDC has 6 decimals)
+            # Amount is in log data (USDC has 6 decimals). Tightened from 2% to 0.5%
+            # tolerance — gas variance does not apply to USDC.transferWithAuthorization
+            # value; 2% was a footgun that allowed silent underpayment at scale.
             try:
                 amount_micro = int(log.get("data", "0x0"), 16)
                 amount_usdc = amount_micro / 1_000_000
                 expected = float(expected_amount_usdc)
-                if abs(amount_usdc - expected) / expected <= 0.02:
+                if abs(amount_usdc - expected) / expected <= 0.005:
                     return {"valid": True, "reason": "confirmed", "amount_usdc": str(amount_usdc)}
                 return {
                     "valid": False,
@@ -80,10 +86,11 @@ async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amo
         return {"valid": False, "reason": "no_matching_usdc_transfer_found"}
 
     except httpx.TimeoutException:
-        return {"valid": True, "reason": "optimistic_rpc_timeout"}
+        logger.warning("_verify_tx_on_base RPC timeout for %s", tx_hash[:12])
+        return {"valid": False, "reason": "rpc_timeout"}
     except Exception as _e:
-        logger.warning("_verify_tx_on_base error: %s", _e)
-        return {"valid": True, "reason": "optimistic_rpc_error"}
+        logger.error("_verify_tx_on_base error: %s", _e)
+        return {"valid": False, "reason": "rpc_error"}
 
 
 async def _activate_usdc_subscription(pool, reference_id: str, tx_hash: str,

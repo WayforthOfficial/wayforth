@@ -339,8 +339,24 @@ async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
 
     timestamp = str(int(_time.time()))
     body = json_lib.dumps(payload)
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    # follow_redirects defaults to False in httpx but pin explicitly so a future
+    # default change can't reintroduce SSRF via 30x to internal hosts.
+    async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
         for row in rows:
+            # Re-validate the destination URL at dispatch time. URLs were
+            # validated at registration but a hostname's A record can change
+            # between then and now (DNS rebinding, attacker-controlled DNS).
+            # This re-resolves and refuses delivery to internal / loopback /
+            # link-local / metadata addresses.
+            try:
+                from core.url_validation import validate_external_url
+                validate_external_url(row["webhook_url"], field_name="url")
+            except Exception as _vexc:
+                logger.warning(
+                    "webhook delivery refused: url=%s — %s",
+                    row["webhook_url"], _vexc,
+                )
+                continue
             sig = _hmac.new(
                 row["secret_token"].encode(),
                 f"{timestamp}.{body}".encode(),
@@ -509,8 +525,19 @@ async def _webhook_retry_loop() -> None:
                     """)
 
                 if due:
-                    async with httpx.AsyncClient(timeout=5.0) as client:
+                    async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
                         for row in due:
+                            # Re-validate destination on every retry — see
+                            # _dispatch_webhooks above for rationale.
+                            try:
+                                from core.url_validation import validate_external_url
+                                validate_external_url(row["webhook_url"], field_name="url")
+                            except Exception as _vexc:
+                                logger.warning(
+                                    "webhook retry refused: url=%s — %s",
+                                    row["webhook_url"], _vexc,
+                                )
+                                continue
                             ts = str(int(_time.time()))
                             body = row["payload"]
                             sig = _hmac.new(

@@ -893,14 +893,36 @@ async def execute_service(request: Request, db=Depends(get_db)):
 
         req_endpoint = body.get("endpoint_url", "").strip() or byok_row["endpoint_url"]
         req_method = (body.get("method", "") or byok_row["default_method"] or "POST").upper()
-        extra_headers = body.get("headers", {})
+        raw_extra_headers = body.get("headers", {}) or {}
 
         if not req_endpoint:
             raise HTTPException(status_code=400, detail={
                 "error": "endpoint_url required (pass in body or store a default via /call/keys/add)"
             })
-        if not req_endpoint.startswith("https://"):
-            raise HTTPException(status_code=400, detail={"error": "endpoint_url must start with https://"})
+        # SSRF defense: same private-IP/internal-hostname checks we use for
+        # webhook URLs. Without this, a caller could point endpoint_url at an
+        # internal HTTPS service (or a public hostname that resolves to one)
+        # and have Wayforth's egress fetch the response and return it verbatim.
+        from core.url_validation import validate_external_url
+        validate_external_url(req_endpoint, field_name="endpoint_url")
+
+        # Header sanitation: strip caller-supplied headers that could subvert
+        # the request (Authorization, Host, X-Forwarded-*, Content-Length,
+        # Cookie). The user-provided BYOK key is the only Authorization we set.
+        _FORBIDDEN_HEADER_PREFIXES = ("x-forwarded-", "x-real-", "x-amz-", "x-google-")
+        _FORBIDDEN_HEADER_EXACT = {
+            "authorization", "host", "content-length", "cookie", "proxy-authorization",
+            "x-wayforth-api-key", "stripe-signature", "x-admin-key", "x-admin-token",
+            "x-provider-token",
+        }
+        extra_headers = {}
+        for k, v in raw_extra_headers.items():
+            kl = str(k).lower().strip()
+            if kl in _FORBIDDEN_HEADER_EXACT or any(kl.startswith(p) for p in _FORBIDDEN_HEADER_PREFIXES):
+                continue
+            if not isinstance(v, (str, int, float)):
+                continue
+            extra_headers[str(k)] = str(v)
 
         success, balance_after = await check_and_deduct_credits(
             db, str(user_id), 1, "/execute",
@@ -918,18 +940,35 @@ async def execute_service(request: Request, db=Depends(get_db)):
 
         import httpx as _httpx
         start = _time.time()
-        call_headers = {"Authorization": f"Bearer {byok_key}", **extra_headers}
+        # The user-supplied extras come AFTER our Authorization so they can never
+        # overwrite the BYOK auth header even if the sanitation pass missed a
+        # variant (case-insensitive). We rebuild explicitly with our header last.
+        call_headers = {**extra_headers, "Authorization": f"Bearer {byok_key}"}
         upstream_status: int | None = None
         error_msg = None
         raw_result = None
+        _BYOK_MAX_BYTES = 1_048_576  # 1 MB hard cap on returned upstream body
         try:
-            async with _httpx.AsyncClient(timeout=15.0) as _client:
+            # follow_redirects=False (httpx default) — keep the egress pinned to
+            # the validated endpoint and prevent post-validation rebinding via
+            # 30x to a private host.
+            async with _httpx.AsyncClient(timeout=15.0, follow_redirects=False) as _client:
                 if req_method in ("GET", "DELETE"):
                     resp = await _client.request(req_method, req_endpoint, headers=call_headers, params=params)
                 else:
                     resp = await _client.request(req_method, req_endpoint, headers=call_headers, json=params)
             upstream_status = resp.status_code
-            raw_result = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+            _body_bytes = resp.content[:_BYOK_MAX_BYTES]
+            _truncated = len(resp.content) > _BYOK_MAX_BYTES
+            if resp.headers.get("content-type", "").startswith("application/json") and not _truncated:
+                try:
+                    raw_result = resp.json()
+                except Exception:
+                    raw_result = _body_bytes.decode("utf-8", errors="replace")
+            else:
+                raw_result = _body_bytes.decode("utf-8", errors="replace")
+                if _truncated:
+                    raw_result = {"_truncated": True, "_bytes": _BYOK_MAX_BYTES, "preview": raw_result}
             if resp.status_code >= 400:
                 error_msg = f"Upstream {resp.status_code}: {str(raw_result)[:200]}"
         except _httpx.TimeoutException:

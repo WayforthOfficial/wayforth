@@ -23,11 +23,24 @@ router = APIRouter()
 
 # ── Local STRIPE_MOCK flag ────────────────────────────────────────────────────
 
-STRIPE_MOCK = (
-    not os.environ.get("STRIPE_SECRET_KEY", "")
-    or os.environ.get("STRIPE_MOCK", "false").lower() == "true"
-    or os.environ.get("STRIPE_SECRET_KEY", "").startswith("sk_test_")
-)
+# STRIPE_MOCK auto-enables /billing/mock-topup (free credit grant up to 100k
+# per call). Auto-enabling on `sk_test_*` keys was a footgun: any test key
+# deployed alongside ENVIRONMENT=production would expose unrestricted credit
+# minting to every authenticated user. We now require an explicit STRIPE_MOCK=true
+# flag, AND refuse to enable in production regardless of the Stripe key prefix.
+_ENV = os.environ.get("ENVIRONMENT", "development").lower()
+_STRIPE_MOCK_EXPLICIT = os.environ.get("STRIPE_MOCK", "false").lower() == "true"
+_STRIPE_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+
+if _ENV == "production":
+    STRIPE_MOCK = False
+    if _STRIPE_MOCK_EXPLICIT or _STRIPE_KEY.startswith("sk_test_"):
+        logger.error(
+            "STRIPE_MOCK=true or sk_test_* key with ENVIRONMENT=production — "
+            "mock mode is FORCED OFF. Use a live Stripe key in production."
+        )
+else:
+    STRIPE_MOCK = (not _STRIPE_KEY) or _STRIPE_MOCK_EXPLICIT
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -90,8 +103,18 @@ class PayRequest(BaseModel):
 async def _probe_new_service(service_id: str, endpoint_url: str):
     from main import app
     import httpx as _httpx
+    # Re-validate at probe time in case the row was created via another path
+    # that skipped url validation, and pin follow_redirects=False so a 30x
+    # cannot rebind onto an internal IP.
     try:
-        async with _httpx.AsyncClient(timeout=10.0) as client:
+        from core.url_validation import validate_external_url
+        validate_external_url(endpoint_url, field_name="endpoint_url")
+    except Exception as _vexc:
+        logger.warning("probe refused for service %s url=%s: %s",
+                       service_id, endpoint_url, _vexc)
+        return
+    try:
+        async with _httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
             r = await client.get(endpoint_url)
             new_tier = 1 if r.status_code < 500 else 0
             async with app.state.pool.acquire() as db:
@@ -117,8 +140,10 @@ async def submit_service(request: Request, req: SubmitRequest, db=Depends(get_db
     if not api_key:
         raise HTTPException(status_code=401, detail="API key required")
     await _resolve_user(db, api_key)
-    if not req.endpoint_url.startswith("https://"):
-        raise HTTPException(status_code=400, detail="endpoint_url must start with https://")
+    # SSRF defense: _probe_new_service immediately fetches the submitted URL.
+    # Reject internal hostnames, private/loopback IPs, and non-https schemes.
+    from core.url_validation import validate_external_url
+    validate_external_url(req.endpoint_url, field_name="endpoint_url")
     if req.category not in ("inference", "data", "translation"):
         raise HTTPException(status_code=400, detail="category must be one of: inference, data, translation")
     if len(req.name) > 100:
@@ -414,8 +439,10 @@ async def billing_cancel(request: Request, db=Depends(get_db)):
 @router.post("/billing/mock-topup")
 @limiter.limit("5/minute")
 async def mock_topup(request: Request, db=Depends(get_db)):
-    """Test endpoint: add credits without Stripe. Only works when STRIPE_MOCK=true or no Stripe key set."""
-    if not STRIPE_MOCK:
+    """Test endpoint: add credits without Stripe. Only works when STRIPE_MOCK=true
+    AND ENVIRONMENT != production. Re-checks both at call time as defense in depth
+    even though STRIPE_MOCK is already pinned to False in production above."""
+    if _ENV == "production" or not STRIPE_MOCK:
         raise HTTPException(status_code=403, detail="Mock top-up not available in production")
 
     api_key = request.headers.get("X-Wayforth-API-Key", "")
@@ -469,6 +496,29 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
         event = stripe.Webhook.construct_event(payload, sig, secret)
     except Exception:
         raise HTTPException(status_code=400)
+
+    # Idempotency gate: Stripe explicitly says callers must tolerate duplicate
+    # event delivery. We INSERT the event id and short-circuit if it's already
+    # been processed. Previously the renewal handler (`invoice.payment_succeeded`)
+    # had no dedup at all, so a single Stripe retry would double-credit the user.
+    event_id = event.get("id") or ""
+    event_type = event.get("type") or ""
+    if event_id:
+        try:
+            inserted = await db.fetchval(
+                "INSERT INTO stripe_events (event_id, event_type) VALUES ($1, $2) "
+                "ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
+                event_id, event_type,
+            )
+            if inserted is None:
+                logger.info("stripe webhook duplicate event=%s type=%s — skipping", event_id, event_type)
+                return {"status": "duplicate_event"}
+        except Exception as _e:
+            # Fail closed: if we can't dedup, we'd rather refuse than risk
+            # double-crediting. Stripe will retry, and the next attempt either
+            # succeeds (DB healed) or keeps returning 503.
+            logger.error("stripe_events dedup insert failed: %s", _e)
+            raise HTTPException(status_code=503, detail="event_dedup_unavailable")
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]

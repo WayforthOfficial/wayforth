@@ -296,6 +296,22 @@ class TestMFASetup:
             result = await mfa_setup(_req(), db)
         assert result["account"] == "user@example.com"
 
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_refuses_when_mfa_already_enabled(self):
+        """Per CRITICAL #2 in the v0.6.14 audit: mfa_setup must refuse if MFA is
+        already enabled. Allowing overwrite let an attacker with a stolen
+        session rotate the user's TOTP secret to one they control, then
+        immediately disable MFA with a TOTP from the new secret."""
+        from routers.mfa import mfa_setup
+        from fastapi import HTTPException
+        db = AsyncMock()
+        db.execute = AsyncMock()
+        with patch("routers.mfa._resolve_caller", return_value=_caller(mfa_enabled=True)):
+            with pytest.raises(HTTPException) as exc:
+                await mfa_setup(_req(), db)
+        assert exc.value.status_code == 409
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TestMFAVerifySetup — enabling MFA after scanning QR
@@ -471,17 +487,44 @@ class TestMFADisable:
     @pytest.mark.asyncio
     @pytest.mark.no_api_key
     async def test_valid_code_disables_developer_mfa(self):
+        """Developer MFA disable needs a valid TOTP code AND a Supabase Bearer JWT
+        whose sub matches the account. Without the JWT requirement, an attacker
+        with just the API key could disable MFA after overwriting the secret —
+        see CRITICAL #2 in the v0.6.14 security audit."""
         import pyotp
         from routers.mfa import mfa_disable, MFADisableBody
         db = AsyncMock()
         db.execute = AsyncMock()
+        # Mock the supabase_id fetch (the new flow looks up users.supabase_id).
+        db.fetchval = AsyncMock(return_value="sub-uuid-1")
+        secret = pyotp.random_base32()
+        with patch("routers.mfa._resolve_caller", return_value=(
+            "user", "uid-1", "dev@example.com", "developer",
+            {"mfa_secret": secret, "mfa_enabled": True, "password_hash": None},
+        )), patch("core.auth.verify_supabase_jwt", return_value={"sub": "sub-uuid-1"}):
+            req = _req({"Authorization": "Bearer fake.jwt.token"})
+            result = await mfa_disable(req, MFADisableBody(code=pyotp.TOTP(secret).now()), db)
+        assert result["mfa_enabled"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_developer_mfa_disable_without_jwt_rejected(self):
+        """Per CRITICAL #2 fix: developer account MFA disable requires a Supabase
+        Bearer JWT in addition to a valid TOTP. API-key-only callers cannot
+        disable MFA even with the right TOTP code (e.g. after overwriting the
+        secret via an mfa_setup race in a prior version)."""
+        import pyotp
+        from routers.mfa import mfa_disable, MFADisableBody
+        from fastapi import HTTPException
+        db = AsyncMock()
         secret = pyotp.random_base32()
         with patch("routers.mfa._resolve_caller", return_value=(
             "user", "uid-1", "dev@example.com", "developer",
             {"mfa_secret": secret, "mfa_enabled": True, "password_hash": None},
         )):
-            result = await mfa_disable(_req(), MFADisableBody(code=pyotp.TOTP(secret).now()), db)
-        assert result["mfa_enabled"] is False
+            with pytest.raises(HTTPException) as exc:
+                await mfa_disable(_req(), MFADisableBody(code=pyotp.TOTP(secret).now()), db)
+        assert exc.value.status_code == 401
 
     @pytest.mark.asyncio
     @pytest.mark.no_api_key

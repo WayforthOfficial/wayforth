@@ -233,20 +233,34 @@ async def get_identity(request: Request, agent_id: str, db=Depends(get_db)):
 @router.get("/identity/{agent_id}/history")
 @limiter.limit("20/minute")
 async def identity_history(request: Request, agent_id: str, db=Depends(get_db)):
-    """Agent's search and payment history."""
+    """Agent's search and payment history.
+
+    Requires the caller's Wayforth API key. The path `agent_id` is matched
+    against `search_analytics.session_id` / `search_outcomes.session_id` —
+    previously this was open to anonymous callers and returned activity for any
+    session_id that the caller could guess or learn (IDOR). We now scope the
+    join through the authenticated caller's `user_id` so an agent can only see
+    history for sessions associated with their own account.
+    """
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
+
     searches = await db.fetch("""
         SELECT query, top_result_id, created_at
         FROM search_analytics
-        WHERE session_id = $1
+        WHERE session_id = $1 AND user_id = $2::uuid
         ORDER BY created_at DESC LIMIT 20
-    """, agent_id)
+    """, agent_id, str(user_id))
 
     payments = await db.fetch("""
-        SELECT service_id, outcome_type, created_at
-        FROM search_outcomes
-        WHERE session_id = $1
-        ORDER BY created_at DESC LIMIT 20
-    """, agent_id)
+        SELECT so.service_id, so.outcome_type, so.created_at
+        FROM search_outcomes so
+        JOIN search_analytics sa ON sa.query_id = so.query_id
+        WHERE so.session_id = $1 AND sa.user_id = $2::uuid
+        ORDER BY so.created_at DESC LIMIT 20
+    """, agent_id, str(user_id))
 
     return {
         "agent_id": agent_id,
