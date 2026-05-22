@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.6.14"
+VERSION = "0.7.0"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -718,6 +718,122 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS", "DELETE", "PUT"],
     allow_headers=["*"],
+)
+
+
+# Request body size limits (defense-in-depth against memory exhaustion / JSON
+# bombs). Most endpoints take small JSON payloads — capped at 1 MB. /run and
+# /execute (including /execute/batch and /run/intents) carry larger payloads
+# (LLM messages, audio URLs, multi-call batches) and get 4 MB.
+_BODY_LIMIT_DEFAULT = 1 * 1024 * 1024       # 1 MB
+_BODY_LIMIT_LARGE   = 4 * 1024 * 1024       # 4 MB
+_LARGE_BODY_PREFIXES = ("/run", "/execute")
+
+
+class BodySizeLimitMiddleware:
+    """ASGI middleware enforcing per-path request body size limits.
+
+    Two-layer enforcement:
+      1. **Content-Length header** — cheap rejection before any body is read.
+         Covers >99% of real-world requests (all standard JSON clients send CL).
+      2. **Stream byte counter** — for requests without Content-Length (chunked
+         transfer-encoding), we wrap `receive` to count bytes as they arrive.
+         When the limit is crossed mid-stream, we truncate the body delivered
+         to the app so the endpoint sees a short/malformed payload and fails
+         with its own 4xx — the request can't grow unbounded.
+
+    Returns a 413 JSON body when the Content-Length check fires.
+    """
+
+    def __init__(self, app, default_limit: int, large_limit: int,
+                 large_path_prefixes: tuple[str, ...]):
+        self.app = app
+        self.default_limit = default_limit
+        self.large_limit = large_limit
+        self.large_path_prefixes = large_path_prefixes
+
+    def _limit_for(self, path: str) -> int:
+        for prefix in self.large_path_prefixes:
+            if path == prefix or path.startswith(prefix + "/"):
+                return self.large_limit
+        return self.default_limit
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "").upper()
+        if method in ("GET", "HEAD", "OPTIONS"):
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "") or ""
+        limit = self._limit_for(path)
+
+        # Layer 1: Content-Length check.
+        for hname, hval in scope.get("headers", []):
+            if hname == b"content-length":
+                try:
+                    declared = int(hval.decode("latin-1"))
+                except (UnicodeDecodeError, ValueError):
+                    break  # malformed; fall through to stream count
+                if declared > limit:
+                    await self._send_413(send, declared, limit, path)
+                    return
+                break
+
+        # Layer 2: stream byte counter for chunked / missing-CL requests.
+        total = 0
+
+        async def counting_receive():
+            nonlocal total
+            msg = await receive()
+            if msg.get("type") == "http.request":
+                body = msg.get("body", b"") or b""
+                total += len(body)
+                if total > limit:
+                    # Truncate the chunk and signal end-of-body to the app.
+                    # The app will see a short payload and produce a 4xx of
+                    # its own — we can't cleanly inject a 413 here because
+                    # the app may have already started its response.
+                    overflow = total - limit
+                    return {
+                        "type": "http.request",
+                        "body": body[: len(body) - overflow] if overflow < len(body) else b"",
+                        "more_body": False,
+                    }
+            return msg
+
+        await self.app(scope, counting_receive, send)
+
+    @staticmethod
+    async def _send_413(send, size: int, limit: int, path: str) -> None:
+        import json as _json
+        body = _json.dumps({
+            "error": "payload_too_large",
+            "limit_bytes": limit,
+            "size_bytes": size,
+            "path": path,
+            "message": f"Request body of {size} bytes exceeds the {limit}-byte limit for this endpoint.",
+        }).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("latin-1")),
+                (b"connection", b"close"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    default_limit=_BODY_LIMIT_DEFAULT,
+    large_limit=_BODY_LIMIT_LARGE,
+    large_path_prefixes=_LARGE_BODY_PREFIXES,
 )
 
 
