@@ -422,6 +422,120 @@ class TestAuthSessionCreate:
 
     @pytest.mark.asyncio
     @pytest.mark.no_api_key
+    async def test_400_response_includes_received_keys_for_diagnostics(self):
+        """Frontend devs hit /auth/session with the wrong field name and need
+        to see what keys they sent vs. what's accepted, without us echoing the
+        actual JWT (values) into the response body."""
+        from routers.auth import auth_session_create
+        from fastapi import HTTPException
+        with patch("core.tier_gates._get_redis", return_value=FakeRedis()):
+            with pytest.raises(HTTPException) as exc:
+                await auth_session_create(
+                    _stub_request({"wrong_field": "abc", "another": "xyz"}),
+                    db=AsyncMock(),
+                )
+        assert exc.value.status_code == 400
+        detail = exc.value.detail
+        assert detail["error"] == "supabase_jwt_required"
+        assert detail["received_keys"] == ["another", "wrong_field"]  # sorted
+        assert "supabase_jwt" in detail["accepted_fields"]
+        assert "access_token" in detail["accepted_fields"]
+        # Critically: actual JWT-like values must NOT appear anywhere in
+        # detail (we only ever surface keys, not values).
+        import json as _json
+        rendered = _json.dumps(detail)
+        assert "abc" not in rendered
+        assert "xyz" not in rendered
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_400_logs_keys_not_values(self, caplog):
+        """The diagnostic log line must include the received KEY NAMES but
+        NEVER the values (which would be JWTs in normal flows)."""
+        import logging as _logging
+        from routers.auth import auth_session_create
+        from fastapi import HTTPException
+        with caplog.at_level(_logging.WARNING, logger="wayforth"):
+            with patch("core.tier_gates._get_redis", return_value=FakeRedis()):
+                with pytest.raises(HTTPException):
+                    await auth_session_create(
+                        _stub_request({"sb_token": "leak-me-not-1234567890"}),
+                        db=AsyncMock(),
+                    )
+        log_text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "sb_token" in log_text       # key name logged
+        assert "leak-me-not" not in log_text  # value NEVER logged
+
+    @pytest.mark.parametrize("field", ["supabase_jwt", "token", "access_token", "jwt"])
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_jwt_field_aliases_all_accepted(self, field):
+        """All four documented field names must be accepted. Lovable's Supabase
+        JS client emits `access_token`; hand-rolled callers often use `token`
+        or `jwt`; our docs reference `supabase_jwt`."""
+        from routers.auth import auth_session_create
+        r = FakeRedis()
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(return_value={
+            "id": "11111111-1111-1111-1111-111111111111",
+            "email": "user@example.com",
+            "supabase_id": "sub-x",
+            "tier": "free",
+            "package_tier": "free",
+            "lifetime_credits": 0,
+        })
+        with patch("core.tier_gates._get_redis", return_value=r), \
+             patch("routers.auth.verify_supabase_jwt",
+                   return_value={"sub": "sub-x", "email": "user@example.com"}):
+            response = await auth_session_create(
+                _stub_request({field: "valid-jwt-value"}),
+                db=db,
+            )
+        assert json.loads(response.body) == {"ok": True}
+        # Cookie was set regardless of which alias the caller used.
+        set_cookies = [v.decode("latin-1") for k, v in response.raw_headers
+                       if k.lower() == b"set-cookie"]
+        assert any(c.startswith("wf_session=") for c in set_cookies)
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_supabase_jwt_wins_over_other_aliases(self):
+        """When multiple known field names are present, supabase_jwt is used
+        (per documented priority order). Verified by patching the verifier to
+        accept ONLY a specific value and ensuring the right one is picked."""
+        from routers.auth import auth_session_create
+        r = FakeRedis()
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(return_value={
+            "id": "11111111-1111-1111-1111-111111111111",
+            "email": "user@example.com",
+            "supabase_id": "sub-x",
+            "tier": "free",
+            "package_tier": "free",
+            "lifetime_credits": 0,
+        })
+
+        def _verify_only_canonical(tok):
+            if tok != "CANONICAL":
+                raise Exception("wrong token used")
+            return {"sub": "sub-x", "email": "user@example.com"}
+
+        with patch("core.tier_gates._get_redis", return_value=r), \
+             patch("routers.auth.verify_supabase_jwt",
+                   side_effect=_verify_only_canonical):
+            response = await auth_session_create(
+                _stub_request({
+                    "supabase_jwt": "CANONICAL",
+                    "access_token": "FALLBACK",
+                    "token": "ANOTHER",
+                    "jwt": "YET-ANOTHER",
+                }),
+                db=db,
+            )
+        assert json.loads(response.body) == {"ok": True}
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
     async def test_invalid_jwt_returns_401(self):
         from routers.auth import auth_session_create
         from fastapi import HTTPException

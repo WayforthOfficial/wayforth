@@ -413,12 +413,25 @@ def _redis_for_session():
     return _get_redis()
 
 
+# Accepted body keys for the JWT, in priority order. Different Supabase
+# client SDKs name the field differently — the JS client returns
+# `access_token`, our docs reference `supabase_jwt`, hand-rolled callers
+# tend to pick `token` or `jwt`. Accepting all four eliminates a class of
+# integration bugs where the frontend uses one name and the backend
+# rejects it.
+_SESSION_JWT_FIELDS = ("supabase_jwt", "token", "access_token", "jwt")
+
+
 @router.post("/auth/session")
 @limiter.limit("10/minute")
 async def auth_session_create(request: Request, db=Depends(get_db)):
     """Exchange a Supabase JWT for an HttpOnly session cookie.
 
-    Body: {"supabase_jwt": "<jwt>"}
+    Body: JSON containing the JWT under any of these keys (priority order):
+      - supabase_jwt   (canonical)
+      - token          (generic)
+      - access_token   (Supabase JS client default)
+      - jwt            (generic)
     Response: {"ok": true} — the cookie is the only out-of-band credential.
     The raw token is never echoed in the response body, so a page-rendered
     response leak (logging frameworks, error reporters) cannot expose it.
@@ -439,11 +452,29 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
         body = await request.json()
     except Exception:
         body = {}
-    supabase_jwt = (body.get("supabase_jwt") or "").strip() if isinstance(body, dict) else ""
+    supabase_jwt = ""
+    if isinstance(body, dict):
+        for _field in _SESSION_JWT_FIELDS:
+            _val = body.get(_field)
+            if isinstance(_val, str) and _val.strip():
+                supabase_jwt = _val.strip()
+                break
     if not supabase_jwt:
+        # Diagnostic log: keys only, never values. Helps debug frontend
+        # integrations that send the JWT under an unexpected key name.
+        received_keys = sorted(body.keys()) if isinstance(body, dict) else []
+        logger.warning(
+            "POST /auth/session 400 no_jwt_field received_keys=%s expected_any_of=%s",
+            received_keys, list(_SESSION_JWT_FIELDS),
+        )
         raise HTTPException(status_code=400, detail={
             "error": "supabase_jwt_required",
-            "message": "POST {\"supabase_jwt\": \"<token>\"}",
+            "message": (
+                "POST a JSON body with the JWT under one of: "
+                f"{', '.join(_SESSION_JWT_FIELDS)}."
+            ),
+            "accepted_fields": list(_SESSION_JWT_FIELDS),
+            "received_keys": received_keys,
         })
 
     try:
