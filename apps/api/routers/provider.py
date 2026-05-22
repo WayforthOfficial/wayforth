@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.requests import Request
 
 from core.db import get_db
+from core.login_security import check_login_lockout, record_login_failure, clear_login_failures
 from core.rate_limit import limiter
 from services.managed import SERVICE_DISPLAY_NAMES, SERVICE_CONFIGS
 
@@ -150,12 +151,19 @@ async def provider_login(request: Request, db=Depends(get_db)):
     email = (body.get("email") or "").strip().lower()
     password = body.get("password") or ""
 
+    from core.tier_gates import _get_redis
+    redis = _get_redis()
+    await check_login_lockout(email, redis)
+
     provider = await db.fetchrow(
         "SELECT id, company_name, email, password_hash, tier, verified, mfa_enabled FROM providers WHERE email = $1",
         email,
     )
     if not provider or not bcrypt.checkpw(password.encode(), provider["password_hash"].encode()):
+        await record_login_failure(email, redis)
         raise HTTPException(status_code=401, detail={"error": "invalid_credentials"})
+
+    await clear_login_failures(email, redis)
 
     if provider.get("mfa_enabled"):
         from routers.mfa import issue_mfa_challenge

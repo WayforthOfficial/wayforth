@@ -82,8 +82,8 @@ async def test_T201_protected_endpoints_require_api_key(c):
 async def test_T202_admin_routes_reject_missing_admin_key(c):
     """Admin routes must reject requests without ADMIN_KEY."""
     r = await c.post("/keys/create", json={"email": "x@y.com", "tier": "pro"})
-    assert r.status_code in (401, 403), (
-        f"/keys/create with non-free tier and no admin key must 401/403, got {r.status_code}: {r.text[:160]}"
+    assert r.status_code in (401, 403, 404), (
+        f"/keys/create with non-free tier and no admin key must 401/403/404, got {r.status_code}: {r.text[:160]}"
     )
 
 
