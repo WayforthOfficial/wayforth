@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/wayforth-mcp)](https://pypi.org/project/wayforth-mcp/)
 [![smithery badge](https://smithery.ai/badge/support-9ef4/Wayforth)](https://smithery.ai/servers/support-9ef4/Wayforth)
 
-**v0.7.0 — Hardened** · Search engine and payment rail for AI agents.
+**v0.7.1 — Stable Auth** · Search engine and payment rail for AI agents.
 
 4,974 verified API endpoints across 19 categories. Pay via card or crypto. One MCP install.
 
@@ -50,6 +50,7 @@ POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
 - **Triple-track payments** — card, USDC on Base, x402 protocol
 - **MFA** — TOTP-based multi-factor authentication available across developer, provider, and admin dashboards
 - **Security** — professional penetration test completed, all findings resolved (v0.7.0)
+- **Session persistence** — Google OAuth and email/password login fully resolved; wf_session cookie issued reliably across all auth providers
 - **3 provisional patents** filed
 - **186 tests** passing
 
