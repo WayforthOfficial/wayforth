@@ -1,5 +1,5 @@
 """
-v0.6.14 Economics regression tests.
+v0.6.14 Economics regression tests + v0.7.0 version bump.
 
 Covers:
   - x402 fee model: developer charge = provider_price / 0.985
@@ -24,8 +24,11 @@ from services.managed import SERVICE_CONFIGS
 
 class TestVersion:
 
-    def test_version_is_0614(self):
-        assert VERSION == "0.6.14"
+    def test_version_is_070(self):
+        # v0.7.0 — Hardened. Economics from v0.6.14 still apply (this whole file
+        # is the v0.6.14 economics regression suite); the version bump just
+        # acknowledges the security-hardening release that ships them.
+        assert VERSION == "0.7.0"
 
     def test_version_is_string(self):
         assert isinstance(VERSION, str)
