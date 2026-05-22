@@ -650,3 +650,27 @@ pre[class*="language-"] {
 .mb-sm { margin-bottom: 0.5rem; }
 .mono { font-family: var(--mono); }
 .dim  { color: var(--text-dim); }
+
+/* 24. Docs footer */
+.docs-footer {
+  border-top: 1px solid var(--border);
+  padding: 2rem 1.5rem;
+  margin-top: 3rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+.docs-footer a {
+  color: var(--text-dim);
+  text-decoration: none;
+}
+.docs-footer a:hover { color: var(--accent); text-decoration: underline; }
+.docs-footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
