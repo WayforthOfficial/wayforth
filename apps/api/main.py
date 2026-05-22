@@ -233,6 +233,14 @@ async def lifespan(app: FastAPI):
             min_size=2,
             max_size=20,
             command_timeout=30.0,
+            # Recycle connections idle >300s so Railway never reaches its
+            # ~10-minute idle-disconnect before we do (300s = 5-min safety margin).
+            max_inactive_connection_lifetime=300.0,
+            server_settings={
+                "tcp_keepalives_idle":     "60",
+                "tcp_keepalives_interval": "10",
+                "tcp_keepalives_count":    "5",
+            },
         )
         app.state.db_ok = True
         async with app.state.pool.acquire() as _mconn:
@@ -982,6 +990,7 @@ async def security_policy_html():
 @app.get("/health")
 @limiter.limit("60/minute")
 async def health(request: Request):
+    from core.db import get_pool_stats
     pool = getattr(request.app.state, "pool", None)
     if pool is None:
         return {
@@ -991,7 +1000,9 @@ async def health(request: Request):
             "db_status": "unavailable",
             "catalog": {"total": 0, "tier2": 0},
             "managed_services": _active_managed_count(),
+            "pool": {},
         }
+    pool_stats = get_pool_stats(pool)
     try:
         async with pool.acquire(timeout=4.0) as conn:
             await conn.fetchval("SELECT 1")
@@ -1012,6 +1023,7 @@ async def health(request: Request):
             "tier2": tier2,
         },
         "managed_services": _active_managed_count(),
+        "pool": pool_stats,
     }
 
 
