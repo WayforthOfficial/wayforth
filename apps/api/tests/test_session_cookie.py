@@ -610,6 +610,68 @@ class TestAuthSessionCreate:
 
     @pytest.mark.asyncio
     @pytest.mark.no_api_key
+    async def test_oauth_email_fallback_creates_session_and_links_identity(self):
+        """Google OAuth sub differs from stored supabase_id (separate Supabase
+        identities). Email fallback must find the account, create the session,
+        and UPDATE supabase_id so future logins use the fast sub-lookup path."""
+        from routers.auth import auth_session_create
+        r = FakeRedis()
+        db = AsyncMock()
+        oauth_row = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "email": "user@example.com",
+            "supabase_id": "old-email-password-sub",
+            "tier": "growth",
+            "package_tier": "growth",
+            "lifetime_credits": 100_000,
+        }
+        # First fetchrow (supabase_id lookup) → miss; second (email) → hit.
+        db.fetchrow = AsyncMock(side_effect=[None, oauth_row])
+        db.execute = AsyncMock(return_value="UPDATE 1")
+
+        with patch("core.tier_gates._get_redis", return_value=r), \
+             patch("routers.auth.verify_supabase_jwt",
+                   return_value={"sub": "new-google-sub", "email": "user@example.com"}):
+            response = await auth_session_create(
+                _stub_request({"supabase_jwt": "google-jwt"}),
+                db=db,
+            )
+
+        assert json.loads(response.body) == {"ok": True}
+        set_cookies = [v.decode("latin-1") for k, v in response.raw_headers
+                       if k.lower() == b"set-cookie"]
+        assert any(c.startswith("wf_session=") for c in set_cookies)
+        # supabase_id must be updated to the new Google sub.
+        db.execute.assert_awaited_once()
+        sql, new_sub, user_id = db.execute.call_args.args
+        assert "UPDATE users SET supabase_id" in sql
+        assert new_sub == "new-google-sub"
+        assert user_id == "11111111-1111-1111-1111-111111111111"
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_oauth_no_email_claim_and_unknown_sub_returns_401(self):
+        """JWT sub is unknown and JWT carries no email claim — no fallback
+        possible, must 401. Also verifies we don't attempt the email query."""
+        from routers.auth import auth_session_create
+        from fastapi import HTTPException
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(return_value=None)
+
+        with patch("core.tier_gates._get_redis", return_value=FakeRedis()), \
+             patch("routers.auth.verify_supabase_jwt",
+                   return_value={"sub": "unknown-sub"}):  # no email claim
+            with pytest.raises(HTTPException) as exc:
+                await auth_session_create(
+                    _stub_request({"supabase_jwt": "ok"}),
+                    db=db,
+                )
+        assert exc.value.status_code == 401
+        # Only one fetchrow call — no email fallback attempted.
+        assert db.fetchrow.await_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
     async def test_email_mismatch_with_jwt_claim_returns_401(self):
         from routers.auth import auth_session_create
         from fastapi import HTTPException
