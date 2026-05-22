@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from core.auth import _resolve_user, verify_supabase_jwt, get_fernet
+from core.auth import _resolve_user, verify_supabase_jwt, get_fernet, resolve_dashboard_caller
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier
@@ -697,77 +697,75 @@ async def auth_me(request: Request, db=Depends(get_db)):
 @router.get("/account/api-key")
 @limiter.limit("5/minute")
 async def get_api_key(request: Request, db=Depends(get_db)):
-    """Return the caller's API key — called only on explicit user action (Reveal button).
+    """Return the caller's API key — called by the dashboard on session setup
+    (and on explicit "Reveal key" actions).
 
     Accepts:
       - wf_session HttpOnly cookie (browser, preferred)
       - Authorization: Bearer <supabase_jwt> (legacy / non-browser)
-    Never exposed in the default /auth/me response.
+      - X-Wayforth-API-Key (programmatic — degenerate but harmless)
+
+    Returns 200 in three cases the dashboard needs to distinguish:
+      - Account has an active key, decryptable           → {"api_key": "<key>", ...}
+      - Account has an active key but it predates the    → {"api_key": "<prefix>...",
+        encrypted-storage migration (key_prefix only)       "encrypted": false, ...}
+      - Account has NO active key (new user, or all      → {"api_key": null, ...}
+        keys revoked)
+    Returns 401 only when authentication itself fails. Previously this
+    endpoint conflated "no active key" with "account not found" and 401'd,
+    which the dashboard treated as a fatal login failure for new users.
     """
-    from core.session import get_request_session
-    session = get_request_session(request)
-    if session:
-        row = await db.fetchrow("""
-            SELECT k.key_prefix, k.encrypted_key, k.created_at, k.last_used_at
-            FROM api_keys k
-            WHERE k.user_id = $1::uuid AND k.active = true
-            ORDER BY (k.encrypted_key IS NOT NULL) DESC, k.created_at DESC
-            LIMIT 1
-        """, session["user_id"])
-        if not row:
-            raise HTTPException(status_code=401, detail={"code": "account_not_found"})
-        if row["encrypted_key"]:
-            try:
-                _f = get_fernet()
-                api_key = _f.decrypt(row["encrypted_key"].encode()).decode()
-            except Exception:
-                raise HTTPException(status_code=500, detail="Key decryption failed")
-        else:
-            api_key = row["key_prefix"] + "..."
+    caller = await resolve_dashboard_caller(request, db)
+
+    if caller["api_key_id"] is None:
+        # Authenticated, but the account has no active API key. The dashboard
+        # should surface a "generate key" action; this is not a login failure.
         response = JSONResponse(content={
-            "api_key": api_key,
-            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-            "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None,
+            "api_key": None,
+            "created_at": None,
+            "last_used_at": None,
+            "message": "No active API key for this account. Generate one to get started.",
         })
         response.headers["Cache-Control"] = "no-store, no-cache"
         return response
 
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authorization: Bearer <token> or wf_session cookie required")
-
-    token = auth_header.removeprefix("Bearer ").strip()
-    try:
-        claims = verify_supabase_jwt(token)
-        supabase_sub = claims.get("sub", "")
-        if not supabase_sub:
-            raise ValueError("no sub")
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
     row = await db.fetchrow("""
-        SELECT k.key_prefix, k.encrypted_key, k.created_at, k.last_used_at
-        FROM users u
-        JOIN api_keys k ON k.user_id = u.id
-        WHERE u.supabase_id = $1 AND k.active = true
-        ORDER BY (k.encrypted_key IS NOT NULL) DESC, k.created_at DESC
-        LIMIT 1
-    """, supabase_sub)
+        SELECT key_prefix, encrypted_key, created_at, last_used_at
+        FROM api_keys
+        WHERE id = $1::uuid AND active = true
+    """, str(caller["api_key_id"]))
 
     if not row:
-        raise HTTPException(status_code=401, detail={"code": "account_not_found"})
+        # Race: key was deactivated between resolve_dashboard_caller and now.
+        # Treat the same as "no active key" so the dashboard recovers
+        # gracefully rather than blowing up the login flow.
+        response = JSONResponse(content={
+            "api_key": None,
+            "created_at": None,
+            "last_used_at": None,
+            "message": "Active API key was revoked. Generate a new one to continue.",
+        })
+        response.headers["Cache-Control"] = "no-store, no-cache"
+        return response
 
+    encrypted: bool
     if row["encrypted_key"]:
         try:
             _f = get_fernet()
             api_key = _f.decrypt(row["encrypted_key"].encode()).decode()
+            encrypted = True
         except Exception:
             raise HTTPException(status_code=500, detail="Key decryption failed")
     else:
+        # Legacy row: only the key_prefix was retained; the raw key was issued
+        # once at signup and we never stored a decryptable copy. We surface a
+        # masked preview rather than a full key.
         api_key = row["key_prefix"] + "..."
+        encrypted = False
 
     response = JSONResponse(content={
         "api_key": api_key,
+        "encrypted": encrypted,
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None,
     })

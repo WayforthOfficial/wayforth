@@ -40,11 +40,17 @@ from core.session import _SCOPE_KEY_RECORD, _SCOPE_KEY_TOKEN  # noqa: E402
 
 @pytest.fixture(autouse=True, scope="session")
 def _unwrap_account_endpoints():
+    import routers.auth as _auth
     import routers.billing.account as _a
     import routers.billing.favorites as _f
     import routers.billing.referrals as _r
     saved = {}
     targets = [
+        # /account/api-key lives in routers.auth (not /account/* in billing).
+        # The login flow hits it right after /auth/session, so it must accept
+        # the cookie + Bearer + API key paths the same as the rest of
+        # /account/*.
+        (_auth, ["get_api_key"]),
         (_a, ["account_credits", "account_tier", "account_analytics",
               "account_searches", "account_executions",
               "account_usage_history", "account_agents", "account_agent_detail",
@@ -470,3 +476,149 @@ class TestReferralsCookiePath:
             resp = await get_referral(_req(scope=_cookie_scope()), db=db)
         assert resp["referral_code"] == "WF-ABC123"
         assert resp["referrals_count"] == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /account/api-key — regression: dashboard login was failing with
+# "No API key returned for this account" when the user had no active api_key
+# row. Authenticated users with no key should get {"api_key": null}, not 401.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAccountApiKey:
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_cookie_with_no_active_key_returns_null_not_401(self):
+        """The bug: dashboard called /account/api-key right after /auth/session,
+        got 401 'account_not_found' for any user without an active api_key, and
+        treated it as a fatal login failure. Fixed: return {api_key: null} so
+        the UI can offer to generate a key."""
+        from routers.auth import get_api_key
+        db = AsyncMock()
+        # resolve_dashboard_caller returns api_key_id=None when the user
+        # exists but has no active key (LEFT JOIN gave NULL).
+        with patch("routers.auth.resolve_dashboard_caller", AsyncMock(return_value={
+            "user_id": "uid-no-key",
+            "api_key_id": None,
+            "tier": "free",
+            "monthly_calls_count": 0,
+            "monthly_calls_reset_at": None,
+            "email": "new@example.com",
+        })):
+            response = await get_api_key(_req(scope=_cookie_scope()), db=db)
+        body = json.loads(response.body)
+        assert body["api_key"] is None
+        assert body["created_at"] is None
+        assert body["last_used_at"] is None
+        assert "message" in body
+        # No DB query for encrypted_key should be issued when api_key_id is None.
+        db.fetchrow.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_cookie_with_active_key_returns_decrypted_key(self):
+        from routers.auth import get_api_key
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(return_value={
+            "key_prefix": "wf_live_abc",
+            "encrypted_key": "ZmFrZS1lbmNyeXB0ZWQ=",  # value irrelevant — Fernet is patched below
+            "created_at": None,
+            "last_used_at": None,
+        })
+
+        class _FakeFernet:
+            def decrypt(self, _b):
+                return b"wf_live_RECOVERED_RAW_KEY"
+
+        with patch("routers.auth.resolve_dashboard_caller", AsyncMock(return_value={
+            "user_id": "uid-1",
+            "api_key_id": "key-1",
+            "tier": "pro",
+            "monthly_calls_count": 0,
+            "monthly_calls_reset_at": None,
+            "email": "u@e",
+        })), patch("routers.auth.get_fernet", return_value=_FakeFernet()):
+            response = await get_api_key(_req(scope=_cookie_scope()), db=db)
+        body = json.loads(response.body)
+        assert body["api_key"] == "wf_live_RECOVERED_RAW_KEY"
+        assert body["encrypted"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_legacy_key_without_encrypted_blob_returns_prefix_preview(self):
+        """Keys issued before the encrypted-storage migration only have a
+        prefix on file. We return a masked preview rather than null, with
+        encrypted=false so the dashboard can prompt the user to rotate."""
+        from routers.auth import get_api_key
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(return_value={
+            "key_prefix": "wf_live_xyz",
+            "encrypted_key": None,
+            "created_at": None,
+            "last_used_at": None,
+        })
+        with patch("routers.auth.resolve_dashboard_caller", AsyncMock(return_value={
+            "user_id": "uid-1",
+            "api_key_id": "key-1",
+            "tier": "free",
+            "monthly_calls_count": 0,
+            "monthly_calls_reset_at": None,
+            "email": "u@e",
+        })):
+            response = await get_api_key(_req(scope=_cookie_scope()), db=db)
+        body = json.loads(response.body)
+        assert body["api_key"] == "wf_live_xyz..."
+        assert body["encrypted"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_no_auth_returns_401(self):
+        from routers.auth import get_api_key
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            await get_api_key(_req(), db=AsyncMock())
+        assert exc.value.status_code == 401
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_bearer_jwt_path_with_no_key_also_returns_null(self):
+        """Same null-handling for the legacy JWT path — previously this
+        branch also 401'd with account_not_found, breaking the login flow
+        for any caller still on Bearer auth."""
+        from routers.auth import get_api_key
+        db = AsyncMock()
+        # resolve_dashboard_caller will follow the Bearer branch internally;
+        # we patch it to return the same "no api key" shape.
+        with patch("routers.auth.resolve_dashboard_caller", AsyncMock(return_value={
+            "user_id": "uid-2",
+            "api_key_id": None,
+            "tier": "free",
+            "monthly_calls_count": 0,
+            "monthly_calls_reset_at": None,
+            "email": "u2@e",
+        })):
+            response = await get_api_key(_req(headers=_bearer_headers()), db=db)
+        body = json.loads(response.body)
+        assert body["api_key"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_key_revoked_between_resolve_and_fetch_returns_null(self):
+        """Race: caller is resolved successfully but the api_key row
+        disappears (or is deactivated) before the encrypted_key lookup.
+        Must NOT 500 — return null so the dashboard recovers."""
+        from routers.auth import get_api_key
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(return_value=None)  # key gone by the time we look it up
+        with patch("routers.auth.resolve_dashboard_caller", AsyncMock(return_value={
+            "user_id": "uid-3",
+            "api_key_id": "key-soon-gone",
+            "tier": "free",
+            "monthly_calls_count": 0,
+            "monthly_calls_reset_at": None,
+            "email": "u@e",
+        })):
+            response = await get_api_key(_req(scope=_cookie_scope()), db=db)
+        body = json.loads(response.body)
+        assert body["api_key"] is None
