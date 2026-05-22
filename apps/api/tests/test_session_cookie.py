@@ -823,6 +823,94 @@ class TestAuthMeCookiePath:
             await auth_me(req, db=db)
         assert exc.value.status_code == 401
 
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_second_call_hits_cache_not_db(self):
+        """First call populates me-cache; second call returns from cache
+        with zero additional DB queries."""
+        from routers.auth import auth_me
+        r = FakeRedis()
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(return_value={
+            "email": "u@e.com",
+            "tier": "pro",
+            "package_tier": "pro",
+            "credits_balance": 5000,
+            "lifetime_credits": 72000,
+        })
+        scope = {
+            _SCOPE_KEY_RECORD: {"user_id": "uid-1", "email": "u@e.com",
+                                "tier": "pro", "supabase_id": "sub-1"},
+            _SCOPE_KEY_TOKEN: "tok",
+        }
+        req = _stub_request(scope_extras=scope)
+        with patch("core.tier_gates._get_redis", return_value=r):
+            resp1 = await auth_me(req, db=db)
+        assert json.loads(resp1.body)["tier"] == "pro"
+        assert db.fetchrow.await_count == 1
+
+        # Second call — same token, Redis still has the me-cache entry.
+        req2 = _stub_request(scope_extras=scope)
+        with patch("core.tier_gates._get_redis", return_value=r):
+            resp2 = await auth_me(req2, db=db)
+        assert json.loads(resp2.body)["tier"] == "pro"
+        assert db.fetchrow.await_count == 1  # unchanged — served from cache
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_logout_invalidates_me_cache(self):
+        """auth_session_logout must delete the me-cache key so a reused
+        cookie cannot be served stale data after the session is revoked."""
+        from routers.auth import auth_me, auth_session_logout, _me_cache_key
+        r = FakeRedis()
+        tok = await create_session(r, "uid", "u@e.com", "pro", "sub")
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(return_value={
+            "email": "u@e.com",
+            "tier": "pro",
+            "package_tier": "pro",
+            "credits_balance": 1000,
+            "lifetime_credits": 50000,
+        })
+        scope = {
+            _SCOPE_KEY_RECORD: {"user_id": "uid", "email": "u@e.com",
+                                "tier": "pro", "supabase_id": "sub"},
+            _SCOPE_KEY_TOKEN: tok,
+        }
+        # Populate the me-cache.
+        with patch("core.tier_gates._get_redis", return_value=r):
+            await auth_me(_stub_request(scope_extras=scope), db=db)
+        assert await r.get(_me_cache_key(tok)) is not None
+
+        # Logout should revoke the session AND delete the me-cache entry.
+        with patch("core.tier_gates._get_redis", return_value=r):
+            resp = await auth_session_logout(_stub_request(scope_extras=scope))
+        assert json.loads(resp.body) == {"ok": True}
+        assert await r.get(_me_cache_key(tok)) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_api_key
+    async def test_cache_miss_when_redis_unavailable_falls_through_to_db(self):
+        """Redis unavailable → no cache → DB is always queried (existing behaviour)."""
+        from routers.auth import auth_me
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(return_value={
+            "email": "u@e.com",
+            "tier": "starter",
+            "package_tier": "starter",
+            "credits_balance": 0,
+            "lifetime_credits": 0,
+        })
+        req = _stub_request(scope_extras={
+            _SCOPE_KEY_RECORD: {"user_id": "uid-1", "email": "u@e.com",
+                                "tier": "starter", "supabase_id": "sub-1"},
+            _SCOPE_KEY_TOKEN: "tok",
+        })
+        with patch("core.tier_gates._get_redis", return_value=None):
+            resp = await auth_me(req, db=db)
+        assert json.loads(resp.body)["tier"] == "starter"
+        assert db.fetchrow.await_count == 1
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # /auth/mfa/disable — cookie satisfies the supabase-session gate

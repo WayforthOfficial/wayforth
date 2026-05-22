@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -413,6 +414,13 @@ def _redis_for_session():
     return _get_redis()
 
 
+_ME_CACHE_TTL = 30  # seconds — short enough that tier/credit changes propagate quickly
+
+
+def _me_cache_key(raw_token: str) -> str:
+    return "me:" + hashlib.sha256(raw_token.encode()).hexdigest()
+
+
 # Accepted body keys for the JWT, in priority order. Different Supabase
 # client SDKs name the field differently — the JS client returns
 # `access_token`, our docs reference `supabase_jwt`, hand-rolled callers
@@ -609,6 +617,10 @@ async def auth_session_logout(request: Request):
         redis = _redis_for_session()
         if redis is not None:
             await revoke_session(redis, raw_token)
+            try:
+                await redis.delete(_me_cache_key(raw_token))
+            except Exception:
+                pass
 
     response = JSONResponse(content={"ok": True})
     response.headers["Cache-Control"] = "no-store, no-cache"
@@ -617,7 +629,7 @@ async def auth_session_logout(request: Request):
 
 
 @router.get("/auth/me")
-@limiter.limit("10/minute")
+@limiter.limit("120/minute")
 async def auth_me(request: Request, db=Depends(get_db)):
     """Return email, tier, and credits. API key is NOT returned here — use GET /account/api-key.
 
@@ -627,30 +639,52 @@ async def auth_me(request: Request, db=Depends(get_db)):
       - X-Wayforth-API-Key: <api_key> (programmatic clients)
     """
     # Fastest path: validated session cookie (middleware already looked it up).
-    from core.session import get_request_session
+    from core.session import get_request_session, get_request_session_token
     session = get_request_session(request)
     if session:
-        row = await db.fetchrow("""
-            SELECT u.email, k.tier,
-                   uc.package_tier, uc.credits_balance, uc.lifetime_credits
-            FROM users u
-            LEFT JOIN api_keys k ON k.user_id = u.id AND k.active = true
-            LEFT JOIN user_credits uc ON uc.user_id = u.id
-            WHERE u.id = $1::uuid
-            ORDER BY (k.encrypted_key IS NOT NULL) DESC NULLS LAST, k.created_at DESC NULLS LAST
-            LIMIT 1
-        """, session["user_id"])
-        if row:
+        raw_token = get_request_session_token(request)
+        redis = _redis_for_session()
+
+        me_payload = None
+        me_key = None
+        if redis is not None and raw_token:
+            me_key = _me_cache_key(raw_token)
+            try:
+                cached = await redis.get(me_key)
+                if cached:
+                    me_payload = json.loads(cached)
+            except Exception:
+                pass  # cache miss — fall through to DB
+
+        if me_payload is None:
+            row = await db.fetchrow("""
+                SELECT u.email, k.tier,
+                       uc.package_tier, uc.credits_balance, uc.lifetime_credits
+                FROM users u
+                LEFT JOIN api_keys k ON k.user_id = u.id AND k.active = true
+                LEFT JOIN user_credits uc ON uc.user_id = u.id
+                WHERE u.id = $1::uuid
+                ORDER BY (k.encrypted_key IS NOT NULL) DESC NULLS LAST, k.created_at DESC NULLS LAST
+                LIMIT 1
+            """, session["user_id"])
+            if not row:
+                # Session is valid but the underlying account is gone — treat as logout.
+                raise HTTPException(status_code=401, detail={"error": "account_not_found"})
             tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
-            response = JSONResponse(content={
+            me_payload = {
                 "email": row["email"],
                 "tier": tier,
                 "credits_remaining": row["credits_balance"] or 0,
-            })
-            response.headers["Cache-Control"] = "no-store, no-cache"
-            return response
-        # Session is valid but the underlying account is gone — treat as logout.
-        raise HTTPException(status_code=401, detail={"error": "account_not_found"})
+            }
+            if redis is not None and me_key:
+                try:
+                    await redis.set(me_key, json.dumps(me_payload), ex=_ME_CACHE_TTL)
+                except Exception:
+                    pass  # non-fatal — next call will repopulate
+
+        response = JSONResponse(content=me_payload)
+        response.headers["Cache-Control"] = "no-store, no-cache"
+        return response
 
     # API key header path
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
