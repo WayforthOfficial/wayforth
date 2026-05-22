@@ -498,6 +498,26 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
         LIMIT 1
     """, supabase_sub)
 
+    # Fallback: OAuth providers (e.g. Google) issue a different Supabase UUID
+    # than the one stored from an earlier email/password signup. If the
+    # supabase_id lookup missed, try matching by the verified email claim.
+    # On success, update supabase_id to the new sub so future logins hit the
+    # fast path and don't rely on this fallback again.
+    email_fallback_used = False
+    if not row and claim_email:
+        row = await db.fetchrow("""
+            SELECT u.id, u.email, u.supabase_id, k.tier,
+                   uc.package_tier, uc.lifetime_credits
+            FROM users u
+            LEFT JOIN api_keys k ON k.user_id = u.id AND k.active = true
+            LEFT JOIN user_credits uc ON uc.user_id = u.id
+            WHERE lower(u.email) = $1
+            ORDER BY (k.encrypted_key IS NOT NULL) DESC NULLS LAST, k.created_at DESC NULLS LAST
+            LIMIT 1
+        """, claim_email)
+        if row:
+            email_fallback_used = True
+
     if not row:
         raise HTTPException(status_code=401, detail={
             "error": "account_not_found",
@@ -508,6 +528,16 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
     # cannot ride someone else's account.
     if claim_email and row["email"].lower() != claim_email:
         raise HTTPException(status_code=401, detail={"error": "email_mismatch"})
+
+    if email_fallback_used:
+        logger.info(
+            "POST /auth/session identity-link sub=%s email=%s old_supabase_id=%s",
+            supabase_sub, claim_email, row["supabase_id"],
+        )
+        await db.execute(
+            "UPDATE users SET supabase_id = $1 WHERE id = $2",
+            supabase_sub, row["id"],
+        )
 
     tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
 
