@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.credits import PLANS, _dispatch_webhooks
 from core.db import get_db
+from core.login_security import check_login_lockout, record_login_failure, clear_login_failures
 from core.rate_limit import limiter
 
 logger = logging.getLogger("wayforth")
@@ -35,7 +36,8 @@ async def get_admin_session(request: Request, db):
 
     token = request.headers.get("X-Admin-Token", "")
     if not token:
-        raise HTTPException(status_code=401, detail="Admin token required")
+        # Return 404 — prevents endpoint enumeration by unauthenticated callers
+        raise HTTPException(status_code=404, detail="Not found")
 
     token_hash = hashlib.sha256(token.encode()).hexdigest()
 
@@ -46,10 +48,9 @@ async def get_admin_session(request: Request, db):
         WHERE s.token_hash = $1 AND s.expires_at > NOW()
     """, token_hash)
 
-    if not session:
-        raise HTTPException(status_code=401, detail="Invalid or expired session")
-    if not session['is_active']:
-        raise HTTPException(status_code=403, detail="Account deactivated")
+    if not session or not session['is_active']:
+        # Return 404 regardless of reason — prevents session probing
+        raise HTTPException(status_code=404, detail="Not found")
 
     return dict(session)
 
@@ -64,15 +65,19 @@ async def admin_login(request: Request, db=Depends(get_db)):
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password required")
 
+    from core.tier_gates import _get_redis
+    redis = _get_redis()
+    await check_login_lockout(email, redis)
+
     user = await db.fetchrow(
         "SELECT * FROM admin_users WHERE email = $1 AND is_active = true", email
     )
 
-    if not user:
+    if not user or not bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
+        await record_login_failure(email, redis)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    if not bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    await clear_login_failures(email, redis)
 
     if user.get("mfa_enabled"):
         from routers.mfa import issue_mfa_challenge

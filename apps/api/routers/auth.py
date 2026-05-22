@@ -360,7 +360,7 @@ async def regenerate_api_key(request: Request, db=Depends(get_db)):
 @router.get("/auth/me")
 @limiter.limit("10/minute")
 async def auth_me(request: Request, db=Depends(get_db)):
-    """Return the caller's API key, email, and tier.
+    """Return email, tier, and credits. API key is NOT returned here — use GET /account/api-key.
 
     Accepts either:
       - Authorization: Bearer <supabase_jwt>
@@ -371,7 +371,7 @@ async def auth_me(request: Request, db=Depends(get_db)):
     if raw_key:
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         row = await db.fetchrow("""
-            SELECT u.email, k.key_prefix, k.encrypted_key, k.tier,
+            SELECT u.email, k.key_prefix, k.tier,
                    uc.package_tier, uc.credits_balance, uc.lifetime_credits
             FROM api_keys k
             JOIN users u ON u.id = k.user_id
@@ -385,7 +385,6 @@ async def auth_me(request: Request, db=Depends(get_db)):
         tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
         response = JSONResponse(content={
             "email": row["email"],
-            "api_key": raw_key,
             "tier": tier,
             "credits_remaining": row["credits_balance"] or 0,
         })
@@ -411,7 +410,7 @@ async def auth_me(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
     row = await db.fetchrow("""
-        SELECT u.email, k.key_prefix, k.encrypted_key, k.tier,
+        SELECT u.email, k.key_prefix, k.tier,
                uc.package_tier, uc.credits_balance, uc.lifetime_credits
         FROM users u
         JOIN api_keys k ON k.user_id = u.id
@@ -428,25 +427,63 @@ async def auth_me(request: Request, db=Depends(get_db)):
             "code": "account_not_found",
         })
 
+    tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
+
+    response = JSONResponse(content={
+        "email": row["email"],
+        "tier": tier,
+        "credits_remaining": row["credits_balance"] or 0,
+    })
+    response.headers["Cache-Control"] = "no-store, no-cache"
+    return response
+
+
+@router.get("/account/api-key")
+@limiter.limit("5/minute")
+async def get_api_key(request: Request, db=Depends(get_db)):
+    """Return the caller's API key — called only on explicit user action (Reveal button).
+
+    Requires Authorization: Bearer <supabase_jwt>.
+    Never exposed in the default /auth/me response.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization: Bearer <token> required")
+
+    token = auth_header.removeprefix("Bearer ").strip()
+    try:
+        claims = verify_supabase_jwt(token)
+        supabase_sub = claims.get("sub", "")
+        if not supabase_sub:
+            raise ValueError("no sub")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    row = await db.fetchrow("""
+        SELECT k.key_prefix, k.encrypted_key, k.created_at, k.last_used_at
+        FROM users u
+        JOIN api_keys k ON k.user_id = u.id
+        WHERE u.supabase_id = $1 AND k.active = true
+        ORDER BY (k.encrypted_key IS NOT NULL) DESC, k.created_at DESC
+        LIMIT 1
+    """, supabase_sub)
+
+    if not row:
+        raise HTTPException(status_code=401, detail={"code": "account_not_found"})
+
     if row["encrypted_key"]:
         try:
             _f = get_fernet()
             api_key = _f.decrypt(row["encrypted_key"].encode()).decode()
         except Exception:
-            raise HTTPException(
-                status_code=500,
-                detail="Key decryption failed — please contact support@wayforth.io",
-            )
+            raise HTTPException(status_code=500, detail="Key decryption failed")
     else:
         api_key = row["key_prefix"] + "..."
 
-    tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
-
     response = JSONResponse(content={
-        "email": row["email"],
         "api_key": api_key,
-        "tier": tier,
-        "credits_remaining": row["credits_balance"] or 0,
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None,
     })
     response.headers["Cache-Control"] = "no-store, no-cache"
     return response

@@ -696,8 +696,20 @@ async def add_request_id(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "geolocation=(), camera=()"
+    response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=()"
     response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' https://gateway.wayforth.io https://*.supabase.co; "
+        "frame-ancestors 'none';"
+    )
+    # Ensure auth and account responses are never cached by proxies or browsers
+    path = request.url.path
+    if path.startswith(("/auth/", "/account/")):
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 

@@ -35,13 +35,17 @@ async def get_db(request: Request):
             detail={"error": "db_unavailable", "message": "Database pool not initialized"},
         )
 
+    # Acquire phase: retry on connection errors only, NOT on endpoint exceptions.
+    # Separating acquire from yield prevents the retry loop from catching endpoint
+    # exceptions (e.g. 401/403) thrown back during generator cleanup, which would
+    # incorrectly yield a second connection and cause a RuntimeError → 500.
+    conn = None
     last_exc: Exception | None = None
     for attempt in range(_ACQUIRE_RETRIES + 1):
         try:
-            async with pool.acquire(timeout=8.0) as conn:
-                yield conn
-                return
-        except TimeoutError as exc:
+            conn = await pool.acquire(timeout=8.0)
+            break
+        except (TimeoutError, asyncio.TimeoutError) as exc:
             stats = get_pool_stats(pool)
             logger.warning("get_db: acquire timeout (attempt %d) pool=%s", attempt + 1, stats)
             raise HTTPException(status_code=503, detail={"error": "service_overloaded"}) from exc
@@ -55,5 +59,12 @@ async def get_db(request: Request):
             if attempt < _ACQUIRE_RETRIES:
                 await asyncio.sleep(0.3 * (attempt + 1))
 
-    logger.error("get_db: all %d attempts failed: %s", _ACQUIRE_RETRIES + 1, last_exc)
-    raise HTTPException(status_code=503, detail={"error": "db_unavailable"})
+    if conn is None:
+        logger.error("get_db: all %d attempts failed: %s", _ACQUIRE_RETRIES + 1, last_exc)
+        raise HTTPException(status_code=503, detail={"error": "db_unavailable"})
+
+    # Yield phase: endpoint exceptions propagate naturally; connection always released.
+    try:
+        yield conn
+    finally:
+        await pool.release(conn)
