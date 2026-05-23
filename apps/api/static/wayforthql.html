@@ -145,7 +145,7 @@ Content-Type: application/json
               <td><span class="field-name">protocol</span></td>
               <td><span class="field-type">string</span></td>
               <td><span class="field-default">null</span></td>
-              <td class="field-desc">Filter by payment protocol. One of: <span class="inline-code">wayforth</span> | <span class="inline-code">any</span></td>
+              <td class="field-desc">Filter by payment protocol. One of: <span class="inline-code">wayforth</span> | <span class="inline-code">x402</span> | <span class="inline-code">any</span>. <span class="inline-code">x402</span> is the open HTTP-402 micropayment standard.</td>
             </tr>
             <tr>
               <td><span class="field-name">sort_by</span></td>
@@ -201,7 +201,7 @@ Content-Type: application/json
             <tr>
               <td><span class="field-name">wri</span></td>
               <td><span class="field-type">float</span></td>
-              <td class="field-desc">Wayforth Rank Index — composite score combining relevance, tier, uptime, and price efficiency. Range 0.0–1.0.</td>
+              <td class="field-desc">Wayforth Rank Index — composite score combining relevance, tier, uptime, and price efficiency. Range 0–100.</td>
             </tr>
             <tr>
               <td><span class="field-name">score</span></td>
@@ -226,7 +226,7 @@ Content-Type: application/json
             <tr>
               <td><span class="field-name">payment_protocol</span></td>
               <td><span class="field-type">string</span></td>
-              <td class="field-desc">Payment routing protocol. One of: <span class="inline-code">wayforth</span> | <span class="inline-code">any</span></td>
+              <td class="field-desc">Payment routing protocol. One of: <span class="inline-code">wayforth</span> | <span class="inline-code">x402</span> | <span class="inline-code">any</span></td>
             </tr>
             <tr>
               <td><span class="field-name">similar</span></td>

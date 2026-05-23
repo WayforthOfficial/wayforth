@@ -1,175 +1,229 @@
-# Wayforth
+# Wayforth — The API Runtime for AI Agents
 
-[![PyPI](https://img.shields.io/pypi/v/wayforth-mcp)](https://pypi.org/project/wayforth-mcp/)
-[![smithery badge](https://smithery.ai/badge/support-9ef4/Wayforth)](https://smithery.ai/servers/support-9ef4/Wayforth)
+**One tool call. Any API. No setup.**
 
-**v0.7.1 — Stable Auth** · Search engine and payment rail for AI agents.
+[![Version](https://img.shields.io/badge/version-0.7.5-4F46E5)](https://gateway.wayforth.io/docs)
+[![License](https://img.shields.io/badge/license-BSL_1.1-64748B)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-186_passing-10B981)](https://github.com/WayforthOfficial/wayforth)
 
-4,974 verified API endpoints across 19 categories. Pay via card or crypto. One MCP install.
+---
+
+## What It Is
+
+Wayforth is the API runtime for AI agents — a single integration that gives any agent access to 4,974 indexed APIs, ranked by real usage signals and executable with credits or crypto. Agents search, select, and pay for API services in one call without managing keys, credentials, or billing integrations. Built for developers who want their agents to reach the full surface area of the internet without building the infrastructure themselves.
+
+---
+
+## Quick Start
+
+**Step 1 — Install the MCP server**
 
 ```bash
 uvx wayforth-mcp
 ```
 
-![Wayforth Demo](./docs/demo.gif)
-
-## What It Does
-
-```python
-# Discover
-wayforth_search("translate text to Spanish")
-→ DeepL  WRI:82  Tier 2 ✓  $0.00003/call  [card|crypto]
-
-# Intent-based routing (9 categories, streaming LLM support)
-POST /run {"intent": "summarize this article", "input": {...}}
-POST /run {"intent": "fast llm inference", "input": {...}, "stream": true}
-
-# Structured discovery (WayforthQL v1.1)
-POST /query {"query": "translate text", "tier_min": 2, "sort_by": "wri",
-             "latency_max": 500, "region": "eu", "payment_rail": "x402"}
-→ protocol: WayforthQL/1.1
-
-# Parallel batch execution
-POST /execute/batch {"slugs": ["groq", "deepl"], "params": {...}}
-
-# Execute — managed services, no API keys needed
-POST /execute {"service_slug": "groq", "params": {...}, "key_source": "managed"}
-→ {content: "...", credits_deducted: 3, credits_remaining: 997}
-```
-
-## Live Now
-
-- **4,974 verified API endpoints** across 19 categories
-- **3,552 Tier 2 verified endpoints** — probed and confirmed reachable
-- **250+ x402-native services** — pay-per-call via HTTP 402 protocol
-- **18 managed services (13 active with API keys)** — Groq, Together AI, DeepL, Brave Search, Perplexity, OpenWeatherMap, NewsAPI, Serper, Tavily, Jina AI, Alpha Vantage, AssemblyAI, Stability AI, Resend, Firecrawl, Mistral, Gemini, ElevenLabs
-- **WayforthQL v1.1** — filter by latency, region, payment rail, price, tier, and protocol with pagination
-- **WayforthRank** — payment-signal weighted service scoring
-- **Live service health** — response time and reliability tracked per service, affects ranking
-- **BYOK** — bring your own API key for any service, AES-128 encrypted
-- **Triple-track payments** — card, USDC on Base, x402 protocol
-- **MFA** — TOTP-based multi-factor authentication available across developer, provider, and admin dashboards
-- **Security** — professional penetration test completed, all findings resolved (v0.7.0)
-- **Session persistence** — Google OAuth and email/password login fully resolved; wf_session cookie issued reliably across all auth providers
-- **3 provisional patents** filed
-- **186 tests** passing
-
-## Install
-
+Add to Claude Code permanently:
 ```bash
-# Run directly
-uvx wayforth-mcp
-
-# Add to Claude Code
 claude mcp add wayforth -- uvx wayforth-mcp
+```
 
-# Set API key
+**Step 2 — Get an API key**
+
+Sign up at [wayforth.io/signup](https://wayforth.io/signup) and copy your key from the dashboard.
+
+**Step 3 — Set your key**
+
+```bash
 export WAYFORTH_API_KEY=wf_live_...
 ```
 
-Get your API key: [wayforth.io/signup](https://wayforth.io/signup)
+**Step 4 — Run your first call**
 
-## Plans
+```python
+# Search — natural language, no keys needed
+wayforth_search("translate text to Spanish")
+# → DeepL   WRI: 82  Tier 2 ✓  managed
+# → LibreTranslate  WRI: 71  Tier 2 ✓
 
-| Plan | Credits/month | Monthly | Annual (save) |
-|------|--------------|---------|---------------|
-| Free | 100 | $0 | — |
-| Builder | 1,000 | $12/mo | $99/yr (save $45) |
-| Starter | 3,500 | $29/mo | $290/yr (save $58) |
-| Pro | 12,000 | $99/mo | $990/yr (save $198) |
-| Growth | 40,000 | $299/mo | $2,990/yr (save $598) |
-| Enterprise | 100,000 | Custom | Custom |
-
-Annual plans replenish credits monthly (same monthly amount); 2 months free vs paying monthly.
-
-## Payment Tracks
-
-| Track | Method | How |
-|-------|--------|-----|
-| A — Card | Stripe Treasury (fiat) | Buy credits, no crypto |
-| B — Crypto | Base blockchain (USDC) | USDC on Base |
-| C — x402 | Native HTTP 402 | Auto-detected, Coinbase CDP |
-
-All tracks earn Wayforth the same 1.5% routing fee.
-
-## Execution — 18 Managed Services
-
-| Service | Category | Credits/Call |
-|---------|----------|-------------|
-| Groq | LLM inference | 3 |
-| Together AI | LLM inference | 4 |
-| Mistral | LLM inference | 3 |
-| Gemini | LLM inference | 3 |
-| Perplexity | AI search | 10 |
-| DeepL | Translation | 20 |
-| Serper | Google search | 3 |
-| Brave Search | Web search | 5 |
-| Tavily | AI web search | 4 |
-| Jina AI | URL to markdown | 4 |
-| Firecrawl | Web scraping | 5 |
-| OpenWeatherMap | Weather data | 2 |
-| NewsAPI | News search | 5 |
-| Alpha Vantage | Stock data | 4 |
-| AssemblyAI | Speech-to-text | 20 |
-| ElevenLabs | Text-to-speech | 200 |
-| Stability AI | Image generation | 65 |
-| Resend | Email | 3 |
-
-## Key Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /run` | Intent-based routing across 9 categories; `"stream": true` for LLM SSE |
-| `POST /execute` | Direct managed-service execution by slug |
-| `POST /execute/batch` | Parallel execution, up to 5 slugs |
-| `POST /query` | WayforthQL v1.1 — latency_max, region, payment_rail filters + pagination |
-| `GET /run/intents` | Intent catalog (9 entries) |
-| `GET /openapi.json` | Full OpenAPI 3.1.0 spec |
-| `GET /services/{slug}/health` | Live response time, reliability, ranking impact |
-| `GET /account/usage/history` | 30-day call breakdown |
-| `GET /account/wayf-points/history` | Points timeline |
-| `GET /health` | System health (DB, Redis, managed services) |
-
-## Rate Limits
-
-Every response includes rate-limit headers:
-
-```
-X-RateLimit-Tier: free
-X-RateLimit-Limit: 100
-X-RateLimit-Remaining: 73
-X-RateLimit-Reset: 1748736000
+# Execute — managed services, zero setup
+wayforth_execute("deepl", {"text": "Hello", "target_lang": "ES"})
+# → {"translations": [{"text": "Hola"}]}
 ```
 
-## Architecture
+Python SDK:
+```bash
+pip install wayforth-sdk
+```
+
+```python
+from wayforth import WayforthClient
+client = WayforthClient(api_key="wf_live_...")
+results = client.search("real-time stock data")
+```
+
+Full API reference: [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
+
+---
+
+## Managed Services
+
+18 services available with zero API key setup. Wayforth holds the credentials — you call the tool.
+
+| Service | Category |
+|---------|----------|
+| Groq | LLM inference |
+| Together AI | LLM inference |
+| Mistral | LLM inference |
+| Gemini | LLM inference |
+| Perplexity Sonar | Search + citations |
+| Serper | Web search |
+| Brave Search | Web search |
+| Tavily | Web search |
+| NewsAPI | News search |
+| DeepL | Translation |
+| AssemblyAI | Speech-to-text |
+| Stability Core | Image generation |
+| Stability Ultra | Image generation |
+| ElevenLabs | Text to speech |
+| Resend | Email |
+| OpenWeather | Weather data |
+| Jina AI Reader | Content extraction |
+| Firecrawl | Web scraping |
+| Alpha Vantage | Financial data |
+
+---
+
+## For Providers
+
+Wayforth routes agent traffic to providers at scale.
+
+- **Discovery** — providers are indexed and ranked by WayforthRank, a scoring system driven by real agent payment signals. The more agents pay for a service, the higher it ranks.
+- **x402-native** — providers supporting the HTTP 402 micropayment protocol receive direct USDC settlement per call, non-custodial.
+- **Managed** — providers integrated as managed services receive monthly ACH payouts based on routed call volume.
+
+Register your API: [wayforth.io/for-providers](https://wayforth.io/for-providers)
+
+---
+
+## Catalog
+
+| Metric | Count |
+|--------|-------|
+| APIs indexed | 4,974 |
+| Tier 2 verified | 3,550+ |
+| x402-native services | 277 |
+| Categories | 19 |
+
+**WayforthRank** scores every service 0–100 based on uptime history, probe frequency, payment conversion rate, and real agent usage patterns. Higher score = more trustworthy for agent workloads.
+
+**Coverage tiers:**
+- **Tier 0** — submitted, not yet probed
+- **Tier 1** — probed, endpoint confirmed reachable
+- **Tier 2** — automated reliability testing every 6 hours, score maintained
+- **Tier 3** — managed integration, Wayforth holds the key
+
+---
+
+## Payment Rails
+
+Three ways to pay for API calls through Wayforth:
+
+| Rail | Method | Settlement |
+|------|--------|------------|
+| Card | Stripe (fiat) | Buy credits, spend as calls |
+| USDC | Base blockchain | Direct crypto deposits |
+| x402 | HTTP 402 protocol | Per-call micropayments |
+
+**x402** is the open HTTP-402 micropayment standard — agents pay per call with no subscription or balance required. Non-custodial escrow pays providers on confirmed execution. x402 mainnet deployment follows Stripe live mode launch in v0.8.0.
+
+---
+
+## MCP Tools
+
+9 tools available via the Wayforth MCP server:
+
+| Tool | Description |
+|------|-------------|
+| `wayforth_search` | Search 4,974 APIs by intent — returns ranked results with WRI scores |
+| `wayforth_query` | Structured discovery with WayforthQL — filter by tier, latency, region, price, payment rail |
+| `wayforth_run` | Intent-based routing: describe what you need, Wayforth picks and executes the best service |
+| `wayforth_execute` | Direct execution of a managed service by slug — no API key required |
+| `wayforth_pay` | Pay for a service call via card credits or USDC on Base |
+| `wayforth_list` | List available services with category and tier filters |
+| `wayforth_status` | Live API health check and real-time service counts |
+| `wayforth_remember` | Store a persistent memory entry for agent context |
+| `wayforth_recall` | Retrieve stored memories by query |
+
+---
+
+## WayforthQL
+
+Structured query language for precise API discovery. Filter by tier, latency, region, price, and payment rail.
 
 ```
-wayforth_search() / POST /query (WayforthQL v1.1)
-↓
-WayforthRank (payment-signal weighted scoring, patent pending)
-  ± live health overlay
-↓
-POST /run — intent routing (9 categories) | stream: true for LLM SSE
-↓
-wayforth_pay() — Track A (card) | Track B (crypto) | Track C (x402)
-↓
-POST /execute — managed keys | BYOK (AES-128 encrypted)
-↓
-Real API result + WayforthRank signal update
+POST https://gateway.wayforth.io/query
 ```
+
+```json
+{
+  "query": "fast inference for coding agents",
+  "tier_min": 2,
+  "sort_by": "wri",
+  "latency_max": 500,
+  "region": "us",
+  "protocol": "x402",
+  "price_max": 0.001,
+  "limit": 5
+}
+```
+
+**Response fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `wayforth_id` | string | Unique service ID: `wayforth://<slug>` |
+| `name` | string | Service name |
+| `wri` | float | WayforthRank score, 0–100 |
+| `coverage_tier` | int | Verification tier (0–3) |
+| `pricing_usdc` | float | Price per request in USD |
+| `payment_protocol` | string | One of: `wayforth` \| `x402` \| `any` |
+
+`protocol` filter accepts: `wayforth` \| `x402` \| `any`
+
+`x402` is the open HTTP-402 payment standard for per-call micropayments.
+
+Full spec: [gateway.wayforth.io/wayforthql-spec](https://gateway.wayforth.io/wayforthql-spec)
+
+---
+
+## Development Status
+
+**v0.7.5 — Production Ready**
+
+- 186 tests passing
+- Security: professional penetration test completed, all findings resolved
+- BYOK: bring your own API key for any indexed service (AES-128 encrypted at rest)
+- MFA: TOTP-based authentication available
+
+Pricing: [wayforth.io/pricing](https://wayforth.io/pricing)
+
+---
 
 ## Links
 
+- **Quickstart:** [gateway.wayforth.io/quickstart](https://gateway.wayforth.io/quickstart)
+- **API Reference:** [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
+- **Whitepaper:** [wayforth.io/wayforth-whitepaper-v3.pdf](https://wayforth.io/wayforth-whitepaper-v3.pdf)
 - **Dashboard:** [wayforth.io/dashboard](https://wayforth.io/dashboard)
-- **Docs:** [gateway.wayforth.io/guide/](https://gateway.wayforth.io/guide/)
-- **Whitepaper:** [wayforth.io/Wayforth_Whitepaper_v6.4.pdf](https://wayforth.io/Wayforth_Whitepaper_v6.4.pdf)
-- **PyPI:** [pypi.org/project/wayforth-mcp](https://pypi.org/project/wayforth-mcp/)
+- **For Providers:** [wayforth.io/for-providers](https://wayforth.io/for-providers)
+- **PyPI (MCP):** [pypi.org/project/wayforth-mcp](https://pypi.org/project/wayforth-mcp/)
+- **PyPI (SDK):** [pypi.org/project/wayforth-sdk](https://pypi.org/project/wayforth-sdk/)
 - **Contact:** [wayforth.io/contact](https://wayforth.io/contact)
+
+---
 
 ## License
 
-Business Source License 1.1 (BSL 1.1)
-Converts to Apache 2.0 on April 25, 2030
-Licensor: Wayforth Technologies Inc.
+Business Source License 1.1 (BSL 1.1) — converts to Apache 2.0 on April 25, 2030.
 
-Smart contracts: [WayforthEscrow on Base Sepolia](https://sepolia.basescan.org/address/0xE6EDB0a93e0e0cB9F0402Bd49F2eD1Fffc448809)
+© 2026 Wayforth Technologies Inc.

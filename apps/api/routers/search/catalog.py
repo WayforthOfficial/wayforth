@@ -650,7 +650,7 @@ async def quickstart():
 <body>
 <div class="container">
   <h1>Wayforth Quickstart</h1>
-  <p class="subtitle">From zero to searching 200+ verified APIs in 60 seconds.</p>
+  <p class="subtitle">4,974 verified APIs in 60 seconds.</p>
 
   <div class="step">
     <div class="step-num">Step 1 of 3</div>
