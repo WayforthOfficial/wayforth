@@ -225,6 +225,24 @@ def _send_usage_warning_email(to_email: str, calls_remaining: int, percent_used:
         logger.warning("send_usage_warning_email error: %s", _e)
 
 
+async def _send_webhook_suspension_email(contact_email: str, webhook_url: str, webhook_id: str) -> None:
+    if not contact_email:
+        return
+    try:
+        import asyncio as _asyncio
+        await _asyncio.to_thread(_do_send_webhook_suspension_email, contact_email, webhook_url, webhook_id)
+    except Exception as _e:
+        logger.warning("_send_webhook_suspension_email error: %s", _e)
+
+
+def _do_send_webhook_suspension_email(contact_email: str, webhook_url: str, webhook_id: str) -> None:
+    try:
+        from notifications import send_webhook_suspension_email
+        send_webhook_suspension_email(contact_email, webhook_url, webhook_id)
+    except Exception as _e:
+        logger.warning("send_webhook_suspension_email error: %s", _e)
+
+
 async def _increment_calls(pool, api_key_id: str) -> int:
     """Single increment site for calls_count and monthly_calls_count.
     All call paths (/run, /execute) go through here — nowhere else.
@@ -292,6 +310,15 @@ async def _increment_calls(pool, api_key_id: str) -> int:
                     ))
                     _asyncio.create_task(_maybe_send_usage_warning_email(
                         pool, str(row["user_id"]), remaining, 95, row["tier"]
+                    ))
+                # 100% used — zero remaining
+                if remaining == 0:
+                    _asyncio.create_task(_dispatch_webhooks(
+                        str(row["user_id"]), "credits.exhausted", {
+                            "calls_remaining": 0,
+                            "monthly_limit": monthly_limit,
+                            "tier": row["tier"],
+                        }
                     ))
             return remaining
         logger.error("CALLS_INCREMENT_NOMATCH key=%s — UPDATE matched 0 rows", api_key_id)
@@ -515,7 +542,7 @@ async def _webhook_retry_loop() -> None:
                 async with pool.acquire() as conn:
                     due = await conn.fetch("""
                         SELECT wd.id, wd.webhook_id, wd.event, wd.payload,
-                               wd.attempt, pw.webhook_url, pw.secret_token
+                               wd.attempt, pw.webhook_url, pw.secret_token, pw.contact_email
                         FROM webhook_deliveries wd
                         JOIN provider_webhooks pw ON pw.id = wd.webhook_id AND pw.active = true
                         WHERE wd.status = 'pending'
@@ -585,6 +612,16 @@ async def _webhook_retry_loop() -> None:
                                         "response_status=$2, error=$3 WHERE id=$4::uuid",
                                         new_attempt, status_code, error, str(row["id"]),
                                     )
+                                    await upd.execute(
+                                        "UPDATE provider_webhooks SET suspended_at=NOW() "
+                                        "WHERE id=$1::uuid",
+                                        str(row["webhook_id"]),
+                                    )
+                                    asyncio.create_task(_send_webhook_suspension_email(
+                                        row.get("contact_email") or "",
+                                        str(row["webhook_url"]),
+                                        str(row["webhook_id"]),
+                                    ))
                                 else:
                                     delay = _RETRY_DELAYS_SEC[min(new_attempt - 2, len(_RETRY_DELAYS_SEC) - 1)]
                                     next_retry = datetime.now(timezone.utc) + timedelta(seconds=delay)

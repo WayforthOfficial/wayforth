@@ -393,6 +393,110 @@ async def delete_wri_alert(request: Request, alert_id: str, db=Depends(get_db)):
     return {"id": alert_id, "status": "deactivated"}
 
 
+@router.get("/webhooks/{webhook_id}/deliveries", tags=["Webhooks"])
+@limiter.limit("30/minute")
+async def list_webhook_deliveries(
+    request: Request,
+    webhook_id: str,
+    db=Depends(get_db),
+    limit: int = 20,
+    offset: int = 0,
+):
+    """List delivery attempts for a webhook (newest first)."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
+
+    owner = await db.fetchrow(
+        "SELECT owner_email FROM api_keys WHERE user_id = $1 AND active = true LIMIT 1", user_id
+    )
+    webhook = await db.fetchrow(
+        "SELECT id, contact_email FROM provider_webhooks WHERE id = $1::uuid",
+        webhook_id,
+    )
+    if not webhook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    if not owner or webhook["contact_email"] != owner["owner_email"]:
+        raise HTTPException(status_code=403, detail="Not authorized to view this webhook")
+
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+
+    rows = await db.fetch("""
+        SELECT id, event, attempt, status, response_status, error,
+               next_retry_at, last_attempted_at, created_at
+        FROM webhook_deliveries
+        WHERE webhook_id = $1::uuid
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3
+    """, webhook_id, limit, offset)
+
+    return {
+        "webhook_id": webhook_id,
+        "deliveries": [
+            {
+                "id": str(r["id"]),
+                "event": r["event"],
+                "attempt": r["attempt"],
+                "status": r["status"],
+                "response_status": r["response_status"],
+                "error": r["error"],
+                "next_retry_at": r["next_retry_at"].isoformat() if r["next_retry_at"] else None,
+                "last_attempted_at": r["last_attempted_at"].isoformat() if r["last_attempted_at"] else None,
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ],
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.post("/webhooks/{webhook_id}/retry", tags=["Webhooks"])
+@limiter.limit("10/minute")
+async def retry_webhook(request: Request, webhook_id: str, db=Depends(get_db)):
+    """Re-enable a suspended webhook and queue a new delivery attempt."""
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
+
+    owner = await db.fetchrow(
+        "SELECT owner_email FROM api_keys WHERE user_id = $1 AND active = true LIMIT 1", user_id
+    )
+    webhook = await db.fetchrow(
+        "SELECT id, contact_email, suspended_at FROM provider_webhooks WHERE id = $1::uuid",
+        webhook_id,
+    )
+    if not webhook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    if not owner or webhook["contact_email"] != owner["owner_email"]:
+        raise HTTPException(status_code=403, detail="Not authorized to retry this webhook")
+    if not webhook["suspended_at"]:
+        raise HTTPException(status_code=400, detail="Webhook is not suspended")
+
+    # Get the last dead delivery to replay its event/payload
+    last = await db.fetchrow("""
+        SELECT event, payload FROM webhook_deliveries
+        WHERE webhook_id = $1::uuid AND status = 'dead'
+        ORDER BY created_at DESC LIMIT 1
+    """, webhook_id)
+
+    await db.execute(
+        "UPDATE provider_webhooks SET suspended_at = NULL WHERE id = $1::uuid", webhook_id
+    )
+    if last:
+        await db.execute("""
+            INSERT INTO webhook_deliveries
+              (webhook_id, event, payload, attempt, status, next_retry_at)
+            VALUES ($1::uuid, $2, $3, 1, 'pending', NOW())
+        """, webhook_id, last["event"], last["payload"])
+
+    logger.info("Webhook %s manually retried by user %s", webhook_id, user_id)
+    return {"status": "queued", "webhook_id": webhook_id}
+
+
 @router.delete("/webhooks/{webhook_id}")
 @limiter.limit("10/minute")
 async def delete_webhook(request: Request, webhook_id: str, db=Depends(get_db)):

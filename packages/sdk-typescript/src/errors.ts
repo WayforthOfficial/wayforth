@@ -18,7 +18,12 @@ export class AuthenticationError extends WayforthError {
 }
 
 export class InsufficientCreditsError extends WayforthError {
-  constructor(message = "Insufficient credits") {
+  constructor(
+    message = "Insufficient credits",
+    public readonly creditsRemaining?: number,
+    public readonly creditsRequired?: number,
+    public readonly upgradeUrl?: string,
+  ) {
     super(message, 402);
     this.name = "InsufficientCreditsError";
     Object.setPrototypeOf(this, new.target.prototype);

@@ -279,6 +279,32 @@ def send_payment_failed_email(to_email: str, plan_name: str, attempt: int) -> bo
         return False
 
 
+def send_webhook_suspension_email(to_email: str, webhook_url: str, webhook_id: str) -> bool:
+    if not resend.api_key or not to_email:
+        return False
+    try:
+        resend.Emails.send({
+            "from": FROM_EMAIL,
+            "to": to_email,
+            "subject": "Action required: webhook suspended after repeated failures",
+            "html": f"""
+            <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0F172A;color:#E2E8F0;padding:40px;border-radius:12px;">
+                <h1 style="color:#4F46E5;margin:0 0 8px">Wayforth</h1>
+                <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0;border-left:4px solid #EF4444;">
+                    <p style="color:#EF4444;font-weight:bold;margin:0 0 8px">🚨 Webhook suspended</p>
+                    <p style="color:#E2E8F0;margin:0">Your webhook endpoint <code style="background:#0F172A;padding:2px 6px;border-radius:4px">{webhook_url}</code> has been suspended after 5 consecutive delivery failures.</p>
+                </div>
+                <p>To re-enable it, call <code style="background:#1E293B;padding:4px 8px;border-radius:4px;color:#4F46E5">POST /webhooks/{webhook_id}/retry</code> from your Wayforth API key.</p>
+                <p style="margin-top:32px;color:#64748B;font-size:13px">Wayforth · <a href="https://wayforth.io" style="color:#4F46E5">wayforth.io</a></p>
+            </div>
+            """,
+        })
+        return True
+    except Exception as e:
+        logger.warning("send_webhook_suspension_email failed: %s", e)
+        return False
+
+
 def send_account_downgraded_email(to_email: str, plan_name: str) -> bool:
     if not resend.api_key or not to_email:
         return False
