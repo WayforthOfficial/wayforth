@@ -26,7 +26,19 @@ def _raise_for_status(response: httpx.Response) -> None:
     if status == 401:
         raise AuthenticationError(detail, status)
     if status == 402:
-        raise InsufficientCreditsError(detail, status)
+        try:
+            body = response.json()
+            raise InsufficientCreditsError(
+                body.get("error", "insufficient_credits"),
+                status,
+                credits_remaining=body.get("credits_remaining"),
+                credits_required=body.get("credits_required"),
+                upgrade_url=body.get("upgrade_url"),
+            )
+        except InsufficientCreditsError:
+            raise
+        except Exception:
+            raise InsufficientCreditsError(detail, status)
     if status >= 500:
         raise ServiceUnavailableError(detail, status)
     raise WayforthError(detail, status)

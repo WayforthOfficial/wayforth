@@ -25,10 +25,8 @@ from services.managed import SERVICE_CONFIGS
 class TestVersion:
 
     def test_version_is_070(self):
-        # v0.7.0 — Hardened. Economics from v0.6.14 still apply (this whole file
-        # is the v0.6.14 economics regression suite); the version bump just
-        # acknowledges the security-hardening release that ships them.
-        assert VERSION == "0.7.0"
+        # v0.7.5 — Production Ready. Economics from v0.6.14 still apply.
+        assert VERSION == "0.7.5"
 
     def test_version_is_string(self):
         assert isinstance(VERSION, str)

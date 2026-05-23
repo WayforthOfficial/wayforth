@@ -25,13 +25,26 @@ async function raiseForStatus(res: Response): Promise<void> {
   if (res.status < 400) return;
   let detail: string;
   try {
-    const body = await res.clone().json();
-    detail = body.detail ?? res.statusText;
+    const body = await res.clone().json() as Record<string, unknown>;
+    detail = (typeof body.detail === "string" ? body.detail : null) ?? res.statusText;
   } catch {
     detail = res.statusText;
   }
   if (res.status === 401) throw new AuthenticationError(detail);
-  if (res.status === 402) throw new InsufficientCreditsError(detail);
+  if (res.status === 402) {
+    try {
+      const body = await res.clone().json() as Record<string, unknown>;
+      throw new InsufficientCreditsError(
+        typeof body.error === "string" ? body.error : detail,
+        typeof body.credits_remaining === "number" ? body.credits_remaining : undefined,
+        typeof body.credits_required === "number" ? body.credits_required : undefined,
+        typeof body.upgrade_url === "string" ? body.upgrade_url : undefined,
+      );
+    } catch (e) {
+      if (e instanceof InsufficientCreditsError) throw e;
+      throw new InsufficientCreditsError(detail);
+    }
+  }
   if (res.status >= 500) throw new ServiceUnavailableError(detail);
   throw new WayforthError(detail, res.status);
 }

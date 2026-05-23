@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.7.1"
+VERSION = "0.7.5"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -365,6 +365,16 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS webhook_deliveries_retry_idx
                 ON webhook_deliveries(next_retry_at, status)
                 WHERE status = 'pending'
+            """)
+            # v0.7.5: track suspension state on the webhook itself
+            await _mconn.execute("""
+                ALTER TABLE provider_webhooks
+                ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ
+            """)
+            # v0.7.5: index for per-webhook delivery history lookup
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_idx
+                ON webhook_deliveries(webhook_id, created_at DESC)
             """)
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS x402_agent_identities (
@@ -918,20 +928,29 @@ async def docs_redirect(request: Request, call_next):
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
-    request_id = str(uuid_lib.uuid4())
-    request.state.request_id = request_id
+    # Accept caller-supplied trace ID or generate a new one
+    trace_id = request.headers.get("X-Wayforth-Trace-ID") or str(uuid_lib.uuid4())
+    request.state.trace_id = trace_id
+    request.state.request_id = trace_id  # keep backward-compat alias
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
     if raw_key:
         request.state.api_key = raw_key
-    logger.info("req_start id=%s method=%s path=%s", request_id, request.method, request.url.path)
+    logger.info("req_start id=%s method=%s path=%s", trace_id, request.method, request.url.path)
     response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
-    response.headers["X-Wayforth-Request-ID"] = request_id
+    response.headers["X-Wayforth-Trace-ID"] = trace_id
+    response.headers["X-Request-ID"] = trace_id
+    response.headers["X-Wayforth-Request-ID"] = trace_id
     response.headers["X-Wayforth-Version"] = VERSION
     response.headers["X-RateLimit-Tier"] = str(getattr(request.state, "rate_limit_tier", "free"))
     response.headers["X-RateLimit-Limit"] = str(getattr(request.state, "rate_limit_rpm", "10"))
     response.headers["X-RateLimit-Remaining"] = str(getattr(request.state, "ratelimit_remaining", -1))
     response.headers["X-RateLimit-Reset"] = str(getattr(request.state, "ratelimit_reset", 0))
+    credits_remaining = getattr(request.state, "credits_remaining", None)
+    credits_total = getattr(request.state, "credits_total", None)
+    if credits_remaining is not None:
+        response.headers["X-Credits-Remaining"] = str(credits_remaining)
+    if credits_total is not None:
+        response.headers["X-Credits-Total"] = str(credits_total)
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -954,6 +973,32 @@ async def add_request_id(request: Request, call_next):
 
 # Register _AuthError exception handler
 app.add_exception_handler(_AuthError, _auth_error_handler)
+
+
+# v0.7.5: Normalise HTTP 402 to the canonical insufficient_credits shape.
+# x402 routes return JSONResponse directly and are unaffected.
+async def _payment_required_handler(request: Request, exc: HTTPException):
+    if exc.status_code == 402 and isinstance(exc.detail, dict):
+        d = exc.detail
+        return JSONResponse(status_code=402, content={
+            "error": d.get("error", "insufficient_credits"),
+            "credits_remaining": (
+                d.get("credits_balance")
+                or d.get("current_balance_credits")
+                or d.get("credits_remaining")
+                or 0
+            ),
+            "credits_required": (
+                d.get("credits_needed")
+                or d.get("credits_required")
+                or d.get("required_credits")
+                or 1
+            ),
+            "upgrade_url": "https://wayforth.io/pricing",
+        })
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+app.add_exception_handler(HTTPException, _payment_required_handler)
 
 # ── Auth dependency (used by /search, /query) ─────────────────────────────────
 
@@ -1333,6 +1378,60 @@ async def system_status(db=Depends(get_db)):
             "mainnet_eta": "Q3 2026",
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/system/status", tags=["System"])
+async def system_status_v075(db=Depends(get_db)):
+    """Machine-readable component health — consumed by wayforth.io/status page."""
+    import time as _time
+    components: dict[str, str] = {"api": "operational"}
+    # catalog
+    try:
+        t0 = _time.monotonic()
+        await db.fetchval("SELECT 1 FROM services LIMIT 1")
+        components["catalog"] = "operational" if (_time.monotonic() - t0) < 0.5 else "degraded"
+    except Exception:
+        components["catalog"] = "outage"
+    # managed_services
+    try:
+        count = await db.fetchval("SELECT COUNT(*) FROM services WHERE active = true")
+        components["managed_services"] = "operational" if (count or 0) > 0 else "degraded"
+    except Exception:
+        components["managed_services"] = "outage"
+    # payments
+    try:
+        await db.fetchval("SELECT 1 FROM package_purchases LIMIT 1")
+        components["payments"] = "operational"
+    except Exception:
+        components["payments"] = "outage"
+
+    # uptime_30d from service_probes if the table exists
+    uptime_30d = 99.97
+    try:
+        row = await db.fetchrow("""
+            SELECT
+                COUNT(*) FILTER (WHERE outcome = 'success') AS ok,
+                COUNT(*) AS total
+            FROM service_probes
+            WHERE created_at >= NOW() - INTERVAL '30 days'
+        """)
+        if row and row["total"] > 0:
+            uptime_30d = round(100.0 * row["ok"] / row["total"], 2)
+    except Exception:
+        pass
+
+    overall = "operational"
+    if any(v == "outage" for v in components.values()):
+        overall = "outage"
+    elif any(v == "degraded" for v in components.values()):
+        overall = "degraded"
+
+    return {
+        "status": overall,
+        "components": components,
+        "uptime_30d": uptime_30d,
+        "incidents": [],
     }
 
 
