@@ -10,7 +10,7 @@ mcp-name: io.github.WayforthOfficial/wayforth
 claude mcp add wayforth -- uv run --directory ~/Code/wayforth/packages/mcp-server python server.py
 ```
 
-That's it. Claude Code will restart and the eight Wayforth tools will be available immediately.
+That's it. Claude Code will restart and the nine Wayforth tools will be available immediately.
 
 ## Tools
 
