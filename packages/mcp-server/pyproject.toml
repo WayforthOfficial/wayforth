@@ -1,7 +1,7 @@
 [project]
 name = "wayforth-mcp"
 version = "0.7.5"
-description = "MCP server for Wayforth — Intelligence. Search engine and payment rail for AI agents."
+description = "MCP server for Wayforth — The API Runtime for AI Agents."
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Wayforth Technologies Inc."}]
@@ -14,7 +14,7 @@ dependencies = [
 ]
 keywords = ["ai", "agents", "mcp", "wayforth", "api"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -26,7 +26,7 @@ wayforth-mcp = "server:main"
 [project.urls]
 Homepage = "https://wayforth.io"
 Repository = "https://github.com/WayforthOfficial/wayforth"
-Documentation = "https://api-production-fd71.up.railway.app/docs"
+Documentation = "https://gateway.wayforth.io/docs"
 
 [build-system]
 requires = ["hatchling"]
