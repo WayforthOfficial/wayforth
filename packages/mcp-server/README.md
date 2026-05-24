@@ -1,6 +1,8 @@
 # wayforth-mcp
 
-MCP server for [Wayforth](https://github.com/your-org/wayforth) — discover AI services from Claude Code, Cursor, or any MCP-compatible client.
+[![PyPI](https://img.shields.io/pypi/v/wayforth-mcp)](https://pypi.org/project/wayforth-mcp/)
+
+MCP server for [Wayforth](https://github.com/WayforthOfficial/wayforth) — discover AI services from Claude Code, Cursor, or any MCP-compatible client.
 
 mcp-name: io.github.WayforthOfficial/wayforth
 
