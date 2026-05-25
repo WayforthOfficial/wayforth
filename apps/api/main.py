@@ -1385,20 +1385,49 @@ async def system_status(db=Depends(get_db)):
 async def system_status_v075(db=Depends(get_db)):
     """Machine-readable component health — consumed by wayforth.io/status page."""
     import time as _time
+    from services.managed import SERVICE_CONFIGS
+    from services.param_mapper import MANAGED_TO_CATALOG
+
     components: dict[str, str] = {"api": "operational"}
-    # catalog
+
+    # catalog — DB reachability check
     try:
         t0 = _time.monotonic()
         await db.fetchval("SELECT 1 FROM services LIMIT 1")
         components["catalog"] = "operational" if (_time.monotonic() - t0) < 0.5 else "degraded"
     except Exception:
         components["catalog"] = "outage"
-    # managed_services
-    try:
-        count = await db.fetchval("SELECT COUNT(*) FROM services WHERE active = true")
-        components["managed_services"] = "operational" if (count or 0) > 0 else "degraded"
-    except Exception:
-        components["managed_services"] = "outage"
+
+    # managed_services — only count services whose API key is actually configured.
+    # Missing keys are expected gaps, not failures. A service without a key is simply
+    # not yet active and must not contribute to the health status.
+    configured_slugs = [
+        slug for slug, cfg in SERVICE_CONFIGS.items()
+        if os.environ.get(cfg["key_var"])
+    ]
+    if not configured_slugs:
+        # No keys at all — early state, not an outage
+        components["managed_services"] = "degraded"
+    else:
+        catalog_slugs = [MANAGED_TO_CATALOG.get(s, s) for s in configured_slugs]
+        try:
+            rows = await db.fetch(
+                "SELECT slug, consecutive_failures FROM services WHERE slug = ANY($1::text[])",
+                catalog_slugs,
+            )
+            failing = sum(1 for r in rows if (r["consecutive_failures"] or 0) > 2)
+            total = len(rows)
+            if failing == 0:
+                components["managed_services"] = "operational"
+            elif failing < total:
+                components["managed_services"] = "degraded"
+            else:
+                # Every configured service is actively failing
+                components["managed_services"] = "outage"
+        except Exception:
+            # Can't read probe data — degrade, don't call it an outage
+            components["managed_services"] = "degraded"
+
     # payments
     try:
         await db.fetchval("SELECT 1 FROM package_purchases LIMIT 1")
@@ -1421,11 +1450,18 @@ async def system_status_v075(db=Depends(get_db)):
     except Exception:
         pass
 
-    overall = "operational"
-    if any(v == "outage" for v in components.values()):
+    # Overall rollup:
+    # "outage" = only when the api component itself is unreachable (gateway down).
+    # If the handler is executing, api is by definition operational — so overall
+    # outage can only be set explicitly if something sets components["api"] = "outage".
+    # Everything else (catalog DB slow, payments DB error, some managed services
+    # failing) degrades gracefully rather than declaring a full outage.
+    if components.get("api") == "outage":
         overall = "outage"
-    elif any(v == "degraded" for v in components.values()):
+    elif any(v in ("outage", "degraded") for v in components.values()):
         overall = "degraded"
+    else:
+        overall = "operational"
 
     return {
         "status": overall,
