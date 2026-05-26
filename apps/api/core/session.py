@@ -86,18 +86,20 @@ async def get_session(redis, raw_token: str) -> dict | None:
         return None
 
 
-async def refresh_session(redis, raw_token: str) -> dict | None:
-    """Bump TTL to a fresh `SESSION_TTL_SECONDS`. Returns the record or None.
+async def refresh_session(redis, raw_token: str) -> tuple[dict, str] | None:
+    """Rotate the session token and bump TTL.
 
-    Token value does NOT rotate on refresh — only the TTL extends. This keeps
-    the cookie stable across an active session; rotation on every refresh
-    would multiply the surface for race-conditioned token theft without
-    materially reducing the exposure window of a stolen cookie (an attacker
-    who can read your cookies can also intercept the new one).
+    S17 (v0.7.8): the token value now rotates on every refresh. A stolen
+    cookie loses validity at the next refresh tick rather than persisting
+    for the full TTL window. We write the new key BEFORE deleting the old
+    one — if the new SET fails, the old key is still valid so the user
+    is not logged out by a transient Redis hiccup.
+
+    Returns (record, new_raw_token) or None if the session is gone.
     """
-    key = _redis_key(raw_token)
+    old_key = _redis_key(raw_token)
     try:
-        raw = await redis.get(key)
+        raw = await redis.get(old_key)
     except Exception as exc:
         logger.warning("refresh_session redis read failed: %s", exc)
         return None
@@ -107,11 +109,20 @@ async def refresh_session(redis, raw_token: str) -> dict | None:
         record = _json.loads(raw)
     except (ValueError, TypeError):
         return None
+
+    new_token = secrets.token_urlsafe(48)
+    new_key = _redis_key(new_token)
     try:
-        await redis.expire(key, SESSION_TTL_SECONDS)
+        await redis.set(new_key, raw, ex=SESSION_TTL_SECONDS)
     except Exception as exc:
-        logger.warning("refresh_session expire failed: %s", exc)
-    return record
+        logger.warning("refresh_session new-key SET failed: %s", exc)
+        return None
+    try:
+        await redis.delete(old_key)
+    except Exception as exc:
+        # New token is live; old one will expire naturally in ≤ SESSION_TTL.
+        logger.warning("refresh_session old-key DELETE failed: %s", exc)
+    return record, new_token
 
 
 async def revoke_session(redis, raw_token: str) -> None:

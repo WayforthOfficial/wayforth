@@ -195,7 +195,15 @@ async def admin_invite(request: Request, db=Depends(get_db)):
             RETURNING id, email, full_name, role, created_at
         """, email, password_hash, full_name, role,
             session.get('admin_user_id'))
-        return {"member": dict(member), "temp_password": temp_password}
+        # S12 (v0.7.8): never echo the temp password back in the response.
+        # The CEO supplied it in the request body and is responsible for
+        # transmitting it to the invitee out-of-band. The response is just
+        # a confirmation so no log capture exposes the credential.
+        logger.info(
+            "ADMIN_ACTION action=team_invite invited_by=%s invited_email=%s role=%s",
+            session.get('admin_user_id'), email, role,
+        )
+        return {"status": "invited", "member": dict(member)}
     except Exception:
         raise HTTPException(status_code=400, detail="Email already exists")
 

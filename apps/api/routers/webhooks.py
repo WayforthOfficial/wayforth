@@ -130,12 +130,18 @@ async def _fire_wri_alerts(pool, scored: list[dict]) -> int:
             }
             body = json_lib.dumps(payload)
 
-            # HMAC-SHA256 using a per-alert random secret. Falls back to
-            # api_key_id only for legacy alerts that pre-date hmac_secret —
-            # those will rotate to the new format on next /webhooks/wri-alerts
-            # POST. Verifiers signed against api_key_id keep working in the
-            # meantime.
-            secret = alert["hmac_secret"] or str(alert["api_key_id"])
+            # S15 (v0.7.8): all alerts now have a hmac_secret thanks to the
+            # backfill migration in main.py lifespan. The api_key_id fallback
+            # (UUID, leakable via admin views) is gone. If we somehow hit a
+            # row with no secret, skip delivery rather than sign with a weak
+            # secret — operator must regenerate the alert.
+            if not alert["hmac_secret"]:
+                logger.error(
+                    "wri_alert missing hmac_secret alert=%s — skipping delivery; recreate the alert",
+                    alert["id"],
+                )
+                continue
+            secret = alert["hmac_secret"]
             sig = hmac.new(
                 secret.encode(),
                 f"{timestamp}.{body}".encode(),
