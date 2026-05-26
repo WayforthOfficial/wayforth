@@ -1391,14 +1391,33 @@ async def security_policy_html():
 async def health(request: Request):
     from core.db import get_pool_stats
     pool = getattr(request.app.state, "pool", None)
+    # Section 6 (v0.7.8): rename catalog fields to disambiguate. The old shape
+    # had `catalog.total` filtered by `consecutive_failures < 3` while the
+    # admin dashboard separately read raw COUNT(*) — different definitions
+    # of "total" looked like contradictory numbers. New shape:
+    #   total_services   = SELECT COUNT(*) FROM services (raw, unfiltered)
+    #   healthy_services = WHERE consecutive_failures < 3 (live, reachable)
+    #   tier2_verified   = healthy + coverage_tier >= 2 (curated)
+    #   managed_services = count of in-process managed adapters
+    # Old fields `total` and `tier2` retained for one minor release as
+    # backwards-compat aliases — drop in v0.9.
+    managed = _active_managed_count()
     if pool is None:
         return {
             "status": "degraded",
             "service": "wayforth-api",
             "version": VERSION,
             "db_status": "unavailable",
-            "catalog": {"total": 0, "tier2": 0},
-            "managed_services": _active_managed_count(),
+            "catalog": {
+                "total_services": 0,
+                "healthy_services": 0,
+                "tier2_verified": 0,
+                "managed_services": managed,
+                # legacy aliases — remove in v0.9
+                "total": 0,
+                "tier2": 0,
+            },
+            "managed_services": managed,
             "pool": {},
         }
     pool_stats = get_pool_stats(pool)
@@ -1406,22 +1425,28 @@ async def health(request: Request):
         async with pool.acquire(timeout=4.0) as conn:
             await conn.fetchval("SELECT 1")
             db_status = "ok"
-            tier2 = await conn.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3") or 0
-            total = await conn.fetchval("SELECT COUNT(*) FROM services WHERE consecutive_failures < 3") or 0
-    except Exception:
+            total_services   = await conn.fetchval("SELECT COUNT(*) FROM services") or 0
+            healthy_services = await conn.fetchval("SELECT COUNT(*) FROM services WHERE consecutive_failures < 3") or 0
+            tier2_verified   = await conn.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3") or 0
+    except Exception as e:
+        logger.warning("/health catalog query failed: %s", e)
         db_status = "error"
-        tier2 = 0
-        total = 0
+        total_services = healthy_services = tier2_verified = 0
     return {
         "status": "ok" if db_status == "ok" else "degraded",
         "service": "wayforth-api",
         "version": VERSION,
         "db_status": db_status,
         "catalog": {
-            "total": total,
-            "tier2": tier2,
+            "total_services": total_services,
+            "healthy_services": healthy_services,
+            "tier2_verified": tier2_verified,
+            "managed_services": managed,
+            # legacy aliases — kept for one minor release; remove in v0.9.
+            "total": healthy_services,
+            "tier2": tier2_verified,
         },
-        "managed_services": _active_managed_count(),
+        "managed_services": managed,
         "pool": pool_stats,
     }
 
