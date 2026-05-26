@@ -133,6 +133,10 @@ async def get_api_key(request: Request, db=Depends(get_db)):
             "FROM api_keys WHERE key_hash = $1", key_hash,
         )
         if not existing or not existing["active"]:
+            logger.info(
+                "auth_failure reason=invalid_api_key path=/auth/quota key_hash_prefix=%s",
+                key_hash[:12],
+            )
             raise HTTPException(status_code=401, detail="Invalid API key")
         reset_str = (
             existing["quota_reset_at"].strftime("%Y-%m-%d")
@@ -221,6 +225,10 @@ async def key_usage(request: Request, db=Depends(get_db)):
     """, key_hash)
 
     if not key:
+        logger.info(
+            "auth_failure reason=invalid_api_key path=/auth/key-usage key_hash_prefix=%s",
+            key_hash[:12],
+        )
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     quota_pct = (
@@ -371,6 +379,7 @@ async def register_user(request: Request, db=Depends(get_db)):
 async def regenerate_api_key(request: Request, db=Depends(get_db)):
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
     if not raw_key:
+        logger.info("auth_failure reason=missing_api_key path=/auth/regenerate-key")
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
 
     old_hash = hashlib.sha256(raw_key.encode()).hexdigest()
@@ -380,6 +389,10 @@ async def regenerate_api_key(request: Request, db=Depends(get_db)):
     """, old_hash)
 
     if not row:
+        logger.info(
+            "auth_failure reason=invalid_api_key path=/auth/regenerate-key key_hash_prefix=%s",
+            old_hash[:12],
+        )
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
 
     new_raw = "wf_live_" + secrets.token_urlsafe(32)

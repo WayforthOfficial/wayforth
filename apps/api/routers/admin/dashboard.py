@@ -505,6 +505,13 @@ async def admin_change_tier(request: Request, user_id: str, db=Depends(get_db)):
     if new_tier not in VALID_TIERS:
         raise HTTPException(status_code=400, detail=f"Invalid tier. Valid: {VALID_TIERS}")
 
+    # L5 (v0.7.8): audit log every admin write before mutating state.
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=tier_change target_user=%s new_tier=%s reason=%r",
+        session.get('admin_user_id') or session.get('email'),
+        user_id, new_tier, reason,
+    )
+
     plan = PLANS[new_tier]
     new_quota = plan["calls_included"]
     new_credits = plan["monthly_credits"]
@@ -568,6 +575,10 @@ async def admin_reset_usage(request: Request, user_id: str, db=Depends(get_db)):
     body = await request.json()
     reason = body.get("reason", "Admin reset")
 
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=reset_usage target_user=%s reason=%r",
+        session.get('admin_user_id') or session.get('email'), user_id, reason,
+    )
     await db.execute("""
         UPDATE api_keys SET usage_this_month = 0, quota_reset_at = NOW()
         WHERE user_id = $1::uuid
@@ -590,6 +601,11 @@ async def admin_add_credits(request: Request, user_id: str, db=Depends(get_db)):
 
     if credits <= 0 or credits > 1000000:
         raise HTTPException(status_code=400, detail="Credits must be 1-1,000,000")
+
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=add_credits target_user=%s credits=%d reason=%r",
+        session.get('admin_user_id') or session.get('email'), user_id, credits, reason,
+    )
 
     async with db.transaction():
         row = await db.fetchrow(
@@ -636,6 +652,11 @@ async def admin_regenerate_key(request: Request, user_id: str, db=Depends(get_db
     body = await request.json()
     reason = body.get("reason", "Admin revoked")
 
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=regenerate_user_key target_user=%s reason=%r",
+        session.get('admin_user_id') or session.get('email'), user_id, reason,
+    )
+
     raw_key = "wf_live_" + secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     key_prefix = raw_key[:12]
@@ -673,6 +694,12 @@ async def admin_suspend_user(request: Request, user_id: str, db=Depends(get_db))
     suspended = body.get("suspended", True)
     reason = body.get("reason", "")
 
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=%s target_user=%s reason=%r",
+        session.get('admin_user_id') or session.get('email'),
+        "suspend" if suspended else "unsuspend", user_id, reason,
+    )
+
     await db.execute("""
         UPDATE api_keys SET active = $1 WHERE user_id = $2::uuid
     """, not suspended, user_id)
@@ -692,6 +719,11 @@ async def admin_custom_quota(request: Request, user_id: str, db=Depends(get_db))
     body = await request.json()
     quota = int(body.get("quota", 0))
     reason = body.get("reason", "")
+
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=custom_quota target_user=%s quota=%d reason=%r",
+        session.get('admin_user_id') or session.get('email'), user_id, quota, reason,
+    )
 
     await db.execute("""
         UPDATE api_keys SET monthly_quota = $1 WHERE user_id = $2::uuid

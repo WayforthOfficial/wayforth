@@ -535,6 +535,12 @@ async def _process_stripe_event(db, event, event_id: str, event_type: str):
 
 
 async def _dispatch_stripe_event(db, event):
+    # L4 (v0.7.8): receipt log for every event so forensic trace exists for
+    # "I paid but got no credits" support tickets.
+    logger.info(
+        "stripe_event received id=%s type=%s",
+        event.get("id"), event.get("type"),
+    )
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         meta = session.get("metadata", {})
@@ -606,6 +612,10 @@ async def _dispatch_stripe_event(db, event):
             """, sub_id, user_id)
 
         asyncio.create_task(_maybe_grant_founding_bonus(db, user_id))
+        logger.info(
+            "stripe_checkout completed session=%s user=%s package=%s credits_added=%d new_balance=%d",
+            session_id, user_id, package, credits, new_balance,
+        )
         return {"status": "credited", "credits_added": credits, "new_balance": new_balance}
 
     elif event["type"] == "invoice.payment_succeeded":
@@ -723,6 +733,10 @@ async def _dispatch_stripe_event(db, event):
             except Exception as _email_err:
                 logger.warning("subscription_confirmed email error: %s", _email_err)
 
+        logger.info(
+            "stripe_renewal user=%s sub=%s package=%s credits_added=%d",
+            user_id, sub_id, package, credits,
+        )
         return {"status": "renewed", "credits_added": credits}
 
     elif event["type"] == "customer.subscription.deleted":
