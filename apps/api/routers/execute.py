@@ -105,12 +105,27 @@ async def _do_refund(
     error_msg: str,
     endpoint: str,
     balance_after: int,
+    refund_idempotency_key: str | None = None,
 ) -> int:
     """Restore credits, log the refund transaction, and fire wayf.call_refunded webhook.
+
+    E8 (v0.7.8): if refund_idempotency_key is supplied, the partial unique
+    index on credit_transactions(refund_uuid) prevents a duplicate refund
+    even under concurrent execution. Callers without a stable key still get
+    the historical at-most-once-per-attempt behavior.
 
     Returns the new credits balance.
     """
     async with db.transaction():
+        if refund_idempotency_key:
+            existing = await db.fetchval(
+                "SELECT balance_after FROM credit_transactions "
+                "WHERE refund_uuid = $1::uuid",
+                refund_idempotency_key,
+            )
+            if existing is not None:
+                # Already refunded — return the previous balance_after.
+                return int(existing)
         row = await db.fetchrow(
             "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
             "WHERE user_id = $2::uuid RETURNING credits_balance",
@@ -120,12 +135,12 @@ async def _do_refund(
         await db.execute(
             """
             INSERT INTO credit_transactions
-            (user_id, amount, balance_after, type, description, api_endpoint, service_id)
-            VALUES ($1::uuid, $2, $3, 'refund', $4, $5, $6)
+            (user_id, amount, balance_after, type, description, api_endpoint, service_id, refund_uuid)
+            VALUES ($1::uuid, $2, $3, 'refund', $4, $5, $6, $7::uuid)
             """,
             user_id, credit_cost, new_balance,
             f"service_failure: {service_slug} — {error_msg[:100]}",
-            endpoint, service_slug,
+            endpoint, service_slug, refund_idempotency_key,
         )
     from core.credits import _dispatch_webhooks
     from main import app as _app
@@ -154,10 +169,14 @@ async def _try_execute_managed(
     result = None
     error_msg = None
     t0 = _time_mod.time()
+    # E9 (v0.7.8): Python 3.11+ aliases asyncio.TimeoutError → TimeoutError but
+    # on 3.10 they're distinct. Adapters that surface a httpx/requests
+    # TimeoutError directly would slip past `except asyncio.TimeoutError` and
+    # propagate as an unhandled exception. Catch both.
     if slug == "assemblyai":
         try:
             result = await asyncio.wait_for(adapter(params, key), timeout=35.0)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             error_msg = "Service timeout"
         except Exception as _e:
             error_msg = str(_e)[:300]
@@ -166,7 +185,7 @@ async def _try_execute_managed(
             try:
                 result = await asyncio.wait_for(adapter(params, key), timeout=10.0)
                 break
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):
                 if _attempt == 0:
                     continue
                 error_msg = "Service timeout"

@@ -231,83 +231,79 @@ async def admin_update_member(
     return {"status": "updated"}
 
 
+# E1 (v0.7.8): degrade-but-don't-lie helpers for admin_overview. The previous
+# `except: var = 0` pattern hid DB failures behind clean zeros — the dashboard
+# looked fine while the DB was on fire. These helpers log every failure with
+# the metric name so operators can see exactly which counter is degraded.
+async def _safe_count(db, name: str, query: str, *args) -> int:
+    try:
+        return int(await db.fetchval(query, *args) or 0)
+    except Exception as e:
+        logger.error("admin_overview metric=%s failed: %s", name, e, exc_info=True)
+        return 0
+
+
+async def _safe_decimal(db, name: str, query: str, *args) -> float:
+    try:
+        return float(await db.fetchval(query, *args) or 0.0)
+    except Exception as e:
+        logger.error("admin_overview metric=%s failed: %s", name, e, exc_info=True)
+        return 0.0
+
+
+async def _safe_fetch(db, name: str, query: str, *args) -> list:
+    try:
+        return list(await db.fetch(query, *args))
+    except Exception as e:
+        logger.error("admin_overview metric=%s failed: %s", name, e, exc_info=True)
+        return []
+
+
 @router.get("/admin-api/overview")
 async def admin_overview(request: Request, db=Depends(get_db)):
     session = await get_admin_session(request, db)
 
-    try:
-        total_services = await db.fetchval("SELECT COUNT(*) FROM services") or 0
-    except: total_services = 0
-
-    try:
-        tier2 = await db.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3") or 0
-    except: tier2 = 0
-
-    try:
-        total_users = await db.fetchval("SELECT COUNT(*) FROM users") or 0
-    except: total_users = 0
-
-    try:
-        total_keys = await db.fetchval("SELECT COUNT(*) FROM api_keys") or 0
-    except: total_keys = 0
-
-    try:
-        searches_24h = await db.fetchval(
-            "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '24h'"
-        ) or 0
-    except: searches_24h = 0
-
-    try:
-        searches_7d = await db.fetchval(
-            "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '7 days'"
-        ) or 0
-    except: searches_7d = 0
-
-    try:
-        pending_tier3 = await db.fetchval(
-            "SELECT COUNT(*) FROM tier3_applications WHERE kyb_status = 'pending'"
-        ) or 0
-    except: pending_tier3 = 0
-
-    try:
-        total_agents = await db.fetchval("SELECT COUNT(*) FROM agent_identities") or 0
-    except: total_agents = 0
-
-    try:
-        daily = await db.fetch("""
-            SELECT DATE(created_at) as date, COUNT(*) as count
-            FROM search_analytics
-            WHERE created_at > NOW() - INTERVAL '30 days'
-            GROUP BY DATE(created_at)
-            ORDER BY date ASC
-        """)
-    except: daily = []
-
-    try:
-        signups = await db.fetch("""
-            SELECT DATE(created_at) as date, COUNT(*) as count
-            FROM users
-            WHERE created_at > NOW() - INTERVAL '30 days'
-            GROUP BY DATE(created_at)
-            ORDER BY date ASC
-        """)
-    except: signups = []
-
-    try:
-        calls_30d = await db.fetchval("""
-            SELECT COUNT(*) FROM credit_transactions
-            WHERE type = 'execution'
-              AND created_at > NOW() - INTERVAL '30 days'
-        """) or 0
-    except: calls_30d = 0
-
-    try:
-        revenue_30d_usd = await db.fetchval("""
-            SELECT COALESCE(SUM(amount_usd), 0) FROM package_purchases
-            WHERE payment_status = 'completed'
-              AND purchased_at > NOW() - INTERVAL '30 days'
-        """) or 0.0
-    except: revenue_30d_usd = 0.0
+    total_services = await _safe_count(db, "total_services", "SELECT COUNT(*) FROM services")
+    tier2 = await _safe_count(db, "tier2", "SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3")
+    total_users = await _safe_count(db, "total_users", "SELECT COUNT(*) FROM users")
+    total_keys = await _safe_count(db, "total_keys", "SELECT COUNT(*) FROM api_keys")
+    searches_24h = await _safe_count(
+        db, "searches_24h",
+        "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '24h'",
+    )
+    searches_7d = await _safe_count(
+        db, "searches_7d",
+        "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '7 days'",
+    )
+    pending_tier3 = await _safe_count(
+        db, "pending_tier3",
+        "SELECT COUNT(*) FROM tier3_applications WHERE kyb_status = 'pending'",
+    )
+    total_agents = await _safe_count(db, "total_agents", "SELECT COUNT(*) FROM agent_identities")
+    daily = await _safe_fetch(db, "daily_searches", """
+        SELECT DATE(created_at) as date, COUNT(*) as count
+        FROM search_analytics
+        WHERE created_at > NOW() - INTERVAL '30 days'
+        GROUP BY DATE(created_at)
+        ORDER BY date ASC
+    """)
+    signups = await _safe_fetch(db, "daily_signups", """
+        SELECT DATE(created_at) as date, COUNT(*) as count
+        FROM users
+        WHERE created_at > NOW() - INTERVAL '30 days'
+        GROUP BY DATE(created_at)
+        ORDER BY date ASC
+    """)
+    calls_30d = await _safe_count(db, "calls_30d", """
+        SELECT COUNT(*) FROM credit_transactions
+        WHERE type = 'execution'
+          AND created_at > NOW() - INTERVAL '30 days'
+    """)
+    revenue_30d_usd = await _safe_decimal(db, "revenue_30d_usd", """
+        SELECT COALESCE(SUM(amount_usd), 0) FROM package_purchases
+        WHERE payment_status = 'completed'
+          AND purchased_at > NOW() - INTERVAL '30 days'
+    """)
 
     return {
         "stats": {

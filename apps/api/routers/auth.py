@@ -265,7 +265,8 @@ async def register_user(request: Request, db=Depends(get_db)):
     token = auth_header.removeprefix("Bearer ").strip()
     try:
         claims = await verify_supabase_jwt(token)
-    except Exception:
+    except Exception as e:
+        logger.info("auth_failure reason=invalid_supabase_jwt path=/auth/register err=%s", type(e).__name__)
         raise HTTPException(status_code=401, detail={"error": "invalid_supabase_token"})
 
     supabase_id = (claims.get("sub") or "").strip()
@@ -327,7 +328,8 @@ async def register_user(request: Request, db=Depends(get_db)):
     try:
         _f = get_fernet()
         encrypted_key = _f.encrypt(raw_key.encode()).decode()
-    except Exception:
+    except Exception as e:
+        logger.warning("api_key encrypt-at-rest failed (key stored unencrypted): %s", type(e).__name__)
         encrypted_key = None
 
     await db.execute("""
@@ -385,7 +387,8 @@ async def regenerate_api_key(request: Request, db=Depends(get_db)):
     new_prefix = new_raw[:12]
     try:
         encrypted = get_fernet().encrypt(new_raw.encode()).decode()
-    except Exception:
+    except Exception as e:
+        logger.warning("api_key regenerate encrypt failed (key stored unencrypted): %s", type(e).__name__)
         encrypted = None
 
     await db.execute("""
@@ -487,7 +490,8 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
 
     try:
         claims = await verify_supabase_jwt(supabase_jwt)
-    except Exception:
+    except Exception as e:
+        logger.info("auth_failure reason=invalid_supabase_jwt path=/auth/session err=%s", type(e).__name__)
         raise HTTPException(status_code=401, detail={"error": "invalid_supabase_jwt"})
 
     supabase_sub = (claims.get("sub") or "").strip()
@@ -726,7 +730,8 @@ async def auth_me(request: Request, db=Depends(get_db)):
         supabase_sub = claims.get("sub", "")
         if not supabase_sub:
             raise ValueError("no sub")
-    except Exception:
+    except Exception as e:
+        logger.info("auth_failure reason=invalid_supabase_jwt path=/auth/me-bearer err=%s", type(e).__name__)
         raise HTTPException(status_code=401, detail="Invalid token")
 
     row = await db.fetchrow("""
@@ -818,7 +823,8 @@ async def get_api_key(request: Request, db=Depends(get_db)):
             _f = get_fernet()
             api_key = _f.decrypt(row["encrypted_key"].encode()).decode()
             encrypted = True
-        except Exception:
+        except Exception as e:
+            logger.error("api_key decrypt failed (encryption key rotated or corrupt?): %s", type(e).__name__)
             raise HTTPException(status_code=500, detail="Key decryption failed")
     else:
         # Legacy row: only the key_prefix was retained; the raw key was issued
