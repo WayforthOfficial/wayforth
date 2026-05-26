@@ -35,7 +35,10 @@ async def get_admin_session(request: Request, db):
     # IS used, so abuse leaves a trail (sessioned admin paths produce one too).
     admin_key = request.headers.get("X-Admin-Key", "")
     if admin_key and ADMIN_KEY:
-        admin_key_enabled = _os.environ.get("WAYFORTH_ADMIN_KEY_ENABLED", "true").lower() == "true"
+        # S2 (v0.7.8): default to disabled. Break-glass requires explicit
+        # WAYFORTH_ADMIN_KEY_ENABLED=true in the deploy env. Set it on Railway
+        # production only when you need break-glass access; unset it after.
+        admin_key_enabled = _os.environ.get("WAYFORTH_ADMIN_KEY_ENABLED", "false").lower() == "true"
         env_name = _os.environ.get("ENVIRONMENT", "development").lower()
         if not admin_key_enabled:
             logger.warning("X-Admin-Key presented but disabled by WAYFORTH_ADMIN_KEY_ENABLED=false")

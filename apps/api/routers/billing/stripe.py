@@ -497,29 +497,48 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
     except Exception:
         raise HTTPException(status_code=400)
 
-    # Idempotency gate: Stripe explicitly says callers must tolerate duplicate
-    # event delivery. We INSERT the event id and short-circuit if it's already
-    # been processed. Previously the renewal handler (`invoice.payment_succeeded`)
-    # had no dedup at all, so a single Stripe retry would double-credit the user.
     event_id = event.get("id") or ""
     event_type = event.get("type") or ""
-    if event_id:
-        try:
+
+    # S1/S4 (v0.7.8): dedup + credit grant must succeed-or-fail atomically.
+    # The outer transaction binds them: a crash mid-processing rolls back the
+    # dedup row, freeing Stripe's retry to reprocess cleanly. The outer
+    # try/except returns 503 on any unhandled failure — Stripe will not retry
+    # a 200, so we MUST not ack until the write commits.
+    try:
+        return await _process_stripe_event(db, event, event_id, event_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "stripe_webhook processing failed event=%s type=%s: %s",
+            event_id, event_type, e, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "processing_failed", "message": "retry"},
+        )
+
+
+async def _process_stripe_event(db, event, event_id: str, event_type: str):
+    async with db.transaction():
+        if event_id:
             inserted = await db.fetchval(
                 "INSERT INTO stripe_events (event_id, event_type) VALUES ($1, $2) "
                 "ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
                 event_id, event_type,
             )
             if inserted is None:
-                logger.info("stripe webhook duplicate event=%s type=%s — skipping", event_id, event_type)
+                logger.info(
+                    "stripe webhook duplicate event=%s type=%s — skipping",
+                    event_id, event_type,
+                )
                 return {"status": "duplicate_event"}
-        except Exception as _e:
-            # Fail closed: if we can't dedup, we'd rather refuse than risk
-            # double-crediting. Stripe will retry, and the next attempt either
-            # succeeds (DB healed) or keeps returning 503.
-            logger.error("stripe_events dedup insert failed: %s", _e)
-            raise HTTPException(status_code=503, detail="event_dedup_unavailable")
 
+        return await _dispatch_stripe_event(db, event)
+
+
+async def _dispatch_stripe_event(db, event):
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         meta = session.get("metadata", {})
