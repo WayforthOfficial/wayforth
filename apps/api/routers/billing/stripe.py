@@ -171,20 +171,16 @@ async def submit_service(request: Request, req: SubmitRequest, db=Depends(get_db
                 send_submission_confirmation,
                 req.contact_email, req.name, str(service_id), req.endpoint_url,
             ))
-        import asyncio as _asyncio
-        await _asyncio.sleep(3)
-        async with app.state.pool.acquire() as conn2:
-            service = await conn2.fetchrow("""
-                SELECT coverage_tier, last_tested_at, consecutive_failures
-                FROM services WHERE id = $1::uuid
-            """, str(service_id))
-        tier = service["coverage_tier"] if service else 0
+        # P1 (v0.7.8): no longer sleep(3) and re-fetch tier. The probe is
+        # backgrounded; the service was just inserted with coverage_tier=0
+        # and the probe will update it asynchronously. Callers poll
+        # /services/{id} or subscribe to webhooks to learn the eventual tier.
         return {
             "status": "submitted",
             "service_id": str(service_id),
             "name": req.name,
-            "initial_tier": tier,
-            "message": f"Service submitted and probed. Current tier: {tier}. Tier 2 requires 90%+ uptime over 7 days.",
+            "initial_tier": 0,
+            "message": "Service submitted and is being probed in the background. Poll /services/{id} for tier updates. Tier 2 requires 90%+ uptime over 7 days.",
             "leaderboard_url": "https://wayforth.io/leaderboard",
             "tier3_url": "https://wayforth.io/tier3",
         }

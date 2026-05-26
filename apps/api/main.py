@@ -230,8 +230,12 @@ async def lifespan(app: FastAPI):
     try:
         app.state.pool = await asyncpg.create_pool(
             _ASYNCPG_URL,
-            min_size=2,
-            max_size=20,
+            # P6 (v0.7.8): bumped from 20 to 40 for production-grade throughput.
+            # At ~200 req/s with ~50ms DB latency, 20 saturates quickly. 40
+            # gives 2-3× headroom. Configurable via env so we can tune per
+            # deploy without a code change.
+            min_size=int(os.environ.get("WAYFORTH_DB_POOL_MIN", "2")),
+            max_size=int(os.environ.get("WAYFORTH_DB_POOL_MAX", "40")),
             command_timeout=30.0,
             # Recycle connections idle >300s so Railway never reaches its
             # ~10-minute idle-disconnect before we do (300s = 5-min safety margin).
@@ -674,6 +678,27 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expires_at ON mfa_challenges (expires_at)
             """)
+            # P3/P4/P5 (v0.7.8): three hot-path composite indexes.
+            #  - api_keys(key_hash, active): every authenticated request hits
+            #    this exact WHERE clause; idx_api_keys_hash_active short-circuits
+            #    the UPDATE...RETURNING used by check_auth.
+            #  - search_analytics(user_id, created_at DESC): /account/analytics
+            #    and history queries filter by user_id with a recent-time bound;
+            #    the existing single-column index on created_at can't help.
+            #  - credit_transactions(user_id, type, created_at DESC): monthly
+            #    spend aggregates filter by user_id+type and order by created_at.
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_api_keys_hash_active
+                  ON api_keys(key_hash, active)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_search_analytics_user_created
+                  ON search_analytics(user_id, created_at DESC)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_credit_tx_user_type_created
+                  ON credit_transactions(user_id, type, created_at DESC)
+            """)
     except Exception as e:
         import traceback
         print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
@@ -683,6 +708,19 @@ async def lifespan(app: FastAPI):
         app.state.pool = None
     else:
         print("STARTUP: pool created and migrations complete", flush=True)
+        # P6 (v0.7.8): log the configured pool sizes so saturation is easy to
+        # spot in Railway logs.
+        try:
+            from core.db import get_pool_stats
+            _stats = get_pool_stats(app.state.pool)
+            logger.info(
+                "DB pool ready min=%s max=%s size=%s idle=%s",
+                os.environ.get("WAYFORTH_DB_POOL_MIN", "2"),
+                os.environ.get("WAYFORTH_DB_POOL_MAX", "40"),
+                _stats.get("size"), _stats.get("idle"),
+            )
+        except Exception:
+            pass
     cleanup_task = asyncio.create_task(_cleanup_anon_searches_loop(app))
     watcher_task = asyncio.create_task(_usdc_payment_watcher())
     renewal_task = asyncio.create_task(_usdc_renewal_reminder())

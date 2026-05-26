@@ -196,11 +196,16 @@ async def dashboard(request: Request, db=Depends(get_db)):
 
     month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
+    # P13 (v0.7.8): replace `session_id ILIKE '%prefix%'` (full scan) with a
+    # user_id filter. The composite idx_search_analytics_user_created (P3)
+    # makes this O(log n). Trade-off: over-counts for users with multiple
+    # api keys, but the dashboard is informational, not a billing source.
+    # A true per-key count would require a schema change (api_key_id column
+    # on search_analytics + backfill) — deferred to v0.8.x.
     searches_this_month = await db.fetchval("""
         SELECT COUNT(*) FROM search_analytics
-        WHERE created_at >= $1
-        AND session_id ILIKE $2
-    """, month_start, f"%{key['key_prefix']}%") or 0
+        WHERE user_id = $1 AND created_at >= $2
+    """, key['user_id'], month_start) or 0
 
     recent = await db.fetch("""
         SELECT query, created_at, top_result_id
@@ -398,12 +403,20 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     require_tier(tier, "analytics")
 
     # ── Searches — source of truth: search_analytics table ──────────────────
-    searches_month = await db.fetchval(
-        "SELECT COUNT(*) FROM search_analytics WHERE user_id=$1 AND created_at >= date_trunc('month', NOW())", user_id) or 0
-    searches_today = await db.fetchval(
-        "SELECT COUNT(*) FROM search_analytics WHERE user_id=$1 AND created_at >= date_trunc('day', NOW())", user_id) or 0
-    searches_7d = await db.fetchval(
-        "SELECT COUNT(*) FROM search_analytics WHERE user_id=$1 AND created_at >= NOW() - INTERVAL '7 days'", user_id) or 0
+    # P8 (v0.7.8): collapse three COUNTs into one filtered query — one round
+    # trip instead of three. The idx_search_analytics_user_created composite
+    # index (P3) keeps each FILTER cheap.
+    search_counts = await db.fetchrow("""
+        SELECT
+            COUNT(*) FILTER (WHERE created_at >= date_trunc('month', NOW())) AS month,
+            COUNT(*) FILTER (WHERE created_at >= date_trunc('day',   NOW())) AS today,
+            COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')  AS week
+        FROM search_analytics
+        WHERE user_id = $1
+    """, user_id)
+    searches_month = (search_counts["month"]  if search_counts else 0) or 0
+    searches_today = (search_counts["today"]  if search_counts else 0) or 0
+    searches_7d    = (search_counts["week"]   if search_counts else 0) or 0
     top_query_rows = await db.fetch(
         "SELECT query, COUNT(*) as count FROM search_analytics "
         "WHERE user_id=$1 AND created_at >= date_trunc('month', NOW()) AND query IS NOT NULL "
