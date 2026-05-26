@@ -176,10 +176,19 @@ async def get_stats(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     from main import VERSION
+    # Section 6 (v0.7.8): `total_services` here historically means
+    # "healthy services" (consecutive_failures < 3). The frontend
+    # (leaderboard.html) renders it under the label "Services in catalog",
+    # which conflicted with the admin dashboard's raw COUNT(*). Add
+    # explicitly named fields and keep the old keys as aliases so the
+    # frontend doesn't break. The "Services in catalog" label should be
+    # changed to "Healthy services" in the frontend follow-up.
     return {
-        "total_services": row["total"],
+        "total_services": row["total"],          # legacy alias = healthy
+        "healthy_services": row["total"],
         "real_apis": row["real_apis"],
-        "tier2_services": row["tier2"],
+        "tier2_services": row["tier2"],          # legacy alias
+        "tier2_verified": row["tier2"],
         "tier3_services": row["tier3"],
         "categories": row["categories"],
         "searches_7d": searches_7d,
