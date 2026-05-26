@@ -205,48 +205,45 @@ async def platform_stats(request: Request):
 
     try:
         async with app.state.pool.acquire() as conn:
-            total_accounts, active_services, searches_month, \
-                executions_month, credits_consumed, top_rows, plan_rows = await asyncio.gather(
-                conn.fetchval(
-                    "SELECT COUNT(*) FROM users "
-                    "WHERE email NOT LIKE '%@wayforth.test' AND email NOT LIKE 'probe-%'"
-                ),
-                conn.fetchval(
-                    "SELECT COUNT(*) FROM services WHERE consecutive_failures < 3"
-                ),
-                conn.fetchval(
-                    "SELECT COUNT(*) FROM search_analytics "
-                    "WHERE created_at >= date_trunc('month', NOW())"
-                ),
-                conn.fetchval(
-                    "SELECT COUNT(*) FROM credit_transactions "
-                    "WHERE type='execution' AND created_at >= date_trunc('month', NOW())"
-                ),
-                conn.fetchval(
-                    "SELECT COALESCE(SUM(ABS(amount)), 0) FROM credit_transactions "
-                    "WHERE amount < 0 AND type IN ('usage', 'execution')"
-                ),
-                conn.fetch(
-                    """
-                    SELECT service_id AS slug, COUNT(*) AS exec_count
-                    FROM credit_transactions
-                    WHERE type = 'execution'
-                      AND service_id IS NOT NULL
-                      AND created_at >= date_trunc('month', NOW())
-                    GROUP BY service_id
-                    ORDER BY exec_count DESC
-                    LIMIT 5
-                    """
-                ),
-                conn.fetch(
-                    """
-                    SELECT tier, COUNT(*) AS count
-                    FROM api_keys
-                    WHERE active = true
-                      AND subscription_status = 'active'
-                    GROUP BY tier
-                    """
-                ),
+            total_accounts = await conn.fetchval(
+                "SELECT COUNT(*) FROM users "
+                "WHERE email NOT LIKE '%@wayforth.test' AND email NOT LIKE 'probe-%'"
+            ) or 0
+            active_services = await conn.fetchval(
+                "SELECT COUNT(*) FROM services WHERE consecutive_failures < 3"
+            ) or 0
+            searches_month = await conn.fetchval(
+                "SELECT COUNT(*) FROM search_analytics "
+                "WHERE created_at >= date_trunc('month', NOW())"
+            ) or 0
+            executions_month = await conn.fetchval(
+                "SELECT COUNT(*) FROM credit_transactions "
+                "WHERE type='execution' AND created_at >= date_trunc('month', NOW())"
+            ) or 0
+            credits_consumed = await conn.fetchval(
+                "SELECT COALESCE(SUM(ABS(amount)), 0) FROM credit_transactions "
+                "WHERE amount < 0 AND type IN ('usage', 'execution')"
+            ) or 0
+            top_rows = await conn.fetch(
+                """
+                SELECT service_id AS slug, COUNT(*) AS exec_count
+                FROM credit_transactions
+                WHERE type = 'execution'
+                  AND service_id IS NOT NULL
+                  AND created_at >= date_trunc('month', NOW())
+                GROUP BY service_id
+                ORDER BY exec_count DESC
+                LIMIT 5
+                """
+            )
+            plan_rows = await conn.fetch(
+                """
+                SELECT tier, COUNT(*) AS count
+                FROM api_keys
+                WHERE active = true
+                  AND subscription_status = 'active'
+                GROUP BY tier
+                """
             )
     except Exception as e:
         logger.error("platform-stats DB error: %s", e)
