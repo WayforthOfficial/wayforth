@@ -22,7 +22,29 @@ logger = logging.getLogger("wayforth")
 
 router = APIRouter()
 
-FOUNDING_MEMBER_CUTOFF = datetime(2026, 8, 31, tzinfo=timezone.utc)
+# S21 (v0.7.8): cutoff is env-configurable so we can extend or shorten the
+# founding-member window without a redeploy. Default keeps existing behavior.
+# Format: ISO 8601 with timezone, e.g. "2026-08-31T00:00:00+00:00".
+import os as _os_for_cutoff
+
+
+def _parse_cutoff() -> datetime:
+    raw = _os_for_cutoff.environ.get("FOUNDING_MEMBER_CUTOFF", "")
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            logger.warning(
+                "Invalid FOUNDING_MEMBER_CUTOFF=%r (expected ISO 8601); using default 2026-08-31",
+                raw,
+            )
+    return datetime(2026, 8, 31, tzinfo=timezone.utc)
+
+
+FOUNDING_MEMBER_CUTOFF = _parse_cutoff()
 
 # ── Registration guards ───────────────────────────────────────────────────────
 

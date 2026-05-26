@@ -60,7 +60,14 @@ async def _get_provider_service(db, provider_id):
 
 
 async def _verify_dns_txt(domain: str, code: str) -> bool:
-    """Check DNS TXT records for `domain` to find `code`."""
+    """Check DNS TXT records for `domain` to find `code`.
+
+    S13 (v0.7.8): removed the subprocess dig fallback. `dns.resolver` is a
+    hard dep (`dnspython` in pyproject.toml) and is reliable; the fallback
+    added attack surface (untrusted domain → argv to a shell tool) for no
+    operational benefit. If dnspython itself ever fails, we'd rather log
+    and return False than silently shell out.
+    """
     try:
         import dns.resolver  # type: ignore
         answers = dns.resolver.resolve(domain, "TXT")
@@ -69,17 +76,8 @@ async def _verify_dns_txt(domain: str, code: str) -> bool:
                 if txt_string.decode("utf-8", errors="ignore") == code:
                     return True
         return False
-    except Exception:
-        pass
-    # Fallback: subprocess dig
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["dig", "+short", "TXT", domain],
-            capture_output=True, text=True, timeout=5,
-        )
-        return code in result.stdout
-    except Exception:
+    except Exception as e:
+        logger.info("DNS TXT lookup failed for %s: %s", domain, type(e).__name__)
         return False
 
 
