@@ -1,7 +1,10 @@
 """tier_gates.py — Feature availability and per-tier rate limits."""
+import logging
 import time
 from collections import deque
 from fastapi import HTTPException
+
+logger = logging.getLogger("wayforth.tier_gates")
 
 TIER_FEATURES: dict[str, list[str]] = {
     "search":             ["free", "builder", "starter", "pro", "growth"],
@@ -49,6 +52,13 @@ def require_tier(tier: str, feature: str) -> None:
     allowed = TIER_FEATURES.get(feature, [])
     if tier not in allowed:
         min_tier = allowed[0] if allowed else "growth"
+        # L6 (v0.7.8): log every tier-gate denial. Caller chain has the user
+        # identity already; this gives ops the feature + tier + minimum so
+        # they can correlate with surface-probing attempts.
+        logger.info(
+            "tier_gate_denied feature=%s user_tier=%s required_tier=%s",
+            feature, tier, min_tier,
+        )
         raise HTTPException(status_code=403, detail={
             "error": "tier_required",
             "feature": feature,

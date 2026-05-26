@@ -38,8 +38,13 @@ if SENTRY_DSN:
         environment=ENVIRONMENT,
     )
 
+# L10 (v0.7.8): LOG_LEVEL env override. Defaults to INFO but on-call can flip
+# to DEBUG without a redeploy. Invalid values fall back to INFO so a typo
+# doesn't silence the app.
+_LOG_LEVEL_NAME = os.environ.get("LOG_LEVEL", "INFO").upper()
+_LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_LOG_LEVEL,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("wayforth")
@@ -219,14 +224,15 @@ async def lifespan(app: FastAPI):
         logger.info("JWKS cache pre-warmed (%d keys)", len(_jwks_cache["keys"]))
     except Exception as _jwks_err:
         logger.warning("JWKS pre-warm failed (will retry on first request): %s", _jwks_err)
-    print("STARTUP: running check_db()", flush=True)
+    # L1 (v0.7.8): startup messages go through the logger so they pick up
+    # the configured level/format and land in any aggregation we add later.
+    logger.info("STARTUP: running check_db()")
     ok = check_db()
     if not ok:
-        logger.warning("DB connection check failed — starting anyway")
-        print(f"STARTUP: check_db failed, _DB_URL prefix={_DB_URL[:20]!r}", flush=True)
+        logger.warning("STARTUP: check_db failed, _DB_URL prefix=%r", _DB_URL[:20])
     app.state.db_ok = ok
     app.state.anon_searches = {}
-    print(f"STARTUP: creating asyncpg pool url_prefix={_ASYNCPG_URL[:20]!r}", flush=True)
+    logger.info("STARTUP: creating asyncpg pool url_prefix=%r", _ASYNCPG_URL[:20])
     try:
         app.state.pool = await asyncpg.create_pool(
             _ASYNCPG_URL,
@@ -714,10 +720,7 @@ async def lifespan(app: FastAPI):
                   WHERE refund_uuid IS NOT NULL
             """)
     except Exception as e:
-        import traceback
-        print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
-        print(traceback.format_exc(), flush=True)
-        logger.error(f"DB error: {e}")
+        logger.error("STARTUP ERROR: %s: %s", type(e).__name__, e, exc_info=True)
         logger.critical("DB pool creation or migrations failed: %s — exiting so the orchestrator can restart cleanly", e)
         app.state.pool = None
         # E4 (v0.7.8): fail-fast on DB unreachable. Previously the app would
@@ -728,7 +731,7 @@ async def lifespan(app: FastAPI):
         import sys
         sys.exit(1)
     else:
-        print("STARTUP: pool created and migrations complete", flush=True)
+        logger.info("STARTUP: pool created and migrations complete")
         # P6 (v0.7.8): log the configured pool sizes so saturation is easy to
         # spot in Railway logs.
         try:

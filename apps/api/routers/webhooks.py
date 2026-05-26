@@ -45,6 +45,18 @@ class WebhookRegistration(BaseModel):
         return resolved
 
 
+def _log_safe_url(url: str) -> str:
+    """L9 (v0.7.8): strip query string before logging in case the user
+    embedded a secret in the URL (`?token=...`). The actual POST still uses
+    the full URL — this is purely for log hygiene."""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        return parsed._replace(query="", fragment="").geturl()
+    except Exception:
+        return "<unparseable>"
+
+
 async def _deliver_wri_alert(
     pool, alert, entry, fired_at, fired_at_iso, timestamp
 ) -> bool:
@@ -112,7 +124,7 @@ async def _deliver_wri_alert(
         validate_external_url(alert["notify_url"], field_name="notify_url")
     except Exception as _vexc:
         logger.warning("wri_alert refused alert=%s url=%s: %s",
-                       alert["id"], alert["notify_url"], _vexc)
+                       alert["id"], _log_safe_url(alert["notify_url"]), _vexc)
         return False
     try:
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
@@ -130,7 +142,7 @@ async def _deliver_wri_alert(
         success = 200 <= status_code < 300
     except Exception as exc:
         logger.warning("wri_alert delivery failed alert=%s url=%s: %s",
-                       alert["id"], alert["notify_url"], exc)
+                       alert["id"], _log_safe_url(alert["notify_url"]), exc)
 
     async with pool.acquire() as db:
         await db.execute("""
@@ -148,7 +160,7 @@ async def _deliver_wri_alert(
 
     if success:
         logger.info("wri_alert fired alert=%s service=%s new_wri=%.1f → %s %d",
-                    alert["id"], svc_slug, new_wri, alert["notify_url"], status_code)
+                    alert["id"], svc_slug, new_wri, _log_safe_url(alert["notify_url"]), status_code)
     else:
         logger.warning("wri_alert failed alert=%s service=%s status=%s",
                        alert["id"], svc_slug, status_code)
