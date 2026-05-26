@@ -206,8 +206,7 @@ async def platform_stats(request: Request):
     try:
         async with app.state.pool.acquire() as conn:
             total_accounts = await conn.fetchval(
-                "SELECT COUNT(*) FROM users "
-                "WHERE email NOT LIKE '%@wayforth.test' AND email NOT LIKE 'probe-%'"
+                "SELECT COUNT(*) FROM users"
             ) or 0
             active_services = await conn.fetchval(
                 "SELECT COUNT(*) FROM services WHERE consecutive_failures < 3"
@@ -236,14 +235,6 @@ async def platform_stats(request: Request):
                 LIMIT 5
                 """
             )
-            paying_subscribers = await conn.fetchval(
-                """
-                SELECT COUNT(*) FROM api_keys
-                WHERE active = true
-                  AND subscription_status = 'active'
-                  AND tier IN ('builder', 'starter', 'pro', 'growth', 'enterprise')
-                """
-            ) or 0
             plan_rows = await conn.fetch(
                 """
                 SELECT tier, COUNT(*) AS count
@@ -257,9 +248,15 @@ async def platform_stats(request: Request):
         logger.error("platform-stats DB error: %s", e)
         raise HTTPException(status_code=503, detail="Database unavailable")
 
+    logger.info(
+        "platform-stats top_services raw: executions_month=%d top_rows=%s",
+        executions_month or 0,
+        [dict(r) for r in top_rows],
+    )
+
     result = {
         "total_accounts": total_accounts or 0,
-        "paying_subscribers": paying_subscribers or 0,
+        "paying_subscribers": None,  # set once Stripe billing is live
         "active_services": active_services or 0,
         "total_searches_this_month": searches_month or 0,
         "total_executions_this_month": executions_month or 0,
@@ -270,7 +267,7 @@ async def platform_stats(request: Request):
         ],
         "subscribers_by_plan": {r["tier"]: r["count"] for r in plan_rows if r["tier"]},
     }
-    logger.info("platform-stats response: %s", result)
+    logger.info("platform-stats result: %s", result)
     return result
 
 
