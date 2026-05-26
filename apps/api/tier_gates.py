@@ -1,5 +1,6 @@
 """tier_gates.py — Feature availability and per-tier rate limits."""
 import time
+from collections import deque
 from fastapi import HTTPException
 
 TIER_FEATURES: dict[str, list[str]] = {
@@ -35,7 +36,12 @@ TIER_RATE_LIMITS: dict[str, dict] = {
 
 FREE_TIER_MONTHLY_SEARCH_LIMIT = 50
 
-_rate_window: dict[str, list[float]] = {}
+# S9 (v0.7.8): cap per-key window at the highest legitimate hourly rate (pro =
+# 5000) plus headroom. Growth tier is exempted before insert, so 10000 is a
+# hard upper bound. Without maxlen, a single key making 1 req/sec accumulated
+# 86400 entries/day → unbounded RAM under steady load.
+_RATE_WINDOW_MAXLEN = 10000
+_rate_window: dict[str, deque] = {}
 
 
 def require_tier(tier: str, feature: str) -> None:
@@ -59,8 +65,10 @@ def check_rate_limit(api_key_id: str, tier: str) -> None:
         return
     limits = TIER_RATE_LIMITS.get(tier, TIER_RATE_LIMITS["free"])
     now = time.time()
-    window = _rate_window.setdefault(api_key_id, [])
-    window[:] = [t for t in window if t > now - 3600]
+    window = _rate_window.setdefault(api_key_id, deque(maxlen=_RATE_WINDOW_MAXLEN))
+    # Time-prune entries older than 1h from the left (oldest first).
+    while window and window[0] <= now - 3600:
+        window.popleft()
 
     calls_last_minute = sum(1 for t in window if t > now - 60)
     calls_last_hour = len(window)
@@ -88,15 +96,19 @@ def check_rate_limit(api_key_id: str, tier: str) -> None:
     window.append(now)
 
 
-_anon_ip_window: dict[str, list[float]] = {}
+_anon_ip_window: dict[str, deque] = {}
 _ANON_SEARCH_RPM = 30
 
 
 def check_anon_rate_limit(ip: str) -> None:
     """Sliding-window rate limiter for unauthenticated /search requests: 30 req/min per IP."""
     now = time.time()
-    window = _anon_ip_window.setdefault(ip, [])
-    window[:] = [t for t in window if t > now - 60]
+    # S9 (v0.7.8): per-IP deque capped at the per-minute limit. Anonymous
+    # users have a 60-second window so memory is naturally tight, but the
+    # explicit maxlen prevents the dict-of-lists footgun if the limit grows.
+    window = _anon_ip_window.setdefault(ip, deque(maxlen=_ANON_SEARCH_RPM))
+    while window and window[0] <= now - 60:
+        window.popleft()
     if len(window) >= _ANON_SEARCH_RPM:
         raise HTTPException(status_code=429, detail={
             "error": "rate_limit_exceeded",

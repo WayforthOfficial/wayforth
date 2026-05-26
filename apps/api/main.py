@@ -215,7 +215,7 @@ async def lifespan(app: FastAPI):
     check_service_margins()
     logger.info(f"Wayforth API starting, environment={ENVIRONMENT}")
     try:
-        await asyncio.to_thread(get_jwks)
+        await get_jwks()  # S10 (v0.7.8): get_jwks is now async/httpx
         logger.info("JWKS cache pre-warmed (%d keys)", len(_jwks_cache["keys"]))
     except Exception as _jwks_err:
         logger.warning("JWKS pre-warm failed (will retry on first request): %s", _jwks_err)
@@ -332,6 +332,15 @@ async def lifespan(app: FastAPI):
                 ALTER TABLE wri_alerts
                     ADD COLUMN IF NOT EXISTS hmac_secret TEXT
             """)
+            # S15 (v0.7.8): backfill any pre-hmac_secret rows with fresh 32-byte
+            # secrets so the api_key_id fallback can be removed from the
+            # delivery path. Idempotent — only touches NULL or UUID-shaped rows.
+            await _mconn.execute("""
+                UPDATE wri_alerts
+                SET hmac_secret = encode(gen_random_bytes(32), 'hex')
+                WHERE hmac_secret IS NULL
+                   OR hmac_secret = api_key_id::text
+            """)
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS wri_alert_logs (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -440,6 +449,32 @@ async def lifespan(app: FastAPI):
             """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS provider_services_slug_idx ON provider_services(service_slug)
+            """)
+            # S16 (v0.7.8): only one provider may own a given service_slug
+            # globally. We attempt the constraint conditionally — if existing
+            # rows have dup slugs (legacy data) we log and skip so startup
+            # doesn't crash. Operators reconcile dups via admin tooling and
+            # restart; the constraint then takes hold.
+            await _mconn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'provider_services_slug_unique'
+                    ) THEN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM provider_services
+                            GROUP BY service_slug
+                            HAVING COUNT(*) > 1
+                        ) THEN
+                            ALTER TABLE provider_services
+                              ADD CONSTRAINT provider_services_slug_unique
+                              UNIQUE (service_slug);
+                        ELSE
+                            RAISE WARNING 'provider_services has duplicate service_slug rows; UNIQUE constraint NOT added. Reconcile and restart to enforce.';
+                        END IF;
+                    END IF;
+                END $$;
             """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS provider_sessions_token_idx ON provider_sessions(token)
@@ -1011,7 +1046,11 @@ async def check_auth(request: Request) -> dict:
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
 
     if raw_key:
-        if not raw_key.startswith("wf_live_") or not (40 <= len(raw_key) <= 60):
+        # S14 (v0.7.8): tighten from 40-60 range to the two exact lengths we
+        # actually mint: 56 chars for "wf_live_" + token_hex(24), 51 chars for
+        # "wf_live_" + token_urlsafe(32). Both formats are in production; do
+        # NOT collapse to a single length without first migrating live keys.
+        if not raw_key.startswith("wf_live_") or len(raw_key) not in (51, 56):
             raise _AuthError(401, {
                 "error": "invalid_key",
                 "message": "Invalid API key format.",

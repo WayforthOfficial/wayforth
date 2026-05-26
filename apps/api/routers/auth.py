@@ -264,7 +264,7 @@ async def register_user(request: Request, db=Depends(get_db)):
         })
     token = auth_header.removeprefix("Bearer ").strip()
     try:
-        claims = verify_supabase_jwt(token)
+        claims = await verify_supabase_jwt(token)
     except Exception:
         raise HTTPException(status_code=401, detail={"error": "invalid_supabase_token"})
 
@@ -486,7 +486,7 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
         })
 
     try:
-        claims = verify_supabase_jwt(supabase_jwt)
+        claims = await verify_supabase_jwt(supabase_jwt)
     except Exception:
         raise HTTPException(status_code=401, detail={"error": "invalid_supabase_jwt"})
 
@@ -567,13 +567,12 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
 @router.post("/auth/session/refresh")
 @limiter.limit("60/minute")
 async def auth_session_refresh(request: Request):
-    """Extend the session's Redis TTL and re-issue the cookie's Max-Age.
+    """Extend the session's Redis TTL and rotate the cookie token.
 
-    Called by the dashboard periodically while the user is active. The cookie
-    value does NOT rotate — only the TTL extends. See core/session.py for
-    the rationale (token rotation on refresh does not meaningfully shrink the
-    exposure window of a stolen cookie while it does multiply token-handling
-    surface).
+    S17 (v0.7.8): on every refresh the token rotates. A stolen cookie loses
+    validity at the next refresh tick rather than persisting for the full
+    TTL. The dashboard polls /auth/session/refresh while the user is active
+    so a stolen cookie has a small exposure window in practice.
     """
     from core.session import (
         get_request_session, get_request_session_token,
@@ -594,9 +593,10 @@ async def auth_session_refresh(request: Request):
         # as a fresh-login required.
         raise HTTPException(status_code=401, detail={"error": "session_expired"})
 
+    _record, new_token = refreshed
     response = JSONResponse(content={"ok": True})
     response.headers["Cache-Control"] = "no-store, no-cache"
-    set_session_cookie(response, raw_token)
+    set_session_cookie(response, new_token)
     return response
 
 
@@ -722,7 +722,7 @@ async def auth_me(request: Request, db=Depends(get_db)):
     token = auth_header.removeprefix("Bearer ").strip()
 
     try:
-        claims = verify_supabase_jwt(token)
+        claims = await verify_supabase_jwt(token)
         supabase_sub = claims.get("sub", "")
         if not supabase_sub:
             raise ValueError("no sub")
