@@ -599,9 +599,11 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
     x402_supported = service["x402_supported"] if service else False
 
     # TRACK C: x402 native — attempt real CDP settlement, fall back to Track A if unconfigured
-    # TODO(security): Before Track C goes live, add x402_settlements dedup table
-    # with unique constraint on (query_id, service_id) to prevent duplicate settlements.
-    # Currently each /pay call generates a new CDP transfer with no idempotency check.
+    # v0.7.8 Section 9: the x402_settlements table now exists (see lifespan
+    # migration) with UNIQUE(payment_hash). Before Track C ships, wrap
+    # _x402_settle_cdp + the matching INSERT into x402_settlements in one
+    # transaction so a replayed X-PAYMENT header hits UniqueViolation and
+    # never produces a second settlement. Tracked for v0.8.0 mainnet cutover.
     x402_fallback_note = None
     if x402_supported and track in ["auto", "crypto"]:
         cdp_configured = bool(
