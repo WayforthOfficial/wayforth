@@ -699,13 +699,34 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS idx_credit_tx_user_type_created
                   ON credit_transactions(user_id, type, created_at DESC)
             """)
+            # E8 (v0.7.8): idempotency key for refunds. Callers that have a
+            # stable per-failure key pass refund_idempotency_key to _do_refund;
+            # the partial unique index makes a duplicate insert raise
+            # UniqueViolation so the caller knows the refund was already
+            # issued. Existing rows without a key remain valid.
+            await _mconn.execute("""
+                ALTER TABLE credit_transactions
+                    ADD COLUMN IF NOT EXISTS refund_uuid UUID
+            """)
+            await _mconn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_tx_refund_uuid
+                  ON credit_transactions(refund_uuid)
+                  WHERE refund_uuid IS NOT NULL
+            """)
     except Exception as e:
         import traceback
         print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
         print(traceback.format_exc(), flush=True)
         logger.error(f"DB error: {e}")
-        logger.warning(f"DB pool creation failed: {e} — /services will be unavailable")
+        logger.critical("DB pool creation or migrations failed: %s — exiting so the orchestrator can restart cleanly", e)
         app.state.pool = None
+        # E4 (v0.7.8): fail-fast on DB unreachable. Previously the app would
+        # start with pool=None and 503 every request — Railway's health check
+        # might not flag this state, leaving users staring at a broken service.
+        # Exit so the orchestrator restarts; if the DB stays down, the
+        # restart-crash cycle is the correct visible signal.
+        import sys
+        sys.exit(1)
     else:
         print("STARTUP: pool created and migrations complete", flush=True)
         # P6 (v0.7.8): log the configured pool sizes so saturation is easy to
