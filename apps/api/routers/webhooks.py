@@ -1,5 +1,6 @@
 """routers/webhooks.py — Webhook registration, listing, deletion, and WRI alerts."""
 
+import asyncio
 import hashlib
 import hmac
 import json as json_lib
@@ -44,17 +45,131 @@ class WebhookRegistration(BaseModel):
         return resolved
 
 
+async def _deliver_wri_alert(
+    pool, alert, entry, fired_at, fired_at_iso, timestamp
+) -> bool:
+    """Build payload, sign, POST, record. Returns True on 2xx."""
+    old_wri = entry.get("old_wri")
+    new_wri = entry.get("new_wri")
+    total_signals = entry.get("total_signals", 0)
+    svc_slug = entry.get("service", "")
+    svc_category = entry.get("category") or ""
+    pay_rate = entry.get("payment_rate", 0)
+    threshold = float(alert["threshold_score"])
+
+    svc_name = SERVICE_DISPLAY_NAMES.get(svc_slug, svc_slug)
+    is_managed = svc_slug in SERVICE_CONFIGS
+    is_new = old_wri is None
+
+    if is_new:
+        msg = (f"A new service ({svc_name}) just entered WayforthRank above your "
+               f"threshold of {threshold}. Current score: {round(new_wri, 1)} "
+               f"({total_signals} signals, {pay_rate}% payment conversion).")
+    else:
+        msg = (f"{svc_name} crossed your WRI alert threshold of {threshold}. "
+               f"Current score: {round(new_wri, 1)} "
+               f"({total_signals} signals, {pay_rate}% payment conversion).")
+
+    payload = {
+        "event": "wri.threshold_crossed",
+        "service": {
+            "slug": svc_slug,
+            "name": svc_name,
+            "category": svc_category,
+            "old_wri": round(old_wri, 2) if old_wri is not None else None,
+            "new_wri": round(new_wri, 2),
+            "total_signals": total_signals,
+            "payment_rate": pay_rate,
+            "managed": is_managed,
+            "zero_setup": is_managed,
+        },
+        "alert": {
+            "id": str(alert["id"]),
+            "threshold_score": threshold,
+            "category": alert["category"],
+        },
+        "fired_at": fired_at_iso,
+        "message": msg,
+    }
+    body = json_lib.dumps(payload)
+
+    if not alert["hmac_secret"]:
+        logger.error(
+            "wri_alert missing hmac_secret alert=%s — skipping delivery; recreate the alert",
+            alert["id"],
+        )
+        return False
+    sig = hmac.new(
+        alert["hmac_secret"].encode(),
+        f"{timestamp}.{body}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    status_code = None
+    success = False
+    try:
+        from core.url_validation import validate_external_url
+        validate_external_url(alert["notify_url"], field_name="notify_url")
+    except Exception as _vexc:
+        logger.warning("wri_alert refused alert=%s url=%s: %s",
+                       alert["id"], alert["notify_url"], _vexc)
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+            resp = await client.post(
+                alert["notify_url"],
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Wayforth-Event": "wri.threshold_crossed",
+                    "X-Wayforth-Timestamp": timestamp,
+                    "X-Wayforth-Signature": f"sha256={sig}",
+                },
+            )
+        status_code = resp.status_code
+        success = 200 <= status_code < 300
+    except Exception as exc:
+        logger.warning("wri_alert delivery failed alert=%s url=%s: %s",
+                       alert["id"], alert["notify_url"], exc)
+
+    async with pool.acquire() as db:
+        await db.execute("""
+            UPDATE wri_alerts
+            SET last_fired_at = $1, fired_count = fired_count + 1
+            WHERE id = $2
+        """, fired_at, alert["id"])
+        await db.execute("""
+            INSERT INTO wri_alert_logs
+            (alert_id, service_slug, old_wri, new_wri, fired_at, response_status, success)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """, alert["id"], svc_slug,
+            round(old_wri, 2) if old_wri is not None else None,
+            round(new_wri, 2), fired_at, status_code, success)
+
+    if success:
+        logger.info("wri_alert fired alert=%s service=%s new_wri=%.1f → %s %d",
+                    alert["id"], svc_slug, new_wri, alert["notify_url"], status_code)
+    else:
+        logger.warning("wri_alert failed alert=%s service=%s status=%s",
+                       alert["id"], svc_slug, status_code)
+    return success
+
+
 async def _fire_wri_alerts(pool, scored: list[dict]) -> int:
     """Check wri_alerts against updated scores and POST to matching notify_urls.
 
     scored: list of {service, old_wri, new_wri, payment_rate, total_signals, category}
     Returns count of alerts fired.
+
+    P7 (v0.7.8): deliveries run in parallel via asyncio.gather rather than
+    sequentially. With an 8s per-alert timeout, 50 alerts used to take up to
+    400s; now bounded by the slowest single delivery. Each alert can still
+    only fire once per batch (cooldown preserved via seen-set).
     """
     import time as _time
     if not pool or not scored:
         return 0
 
-    fired = 0
     fired_at = datetime.now(timezone.utc)
     fired_at_iso = fired_at.isoformat()
     timestamp = str(int(_time.time()))
@@ -67,139 +182,44 @@ async def _fire_wri_alerts(pool, scored: list[dict]) -> int:
             WHERE a.active = true
         """)
 
+    matched: list[tuple] = []
+    seen_alerts: set = set()
     for entry in scored:
         old_wri = entry.get("old_wri")
         new_wri = entry.get("new_wri")
         total_signals = entry.get("total_signals", 0)
-        svc_slug = entry.get("service", "")
         svc_category = entry.get("category") or ""
-        pay_rate = entry.get("payment_rate", 0)
 
         if new_wri is None:
             continue
-        # Only fire on upward threshold crossing (new >= threshold, old < threshold or old was null)
         for alert in alerts:
+            if alert["id"] in seen_alerts:
+                continue  # already queued this alert in this batch
             threshold = float(alert["threshold_score"])
             if new_wri < threshold:
                 continue
             if old_wri is not None and old_wri >= threshold:
-                continue  # already above threshold — not a crossing
+                continue
             if alert["category"] and alert["category"] != svc_category:
                 continue
             if total_signals < (alert["min_signals"] or 1):
                 continue
-            # 24-hour cooldown per alert
             if alert["last_fired_at"]:
                 elapsed = (fired_at - alert["last_fired_at"].replace(tzinfo=timezone.utc)).total_seconds()
                 if elapsed < 86400:
                     continue
+            matched.append((alert, entry))
+            seen_alerts.add(alert["id"])
 
-            svc_name = SERVICE_DISPLAY_NAMES.get(svc_slug, svc_slug)
-            is_managed = svc_slug in SERVICE_CONFIGS
-            is_new = old_wri is None
+    if not matched:
+        return 0
 
-            if is_new:
-                msg = (f"A new service ({svc_name}) just entered WayforthRank above your "
-                       f"threshold of {threshold}. Current score: {round(new_wri, 1)} "
-                       f"({total_signals} signals, {pay_rate}% payment conversion).")
-            else:
-                msg = (f"{svc_name} crossed your WRI alert threshold of {threshold}. "
-                       f"Current score: {round(new_wri, 1)} "
-                       f"({total_signals} signals, {pay_rate}% payment conversion).")
-
-            payload = {
-                "event": "wri.threshold_crossed",
-                "service": {
-                    "slug": svc_slug,
-                    "name": svc_name,
-                    "category": svc_category,
-                    "old_wri": round(old_wri, 2) if old_wri is not None else None,
-                    "new_wri": round(new_wri, 2),
-                    "total_signals": total_signals,
-                    "payment_rate": pay_rate,
-                    "managed": is_managed,
-                    "zero_setup": is_managed,
-                },
-                "alert": {
-                    "id": str(alert["id"]),
-                    "threshold_score": threshold,
-                    "category": alert["category"],
-                },
-                "fired_at": fired_at_iso,
-                "message": msg,
-            }
-            body = json_lib.dumps(payload)
-
-            # S15 (v0.7.8): all alerts now have a hmac_secret thanks to the
-            # backfill migration in main.py lifespan. The api_key_id fallback
-            # (UUID, leakable via admin views) is gone. If we somehow hit a
-            # row with no secret, skip delivery rather than sign with a weak
-            # secret — operator must regenerate the alert.
-            if not alert["hmac_secret"]:
-                logger.error(
-                    "wri_alert missing hmac_secret alert=%s — skipping delivery; recreate the alert",
-                    alert["id"],
-                )
-                continue
-            secret = alert["hmac_secret"]
-            sig = hmac.new(
-                secret.encode(),
-                f"{timestamp}.{body}".encode(),
-                hashlib.sha256,
-            ).hexdigest()
-
-            status_code = None
-            success = False
-            # Re-validate notify_url at delivery time (defense against DNS
-            # rebinding between registration and fire).
-            try:
-                from core.url_validation import validate_external_url
-                validate_external_url(alert["notify_url"], field_name="notify_url")
-            except Exception as _vexc:
-                logger.warning("wri_alert refused alert=%s url=%s: %s",
-                               alert["id"], alert["notify_url"], _vexc)
-                continue
-            try:
-                async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
-                    resp = await client.post(
-                        alert["notify_url"],
-                        content=body,
-                        headers={
-                            "Content-Type": "application/json",
-                            "X-Wayforth-Event": "wri.threshold_crossed",
-                            "X-Wayforth-Timestamp": timestamp,
-                            "X-Wayforth-Signature": f"sha256={sig}",
-                        },
-                    )
-                status_code = resp.status_code
-                success = 200 <= status_code < 300
-            except Exception as exc:
-                logger.warning("wri_alert delivery failed alert=%s url=%s: %s",
-                               alert["id"], alert["notify_url"], exc)
-
-            async with pool.acquire() as db:
-                await db.execute("""
-                    UPDATE wri_alerts
-                    SET last_fired_at = $1, fired_count = fired_count + 1
-                    WHERE id = $2
-                """, fired_at, alert["id"])
-                await db.execute("""
-                    INSERT INTO wri_alert_logs
-                    (alert_id, service_slug, old_wri, new_wri, fired_at, response_status, success)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                """, alert["id"], svc_slug,
-                    round(old_wri, 2) if old_wri is not None else None,
-                    round(new_wri, 2), fired_at, status_code, success)
-
-            if success:
-                fired += 1
-                logger.info("wri_alert fired alert=%s service=%s new_wri=%.1f → %s %d",
-                            alert["id"], svc_slug, new_wri, alert["notify_url"], status_code)
-            else:
-                logger.warning("wri_alert failed alert=%s service=%s status=%s",
-                               alert["id"], svc_slug, status_code)
-
-    return fired
+    results = await asyncio.gather(
+        *[_deliver_wri_alert(pool, alert, entry, fired_at, fired_at_iso, timestamp)
+          for (alert, entry) in matched],
+        return_exceptions=True,
+    )
+    return sum(1 for r in results if r is True)
 
 
 @router.post("/webhooks/register")
