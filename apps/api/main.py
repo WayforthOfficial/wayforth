@@ -719,6 +719,30 @@ async def lifespan(app: FastAPI):
                   ON credit_transactions(refund_uuid)
                   WHERE refund_uuid IS NOT NULL
             """)
+            # Section 9 (v0.7.8): x402 settlement dedup table. Track C (native
+            # x402 mainnet) cannot ship without this — without a UNIQUE on
+            # payment_hash a malicious payer can replay the same X-PAYMENT
+            # header and get multiple service calls settled against one
+            # on-chain payment. The /pay endpoint should INSERT a row keyed
+            # on the payment_hash inside the same transaction as the CDP
+            # transfer; a duplicate hash will raise UniqueViolation and the
+            # caller refuses to settle.
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS x402_settlements (
+                    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    payment_hash  TEXT NOT NULL,
+                    amount        NUMERIC NOT NULL,
+                    service_slug  TEXT NOT NULL,
+                    user_id       UUID REFERENCES users(id),
+                    settled_at    TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT x402_settlements_payment_hash_unique
+                        UNIQUE (payment_hash)
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS x402_settlements_user_idx
+                  ON x402_settlements(user_id, settled_at DESC)
+            """)
     except Exception as e:
         logger.error("STARTUP ERROR: %s: %s", type(e).__name__, e, exc_info=True)
         logger.critical("DB pool creation or migrations failed: %s — exiting so the orchestrator can restart cleanly", e)
