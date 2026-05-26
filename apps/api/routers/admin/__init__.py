@@ -1,5 +1,6 @@
 """routers/admin/__init__.py — assembles combined admin router."""
 
+import asyncio
 import hashlib
 import logging
 import secrets
@@ -186,6 +187,85 @@ async def admin_stats(request: Request, key: str = ""):
             "package": "wayforth-mcp",
             "latest_version": pypi_version,
         },
+    }
+
+
+@router.get("/admin/platform-stats")
+@limiter.limit("30/minute")
+async def platform_stats(request: Request):
+    """Founder-facing P&L data for ZPA vault finance view.
+
+    Requires X-Admin-Key header. Returns subscriber counts by tier,
+    monthly activity, credits consumed, and top services this month.
+    """
+    from main import app, ADMIN_KEY
+    provided_key = request.headers.get("X-Admin-Key", "")
+    if not ADMIN_KEY or not provided_key or not secrets.compare_digest(provided_key, ADMIN_KEY):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        async with app.state.pool.acquire() as conn:
+            total_accounts, active_services, searches_month, \
+                executions_month, credits_consumed, top_rows, plan_rows = await asyncio.gather(
+                conn.fetchval(
+                    "SELECT COUNT(*) FROM users "
+                    "WHERE email NOT LIKE '%@wayforth.test' AND email NOT LIKE 'probe-%'"
+                ),
+                conn.fetchval(
+                    "SELECT COUNT(*) FROM services WHERE consecutive_failures < 3"
+                ),
+                conn.fetchval(
+                    "SELECT COUNT(*) FROM search_analytics "
+                    "WHERE created_at >= date_trunc('month', NOW())"
+                ),
+                conn.fetchval(
+                    "SELECT COUNT(*) FROM credit_transactions "
+                    "WHERE type='execution' AND created_at >= date_trunc('month', NOW())"
+                ),
+                conn.fetchval(
+                    "SELECT COALESCE(SUM(ABS(amount)), 0) FROM credit_transactions "
+                    "WHERE amount < 0 AND type IN ('usage', 'execution')"
+                ),
+                conn.fetch(
+                    """
+                    SELECT service_id AS slug, COUNT(*) AS exec_count
+                    FROM credit_transactions
+                    WHERE type = 'execution'
+                      AND service_id IS NOT NULL
+                      AND created_at >= date_trunc('month', NOW())
+                    GROUP BY service_id
+                    ORDER BY exec_count DESC
+                    LIMIT 5
+                    """
+                ),
+                conn.fetch(
+                    """
+                    SELECT tier, COUNT(*) AS count
+                    FROM api_keys
+                    WHERE active = true
+                      AND subscription_status = 'active'
+                    GROUP BY tier
+                    """
+                ),
+            )
+    except Exception as e:
+        logger.error("platform-stats DB error: %s", e)
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    searches_month = searches_month or 0
+    executions_month = executions_month or 0
+
+    return {
+        "total_accounts": total_accounts or 0,
+        "active_services": active_services or 0,
+        "total_searches_this_month": searches_month,
+        "total_executions_this_month": executions_month,
+        "total_calls_this_month": searches_month + executions_month,
+        "credits_consumed_total": int(credits_consumed or 0),
+        "top_services": [
+            {"slug": r["slug"], "executions": r["exec_count"]} for r in top_rows
+        ],
+        "subscribers_by_plan": {r["tier"]: r["count"] for r in plan_rows if r["tier"]},
     }
 
 
