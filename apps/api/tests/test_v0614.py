@@ -25,8 +25,8 @@ from services.managed import SERVICE_CONFIGS
 class TestVersion:
 
     def test_version_is_070(self):
-        # v0.7.5 — Production Ready. Economics from v0.6.14 still apply.
-        assert VERSION == "0.7.5"
+        # v0.7.7 — MCP package fix.
+        assert VERSION == "0.7.7"
 
     def test_version_is_string(self):
         assert isinstance(VERSION, str)

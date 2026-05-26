@@ -1,7 +1,7 @@
 """
 tests/test_system_status.py — /system/status health logic tests
 
-Verifies the v0.7.5 fix:
+Verifies the v0.7.7 fix:
   - Missing API keys are not counted as failures
   - managed_services status reflects only configured (keyed) services
   - Overall status only reaches "outage" when the api component is explicitly down
