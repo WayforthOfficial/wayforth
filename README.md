@@ -2,7 +2,7 @@
 
 **One tool call. Any API. No setup.**
 
-[![Version](https://img.shields.io/badge/version-0.7.5-4F46E5)](https://gateway.wayforth.io/docs)
+[![Version](https://img.shields.io/badge/version-0.7.7-4F46E5)](https://gateway.wayforth.io/docs)
 [![License](https://img.shields.io/badge/license-BSL_1.1-64748B)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-186_passing-10B981)](https://github.com/WayforthOfficial/wayforth)
 
@@ -198,7 +198,7 @@ Full spec: [gateway.wayforth.io/wayforthql-spec](https://gateway.wayforth.io/way
 
 ## Development Status
 
-**v0.7.5 — Production Ready**
+**v0.7.7 — MCP package fix**
 
 - 186 tests passing
 - Security: professional penetration test completed, all findings resolved

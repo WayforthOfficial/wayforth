@@ -366,12 +366,12 @@ async def lifespan(app: FastAPI):
                 ON webhook_deliveries(next_retry_at, status)
                 WHERE status = 'pending'
             """)
-            # v0.7.5: track suspension state on the webhook itself
+            # v0.7.7: track suspension state on the webhook itself
             await _mconn.execute("""
                 ALTER TABLE provider_webhooks
                 ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ
             """)
-            # v0.7.5: index for per-webhook delivery history lookup
+            # v0.7.7: index for per-webhook delivery history lookup
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_idx
                 ON webhook_deliveries(webhook_id, created_at DESC)
@@ -977,7 +977,7 @@ async def add_request_id(request: Request, call_next):
 app.add_exception_handler(_AuthError, _auth_error_handler)
 
 
-# v0.7.5: Normalise HTTP 402 to the canonical insufficient_credits shape.
+# v0.7.7: Normalise HTTP 402 to the canonical insufficient_credits shape.
 # x402 routes return JSONResponse directly and are unaffected.
 async def _payment_required_handler(request: Request, exc: HTTPException):
     if exc.status_code == 402 and isinstance(exc.detail, dict):
