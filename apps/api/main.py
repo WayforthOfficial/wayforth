@@ -722,6 +722,8 @@ app.add_middleware(
         "https://www.wayforth.io",
         "https://gateway.wayforth.io",
         "https://mcp.wayforth.io",
+        "https://zeropointaccess.com",
+        "https://www.zeropointaccess.com",
         "https://id-preview--1f7c5e7e-c191-4274-b4a6-f6e732da08d9.lovable.app",
         "https://intent-exchange.lovable.app",
     ],
