@@ -719,14 +719,12 @@ async def lifespan(app: FastAPI):
                   ON credit_transactions(refund_uuid)
                   WHERE refund_uuid IS NOT NULL
             """)
-            # Section 9 (v0.7.8): x402 settlement dedup table. Track C (native
-            # x402 mainnet) cannot ship without this — without a UNIQUE on
-            # payment_hash a malicious payer can replay the same X-PAYMENT
-            # header and get multiple service calls settled against one
-            # on-chain payment. The /pay endpoint should INSERT a row keyed
-            # on the payment_hash inside the same transaction as the CDP
-            # transfer; a duplicate hash will raise UniqueViolation and the
-            # caller refuses to settle.
+            # x402 settlement dedup table — added in v0.7.8 Section 9, wired in
+            # v0.8.0 Item 1. The INSERT happens in routers/x402.py (x402_execute
+            # and x402_search), AFTER payment verification and AFTER tier/flag
+            # gates, BEFORE the service adapter call. UNIQUE(payment_hash) makes
+            # a replayed X-PAYMENT header raise UniqueViolation, which is
+            # translated to a 400 replay_rejected response.
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS x402_settlements (
                     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

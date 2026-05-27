@@ -599,11 +599,11 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
     x402_supported = service["x402_supported"] if service else False
 
     # TRACK C: x402 native — attempt real CDP settlement, fall back to Track A if unconfigured
-    # v0.7.8 Section 9: the x402_settlements table now exists (see lifespan
-    # migration) with UNIQUE(payment_hash). Before Track C ships, wrap
-    # _x402_settle_cdp + the matching INSERT into x402_settlements in one
-    # transaction so a replayed X-PAYMENT header hits UniqueViolation and
-    # never produces a second settlement. Tracked for v0.8.0 mainnet cutover.
+    # v0.8.0 Item 1: replay protection landed in routers/x402.py (x402_execute
+    # and x402_search) where the inbound X-PAYMENT header actually arrives.
+    # This Track C path is the developer-facing /pay orchestrator and does not
+    # receive X-PAYMENT directly; the EIP-3009 nonce + on-chain settlement
+    # uniqueness handle replay at this layer.
     x402_fallback_note = None
     if x402_supported and track in ["auto", "crypto"]:
         cdp_configured = bool(
