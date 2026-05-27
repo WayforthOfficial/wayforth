@@ -1,6 +1,8 @@
-# wayforth-sdk
+# @wayforth/sdk
 
-TypeScript/JavaScript SDK for [Wayforth](https://gateway.wayforth.io) — discover and call AI services from the catalog.
+[![npm](https://img.shields.io/npm/v/wayforth-sdk)](https://www.npmjs.com/package/wayforth-sdk)
+
+TypeScript/JavaScript SDK for [Wayforth](https://wayforth.io) — search, execute, and pay for any of 4,974 indexed APIs.
 
 ## Install
 
@@ -13,42 +15,47 @@ npm install wayforth-sdk
 ```typescript
 import { WayforthClient } from "wayforth-sdk";
 
-const client = new WayforthClient();
+const client = new WayforthClient("wf_live_...");
 
-// Check API status
-console.log(await client.status());
-
-// Search for services by natural language intent
-const results = await client.search("fast cheap inference for coding");
+// Search by natural language intent
+const results = await client.search("translate text to Spanish");
 for (const svc of results.results.slice(0, 3)) {
-  console.log(`${svc.name} (tier ${svc.coverage_tier}) — ${svc.endpoint_url}`);
+  console.log(`${svc.name}  WRI: ${svc.wri}  tier ${svc.coverage_tier}`);
 }
 
-// List all translation services
-const translators = await client.listServices({ category: "translation" });
-console.log(`Found ${translators.length} translation services`);
+// Execute a managed service directly — no external API key needed
+const translation = await client.execute("deepl", { text: "Hello", target_lang: "ES" });
+console.log(translation);
+
+// Intent-based routing — Wayforth picks the best service and runs it
+const result = await client.run("get current weather in London");
+console.log(result);
 ```
 
 ## API
 
-### `new WayforthClient(baseUrl?)`
+### `new WayforthClient(apiKey, baseUrl?)`
 
-Defaults to the production API. Pass a custom `baseUrl` to point at a local instance.
+`baseUrl` defaults to `https://gateway.wayforth.io`.
 
-### `search(query, options?) → Promise<SearchResponse>`
+### Methods
 
-Returns services ranked by semantic similarity. `options`:
-- `category` — filter by `"inference"`, `"translation"`, or `"data"`
-- `limit` — max results (default 5)
-- `tier` — filter by coverage tier (0–3)
+| Method | Description |
+|--------|-------------|
+| `search(query, options?)` | Search by natural language intent |
+| `query(params)` | Structured WayforthQL query |
+| `listServices(options?)` | List services with category/tier/limit filters |
+| `getService(id)` | Get a single service by slug or ID |
+| `getSimilar(serviceId, limit?)` | Services co-used alongside this one |
+| `execute(slug, params?)` | Execute a managed service by slug |
+| `run(query, params?)` | Intent-based routing and execution |
+| `stats()` | Catalog statistics by tier and category |
+| `status()` | API health check |
+| `balance()` | Account credit balance |
+| `getIdentity(agentId)` | Look up a registered agent identity |
+| `registerIdentity(agentId, displayName?)` | Register an agent identity |
 
-### `listServices(options?) → Promise<Service[]>`
-
-Lists services, optionally filtered by `category` and/or `limit`.
-
-### `status() → Promise<HealthResponse>`
-
-Returns API health: `{ status, service, version, db_status }`.
+Full API reference: [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
 
 ## Build from source
 

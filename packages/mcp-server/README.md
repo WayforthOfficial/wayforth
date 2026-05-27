@@ -2,59 +2,52 @@
 
 [![PyPI](https://img.shields.io/pypi/v/wayforth-mcp)](https://pypi.org/project/wayforth-mcp/)
 
-MCP server for [Wayforth](https://github.com/WayforthOfficial/wayforth) — discover AI services from Claude Code, Cursor, or any MCP-compatible client.
+MCP server for [Wayforth](https://wayforth.io) — one tool call to search, execute, and pay for any of 4,974 indexed APIs.
 
 mcp-name: io.github.WayforthOfficial/wayforth
 
-## Install (one command)
+## Install
 
 ```bash
-claude mcp add wayforth -- uv run --directory ~/Code/wayforth/packages/mcp-server python server.py
+uvx wayforth-mcp
 ```
 
-That's it. Claude Code will restart and the nine Wayforth tools will be available immediately.
+Add to Claude Code permanently:
+
+```bash
+claude mcp add wayforth -- uvx wayforth-mcp
+```
+
+## Setup
+
+Get an API key at [wayforth.io/signup](https://wayforth.io/signup), then set it in your environment:
+
+```bash
+export WAYFORTH_API_KEY=wf_live_...
+```
 
 ## Tools
 
 | Tool | Description |
-|---|---|
-| `wayforth_search` | Search services by natural language — returns WRI, tier label, price/req, and payment hint |
-| `wayforth_list` | Browse catalog with optional category, tier, and limit filters |
-| `wayforth_status` | Catalog stats (counts by tier and category) and API health |
-| `wayforth_stats` | Detailed catalog statistics by tier and category |
-| `wayforth_pay` | Pay for a service using Wayforth credits (1 credit = $0.001 USD) |
-| `wayforth_remember` | Save a service to agent memory (persisted to API) |
-| `wayforth_recall` | Recall services previously saved to memory, with optional filter |
+|------|-------------|
+| `wayforth_search` | Search 4,974 APIs by natural language — returns WRI scores, tier, price/req |
+| `wayforth_query` | Structured discovery — filter by tier, latency, region, price, payment rail |
+| `wayforth_run` | Intent-based routing: describe what you need, Wayforth picks and executes |
+| `wayforth_execute` | Direct execution of a managed service by slug — no API key required |
+| `wayforth_pay` | Pay for a service via card credits or USDC on Base |
+| `wayforth_list` | Browse catalog with category, tier, and limit filters |
+| `wayforth_status` | Live API health and service counts |
+| `wayforth_keys` | Store your own API keys encrypted at rest (BYOK) |
+| `wayforth_remember` | Save a service to persistent agent memory |
+| `wayforth_recall` | Retrieve services previously saved to memory |
+| `wayforth_compare` | Side-by-side comparison of two services by slug |
 | `wayforth_similar` | Find services co-used alongside a given service |
-
-## Prerequisites
-
-The Wayforth API must be running:
-
-```bash
-cd ~/Code/wayforth/apps/api
-uv run uvicorn main:app --port 8000
-```
-
-By default the MCP server connects to `http://localhost:8000`. Override with:
-
-```bash
-export WAYFORTH_API_URL=https://api.wayforth.io
-```
-
-## Run manually (for testing)
-
-```bash
-cd ~/Code/wayforth/packages/mcp-server
-uv run python server.py
-```
-
-The server starts on stdio and waits for MCP protocol messages. Press `Ctrl+C` to exit.
+| `wayforth_quickstart` | Get started guide — returned as a formatted string |
 
 ## Development
 
 ```bash
 cd packages/mcp-server
-uv sync          # install deps
+uv sync
 uv run python server.py
 ```

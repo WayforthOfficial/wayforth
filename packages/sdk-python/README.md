@@ -1,6 +1,8 @@
 # wayforth-sdk
 
-Python SDK for [Wayforth](https://gateway.wayforth.io) — discover and call AI services from the catalog.
+[![PyPI](https://img.shields.io/pypi/v/wayforth-sdk)](https://pypi.org/project/wayforth-sdk/)
+
+Python SDK for [Wayforth](https://wayforth.io) — search, execute, and pay for any of 4,974 indexed APIs.
 
 ## Install
 
@@ -17,37 +19,59 @@ uv add wayforth-sdk
 ## Usage
 
 ```python
-from wayforth import WayforthClient
+from wayforth import Wayforth
 
-client = WayforthClient()
+client = Wayforth(api_key="wf_live_...")
 
-# Check API status
-print(client.status())
-
-# Search for services by natural language intent
-results = client.search("fast cheap inference for coding")
+# Search by natural language intent
+results = client.search("translate text to Spanish")
 for svc in results[:3]:
-    print(f"{svc['name']} (tier {svc['coverage_tier']}) — {svc['endpoint_url']}")
+    print(f"{svc['name']}  WRI: {svc['wri']}  tier {svc['coverage_tier']}")
 
-# List all translation services
-translators = client.list_services(category="translation")
-print(f"Found {len(translators)} translation services")
+# Execute a managed service directly — no external API key needed
+result = client.execute("deepl", text="Hello", target_lang="ES")
+print(result)
+
+# Intent-based routing — Wayforth picks the best service and runs it
+result = client.run("summarize this text", content="...")
+print(result)
+```
+
+Async client:
+
+```python
+from wayforth import AsyncWayforth
+
+async with AsyncWayforth(api_key="wf_live_...") as client:
+    results = await client.search("real-time stock data")
+    result = await client.execute("alpha-vantage", symbol="AAPL", function="TIME_SERIES_INTRADAY")
 ```
 
 ## API
 
-### `WayforthClient(base_url=...)`
+### `Wayforth(api_key, base_url=...)`
 
-Defaults to the production API. Pass a custom `base_url` to point at a local instance.
+Synchronous client. `base_url` defaults to `https://gateway.wayforth.io`.
 
-### `search(intent, category=None, limit=5) -> list[dict]`
+### `AsyncWayforth(api_key, base_url=...)`
 
-Returns services ranked by keyword overlap with `intent`. Optional `category` filter (`"inference"`, `"translation"`, `"data"`).
+Async client. Same methods as `Wayforth`, all async.
 
-### `list_services(category=None, tier=None, limit=100) -> list[dict]`
+### Methods
 
-Lists services, optionally filtered by `category` and/or `coverage_tier` (0–2).
+| Method | Description |
+|--------|-------------|
+| `search(query, **filters)` | Search by natural language intent |
+| `query(ql, **kwargs)` | Structured WayforthQL query |
+| `services(category=None, tier=None, limit=100)` | List services with filters |
+| `get_service(id)` | Get a single service by slug or ID |
+| `get_similar(service_id, limit=5)` | Services co-used alongside this one |
+| `execute(slug, **params)` | Execute a managed service by slug |
+| `run(query, **params)` | Intent-based routing and execution |
+| `stats()` | Catalog statistics by tier and category |
+| `status()` | API health check |
+| `balance()` | Account credit balance |
+| `get_identity(agent_id)` | Look up a registered agent identity |
+| `register_identity(agent_id, display_name="")` | Register an agent identity |
 
-### `status() -> dict`
-
-Returns API health: `{"status": "ok", "service": "wayforth-api", "version": "...", "db_status": "ok"}`.
+Full API reference: [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
