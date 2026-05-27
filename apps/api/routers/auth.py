@@ -13,7 +13,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from core.auth import _resolve_user, verify_supabase_jwt, get_fernet, resolve_dashboard_caller
+from core.auth import (
+    _resolve_user,
+    decrypt_api_key,
+    encrypt_api_key,
+    get_fernet,
+    resolve_dashboard_caller,
+    verify_supabase_jwt,
+)
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier
@@ -355,18 +362,19 @@ async def register_user(request: Request, db=Depends(get_db)):
     raw_key = "wf_live_" + secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     key_prefix = raw_key[:12]
+    # v0.8.0 Item 3: store key_version alongside ciphertext for rotation.
+    encrypted_key = None
+    key_version = 1
     try:
-        _f = get_fernet()
-        encrypted_key = _f.encrypt(raw_key.encode()).decode()
+        encrypted_key, key_version = encrypt_api_key(raw_key, version=1)
     except Exception as e:
         logger.warning("api_key encrypt-at-rest failed (key stored unencrypted): %s", type(e).__name__)
-        encrypted_key = None
 
     await db.execute("""
-        INSERT INTO api_keys (key_hash, key_prefix, tier, user_id, owner_email, encrypted_key)
-        VALUES ($1, $2, 'free', $3, $4, $5)
+        INSERT INTO api_keys (key_hash, key_prefix, tier, user_id, owner_email, encrypted_key, key_version)
+        VALUES ($1, $2, 'free', $3, $4, $5, $6)
         ON CONFLICT DO NOTHING
-    """, key_hash, key_prefix, str(user['id']), email, encrypted_key)
+    """, key_hash, key_prefix, str(user['id']), email, encrypted_key, key_version)
 
     await db.execute("""
         INSERT INTO user_credits (user_id, credits_balance, lifetime_credits, package_tier)
@@ -420,17 +428,20 @@ async def regenerate_api_key(request: Request, db=Depends(get_db)):
     new_raw = "wf_live_" + secrets.token_urlsafe(32)
     new_hash = hashlib.sha256(new_raw.encode()).hexdigest()
     new_prefix = new_raw[:12]
+    # v0.8.0 Item 3: re-encrypt with current default version (1) on rotate.
+    encrypted = None
+    new_key_version = 1
     try:
-        encrypted = get_fernet().encrypt(new_raw.encode()).decode()
+        encrypted, new_key_version = encrypt_api_key(new_raw, version=1)
     except Exception as e:
         logger.warning("api_key regenerate encrypt failed (key stored unencrypted): %s", type(e).__name__)
-        encrypted = None
 
     await db.execute("""
         UPDATE api_keys
-        SET key_hash = $1, key_prefix = $2, encrypted_key = $3, last_used_at = NULL
-        WHERE id = $4
-    """, new_hash, new_prefix, encrypted, row["id"])
+        SET key_hash = $1, key_prefix = $2, encrypted_key = $3,
+            key_version = $4, last_used_at = NULL
+        WHERE id = $5
+    """, new_hash, new_prefix, encrypted, new_key_version, row["id"])
 
     response = JSONResponse(content={"api_key": new_raw})
     response.headers["Cache-Control"] = "no-store, no-cache"
@@ -834,7 +845,7 @@ async def get_api_key(request: Request, db=Depends(get_db)):
         return response
 
     row = await db.fetchrow("""
-        SELECT key_prefix, encrypted_key, created_at, last_used_at
+        SELECT key_prefix, encrypted_key, key_version, created_at, last_used_at
         FROM api_keys
         WHERE id = $1::uuid AND active = true
     """, str(caller["api_key_id"]))
@@ -855,8 +866,10 @@ async def get_api_key(request: Request, db=Depends(get_db)):
     encrypted: bool
     if row["encrypted_key"]:
         try:
-            _f = get_fernet()
-            api_key = _f.decrypt(row["encrypted_key"].encode()).decode()
+            # v0.8.0 Item 3: decrypt with the version stored on the row.
+            # Pre-v0.8.0 rows have key_version=1 (column default).
+            stored_version = row["key_version"] if row["key_version"] is not None else 1
+            api_key = decrypt_api_key(row["encrypted_key"], stored_version)
             encrypted = True
         except Exception as e:
             logger.error("api_key decrypt failed (encryption key rotated or corrupt?): %s", type(e).__name__)

@@ -13,18 +13,103 @@ from fastapi.responses import JSONResponse
 logger = logging.getLogger("wayforth")
 
 
-def get_fernet():
+# v0.8.0 Item 3 — API key encryption versioning.
+#
+# Rotation procedure (CEO-only, infrastructure landed in v0.8.0):
+#   1. Generate a fresh Fernet key:
+#        python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+#   2. Add to Railway as ENCRYPTION_KEY_V<N> (e.g. ENCRYPTION_KEY_V2). Restart api.
+#   3. POST /admin-api/keys/rotate {"from_version": 1, "to_version": 2} as CEO.
+#   4. Poll GET /admin-api/keys/rotation-status until the old version reports 0.
+#   5. On the next deploy, remove the old ENCRYPTION_KEY env var.
+#
+# The point of this layer is *not* to rotate keys today — it is to make rotation
+# possible at all, so that a future leak of ENCRYPTION_KEY does not mean every
+# stored secret is permanently exposed.
+
+KEY_VERSIONS: dict[int, "object"] = {}  # int → Fernet
+
+# Set to True by the rotation worker so call sites can choose to retry on
+# transient "unknown version" errors without paging on-call. Read-only outside
+# of the worker.
+ROTATION_IN_PROGRESS: bool = False
+
+
+def load_key_versions() -> None:
+    """Populate KEY_VERSIONS from env. Idempotent — safe to call repeatedly.
+
+    Version 1 is the legacy ENCRYPTION_KEY env var (no V1 suffix, for
+    backward compatibility with v0.7.x and earlier). Versions 2+ are loaded
+    from ENCRYPTION_KEY_V2, ENCRYPTION_KEY_V3, ... up to V9.
+    """
     from cryptography.fernet import Fernet
-    raw = os.environ.get("ENCRYPTION_KEY", "")
-    if not raw:
-        raise ValueError("ENCRYPTION_KEY not set")
-    try:
-        return Fernet(raw.encode())
-    except Exception:
+
+    if KEY_VERSIONS:
+        return
+
+    raw_v1 = os.environ.get("ENCRYPTION_KEY", "")
+    if raw_v1:
+        try:
+            KEY_VERSIONS[1] = Fernet(raw_v1.encode())
+        except Exception:
+            raise ValueError(
+                "ENCRYPTION_KEY (v1) is not a valid Fernet key. "
+                "Generate one with: python3 -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            )
+
+    for v in range(2, 10):
+        raw = os.environ.get(f"ENCRYPTION_KEY_V{v}", "")
+        if not raw:
+            continue
+        try:
+            KEY_VERSIONS[v] = Fernet(raw.encode())
+        except Exception:
+            raise ValueError(f"ENCRYPTION_KEY_V{v} is not a valid Fernet key.")
+
+
+def encrypt_api_key(raw: str, version: int = 1) -> tuple[str, int]:
+    """Encrypt with key version. Returns (ciphertext, version_used).
+
+    Callers should persist BOTH the ciphertext AND the version, then pass
+    the stored version when decrypting. This decouples the on-disk encoding
+    from any single in-memory key, enabling rotation without data loss.
+    """
+    load_key_versions()
+    f = KEY_VERSIONS.get(version)
+    if f is None:
+        raise ValueError(f"Unknown encryption key version: {version}")
+    return f.encrypt(raw.encode()).decode(), version
+
+
+def decrypt_api_key(ct: str, version: int) -> str:
+    """Decrypt with the version that was used to encrypt this row.
+
+    Raises ValueError if the version is unknown — e.g. the env var was
+    removed before rotation was complete. The rotation worker must finish
+    re-encrypting all rows before the old key can be safely retired.
+    """
+    load_key_versions()
+    f = KEY_VERSIONS.get(version)
+    if f is None:
         raise ValueError(
-            "ENCRYPTION_KEY is not a valid Fernet key. "
-            "Generate one with: python3 -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            f"Unknown encryption key version: {version}. The env var for this "
+            "version may have been removed before rotation completed."
         )
+    return f.decrypt(ct.encode()).decode()
+
+
+def get_fernet():
+    """Deprecated: returns the v1 Fernet for backward compatibility.
+
+    New code should call encrypt_api_key / decrypt_api_key and persist the
+    key_version column alongside the ciphertext. This shim keeps existing
+    call sites working without forcing a single mega-refactor.
+    """
+    load_key_versions()
+    f = KEY_VERSIONS.get(1)
+    if f is None:
+        raise ValueError("ENCRYPTION_KEY not set")
+    return f
 
 
 _JWKS_URL = "https://oafqjvdvamcygiqbnoby.supabase.co/auth/v1/.well-known/jwks.json"
