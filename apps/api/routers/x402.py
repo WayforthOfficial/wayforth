@@ -6,6 +6,7 @@ import logging
 import os
 import time as _time
 
+import asyncpg
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -343,6 +344,28 @@ async def x402_execute(request):
                 "message": "Make more calls to increase your agent tier and rate limits.",
             })
 
+    # v0.8.0 Item 1: durable replay protection. Redis NX above is a 5-min fast
+    # path; this INSERT is the system of record. UNIQUE(payment_hash) on
+    # x402_settlements rejects any later replay even after Redis TTL expires,
+    # and serialises concurrent identical requests across multiple workers.
+    # Burned hashes are forever — a settled X-PAYMENT cannot be reused.
+    try:
+        from main import app as _app
+        async with _app.state.pool.acquire() as _conn:
+            await _conn.execute(
+                """INSERT INTO x402_settlements
+                   (payment_hash, amount, service_slug, user_id)
+                   VALUES ($1, $2, $3, NULL)""",
+                _ph_hash,
+                float(price_str),
+                service_slug,
+            )
+    except asyncpg.UniqueViolationError:
+        return JSONResponse(status_code=400, content={
+            "error": "replay_rejected",
+            "message": "This payment has already been settled. Each payment header can only be used once.",
+        })
+
     # Execute service
     adapter = ADAPTERS[service_slug]
     result = None
@@ -569,6 +592,26 @@ async def x402_search(
         payer_address = verify.get("from_address")
     except asyncio.TimeoutError:
         logger.warning("x402/search payment verification timeout — accepting optimistically")
+
+    # v0.8.0 Item 1: durable replay protection via x402_settlements.UNIQUE(payment_hash).
+    # service_slug sentinel "_x402_search" distinguishes search settlements from per-service ones.
+    _search_ph_hash = _hs.sha256(payment_header.encode()).hexdigest()
+    try:
+        from main import app as _app_replay
+        async with _app_replay.state.pool.acquire() as _replay_conn:
+            await _replay_conn.execute(
+                """INSERT INTO x402_settlements
+                   (payment_hash, amount, service_slug, user_id)
+                   VALUES ($1, $2, $3, NULL)""",
+                _search_ph_hash,
+                float(_X402_SEARCH_PRICE),
+                "_x402_search",
+            )
+    except asyncpg.UniqueViolationError:
+        return JSONResponse(status_code=400, content={
+            "error": "replay_rejected",
+            "message": "This payment has already been settled. Each payment header can only be used once.",
+        })
 
     # Execute search
     from main import app as _app
