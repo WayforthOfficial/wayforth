@@ -2,9 +2,9 @@
 
 **One tool call. Any API. No setup.**
 
-[![Version](https://img.shields.io/badge/version-0.7.7-4F46E5)](https://gateway.wayforth.io/docs)
+[![Version](https://img.shields.io/badge/version-0.8.0_Gravity-4F46E5)](https://gateway.wayforth.io/docs)
 [![License](https://img.shields.io/badge/license-BSL_1.1-64748B)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-186_passing-10B981)](https://github.com/WayforthOfficial/wayforth)
+[![Tests](https://img.shields.io/badge/tests-190%2B_passing-10B981)](https://github.com/WayforthOfficial/wayforth)
 
 ---
 
@@ -67,29 +67,23 @@ Full API reference: [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
 
 ## Managed Services
 
-18 services available with zero API key setup. Wayforth holds the credentials — you call the tool.
+13 managed services available with zero API key setup. Wayforth holds the credentials — you call the tool.
 
 | Service | Category |
 |---------|----------|
 | Groq | LLM inference |
 | Together AI | LLM inference |
-| Mistral | LLM inference |
-| Gemini | LLM inference |
-| Perplexity Sonar | Search + citations |
-| Serper | Web search |
-| Brave Search | Web search |
-| Tavily | Web search |
-| NewsAPI | News search |
 | DeepL | Translation |
-| AssemblyAI | Speech-to-text |
-| Stability Core | Image generation |
-| Stability Ultra | Image generation |
-| ElevenLabs | Text to speech |
-| Resend | Email |
+| Serper | Web search |
+| Tavily | Web search |
+| Brave | Web search |
 | OpenWeather | Weather data |
-| Jina AI Reader | Content extraction |
-| Firecrawl | Web scraping |
+| NewsAPI | News search |
 | Alpha Vantage | Financial data |
+| Jina AI | Content extraction |
+| AssemblyAI | Speech-to-text |
+| Stability AI | Image generation |
+| Resend | Email |
 
 ---
 
@@ -134,7 +128,7 @@ Three ways to pay for API calls through Wayforth:
 | USDC | Base blockchain | Direct crypto deposits |
 | x402 | HTTP 402 protocol | Per-call micropayments |
 
-**x402** is the open HTTP-402 micropayment standard — agents pay per call with no subscription or balance required. Non-custodial escrow pays providers on confirmed execution. x402 mainnet deployment follows Stripe live mode launch in v0.8.0.
+**x402** is the open HTTP-402 micropayment standard — agents pay per call with no subscription or balance required. Non-custodial escrow pays providers on confirmed execution.
 
 ---
 
@@ -198,12 +192,17 @@ Full spec: [gateway.wayforth.io/wayforthql-spec](https://gateway.wayforth.io/way
 
 ## Development Status
 
-**v0.7.7 — MCP package fix**
+**v0.8.0 "Gravity" — current release**
 
-- 186 tests passing
-- Security: professional penetration test completed, all findings resolved
-- BYOK: bring your own API key for any indexed service (AES-128 encrypted at rest)
-- MFA: TOTP-based authentication available
+- 190+ tests passing, zero failures
+- 99.97% uptime
+- **LLM gateway** — `POST /v1/chat/completions` OpenAI-compatible endpoint with Groq → Together AI → Mistral failover and streaming (new in v0.8.0)
+- **Tier 1 input caps** — DeepL 2,000 chars, AssemblyAI ~10 min, Stability AI 1 image per call
+- **API key encryption versioning** — versioned Fernet keys, zero-downtime rotation
+- **Provider email verification** — required before service submission
+- **Admin audit log** — append-only, trigger-enforced
+- **BYOK** — bring your own API key for any indexed service (AES-256-GCM encrypted at rest)
+- **MFA** — TOTP-based authentication available
 
 Pricing: [wayforth.io/pricing](https://wayforth.io/pricing)
 
@@ -213,7 +212,7 @@ Pricing: [wayforth.io/pricing](https://wayforth.io/pricing)
 
 - **Quickstart:** [gateway.wayforth.io/quickstart](https://gateway.wayforth.io/quickstart)
 - **API Reference:** [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
-- **Whitepaper:** [wayforth.io/wayforth-whitepaper-v3.pdf](https://wayforth.io/wayforth-whitepaper-v3.pdf)
+- **Whitepaper:** [wayforth.io/Wayforth_Whitepaper_v6.7.pdf](https://wayforth.io/Wayforth_Whitepaper_v6.7.pdf)
 - **Dashboard:** [wayforth.io/dashboard](https://wayforth.io/dashboard)
 - **For Providers:** [wayforth.io/for-providers](https://wayforth.io/for-providers)
 - **PyPI (MCP):** [pypi.org/project/wayforth-mcp](https://pypi.org/project/wayforth-mcp/)
