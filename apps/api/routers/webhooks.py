@@ -57,10 +57,105 @@ def _log_safe_url(url: str) -> str:
         return "<unparseable>"
 
 
+async def _enqueue_wri_alert(
+    pool, alert, entry, fired_at, fired_at_iso
+) -> bool:
+    """v0.8.0 Item 5: build payload, validate URL, enqueue into
+    webhook_deliveries with kind='wri_alert'. The generic _webhook_retry_loop
+    handles HMAC signing + POST + retry. Returns True if enqueued.
+
+    Updates wri_alerts.last_fired_at + fired_count at enqueue time so the
+    24h cooldown is honoured immediately (a slow worker should not let the
+    same alert be re-enqueued before it fires).
+    """
+    old_wri = entry.get("old_wri")
+    new_wri = entry.get("new_wri")
+    total_signals = entry.get("total_signals", 0)
+    svc_slug = entry.get("service", "")
+    svc_category = entry.get("category") or ""
+    pay_rate = entry.get("payment_rate", 0)
+    threshold = float(alert["threshold_score"])
+
+    svc_name = SERVICE_DISPLAY_NAMES.get(svc_slug, svc_slug)
+    is_managed = svc_slug in SERVICE_CONFIGS
+    is_new = old_wri is None
+
+    if is_new:
+        msg = (f"A new service ({svc_name}) just entered WayforthRank above your "
+               f"threshold of {threshold}. Current score: {round(new_wri, 1)} "
+               f"({total_signals} signals, {pay_rate}% payment conversion).")
+    else:
+        msg = (f"{svc_name} crossed your WRI alert threshold of {threshold}. "
+               f"Current score: {round(new_wri, 1)} "
+               f"({total_signals} signals, {pay_rate}% payment conversion).")
+
+    payload = {
+        "event": "wri.threshold_crossed",
+        "service": {
+            "slug": svc_slug,
+            "name": svc_name,
+            "category": svc_category,
+            "old_wri": round(old_wri, 2) if old_wri is not None else None,
+            "new_wri": round(new_wri, 2),
+            "total_signals": total_signals,
+            "payment_rate": pay_rate,
+            "managed": is_managed,
+            "zero_setup": is_managed,
+        },
+        "alert": {
+            "id": str(alert["id"]),
+            "threshold_score": threshold,
+            "category": alert["category"],
+        },
+        "fired_at": fired_at_iso,
+        "message": msg,
+    }
+    body = json_lib.dumps(payload)
+
+    if not alert["hmac_secret"]:
+        logger.error(
+            "wri_alert missing hmac_secret alert=%s — skipping enqueue; recreate the alert",
+            alert["id"],
+        )
+        return False
+
+    try:
+        validate_external_url(alert["notify_url"], field_name="notify_url")
+    except Exception as _vexc:
+        logger.warning("wri_alert refused alert=%s url=%s: %s",
+                       alert["id"], _log_safe_url(alert["notify_url"]), _vexc)
+        return False
+
+    async with pool.acquire() as db:
+        await db.execute("""
+            UPDATE wri_alerts
+            SET last_fired_at = $1, fired_count = fired_count + 1
+            WHERE id = $2
+        """, fired_at, alert["id"])
+        await db.execute("""
+            INSERT INTO webhook_deliveries
+                (kind, webhook_id, source_id, event, payload,
+                 notify_url, hmac_secret, status, next_retry_at, attempt)
+            VALUES ('wri_alert', NULL, $1, 'wri.threshold_crossed', $2,
+                    $3, $4, 'pending', NOW(), 1)
+        """, alert["id"], body, alert["notify_url"], alert["hmac_secret"])
+
+    logger.info(
+        "wri_alert enqueued alert=%s service=%s new_wri=%.1f → %s",
+        alert["id"], svc_slug, new_wri, _log_safe_url(alert["notify_url"]),
+    )
+    return True
+
+
 async def _deliver_wri_alert(
     pool, alert, entry, fired_at, fired_at_iso, timestamp
 ) -> bool:
-    """Build payload, sign, POST, record. Returns True on 2xx."""
+    """Build payload, sign, POST, record. Returns True on 2xx.
+
+    DEPRECATED in v0.8.0 — kept for compatibility with any direct callers /
+    tests that exercise the synchronous-delivery path. New code should call
+    _enqueue_wri_alert so failures get retried by _webhook_retry_loop.
+    """
     old_wri = entry.get("old_wri")
     new_wri = entry.get("new_wri")
     total_signals = entry.get("total_signals", 0)
@@ -226,8 +321,12 @@ async def _fire_wri_alerts(pool, scored: list[dict]) -> int:
     if not matched:
         return 0
 
+    # v0.8.0 Item 5: enqueue rather than deliver. The generic webhook retry
+    # worker picks these up within ~60s and handles HMAC + POST + retry +
+    # exponential backoff. A single failed network round-trip no longer drops
+    # the alert.
     results = await asyncio.gather(
-        *[_deliver_wri_alert(pool, alert, entry, fired_at, fired_at_iso, timestamp)
+        *[_enqueue_wri_alert(pool, alert, entry, fired_at, fired_at_iso)
           for (alert, entry) in matched],
         return_exceptions=True,
     )

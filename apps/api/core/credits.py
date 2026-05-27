@@ -530,6 +530,12 @@ async def _webhook_retry_loop() -> None:
 
     Picks up deliveries where next_retry_at <= now, retries up to 5 total attempts,
     then marks the delivery dead.
+
+    v0.8.0 Item 5: rows now carry a `kind` column. For kind='generic' the JOIN
+    against provider_webhooks resolves webhook_url + secret_token (existing
+    path). For kind='wri_alert' the row carries notify_url + hmac_secret
+    directly, so a deactivated WRI alert doesn't strand its in-flight
+    deliveries.
     """
     import hmac as _hmac
     import time as _time
@@ -542,9 +548,12 @@ async def _webhook_retry_loop() -> None:
                 async with pool.acquire() as conn:
                     due = await conn.fetch("""
                         SELECT wd.id, wd.webhook_id, wd.event, wd.payload,
-                               wd.attempt, pw.webhook_url, pw.secret_token, pw.contact_email
+                               wd.attempt, wd.kind, wd.notify_url, wd.hmac_secret,
+                               wd.source_id,
+                               pw.webhook_url, pw.secret_token, pw.contact_email
                         FROM webhook_deliveries wd
-                        JOIN provider_webhooks pw ON pw.id = wd.webhook_id AND pw.active = true
+                        LEFT JOIN provider_webhooks pw
+                               ON pw.id = wd.webhook_id AND pw.active = true
                         WHERE wd.status = 'pending'
                           AND wd.next_retry_at IS NOT NULL
                           AND wd.next_retry_at <= NOW()
@@ -554,21 +563,41 @@ async def _webhook_retry_loop() -> None:
                 if due:
                     async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
                         for row in due:
+                            # Resolve destination + secret by kind. Generic rows
+                            # use the LEFT-joined provider_webhooks values; WRI
+                            # alert rows carry their own notify_url and hmac_secret.
+                            row_kind = row["kind"] or "generic"
+                            if row_kind == "wri_alert":
+                                target_url = row["notify_url"]
+                                secret = row["hmac_secret"]
+                                contact_email = None
+                            else:
+                                # kind='generic' requires the LEFT JOIN to have
+                                # resolved (i.e. the webhook is still active).
+                                if not row["webhook_url"]:
+                                    # provider_webhooks row missing or inactive
+                                    # — skip; the original deactivation already
+                                    # logged a reason.
+                                    continue
+                                target_url = row["webhook_url"]
+                                secret = row["secret_token"]
+                                contact_email = row.get("contact_email")
+
                             # Re-validate destination on every retry — see
                             # _dispatch_webhooks above for rationale.
                             try:
                                 from core.url_validation import validate_external_url
-                                validate_external_url(row["webhook_url"], field_name="url")
+                                validate_external_url(target_url, field_name="url")
                             except Exception as _vexc:
                                 logger.warning(
-                                    "webhook retry refused: url=%s — %s",
-                                    row["webhook_url"], _vexc,
+                                    "webhook retry refused: kind=%s url=%s — %s",
+                                    row_kind, target_url, _vexc,
                                 )
                                 continue
                             ts = str(int(_time.time()))
                             body = row["payload"]
                             sig = _hmac.new(
-                                row["secret_token"].encode(),
+                                (secret or "").encode(),
                                 f"{ts}.{body}".encode(),
                                 hashlib.sha256,
                             ).hexdigest()
@@ -577,7 +606,7 @@ async def _webhook_retry_loop() -> None:
                             error: str | None = None
                             try:
                                 resp = await client.post(
-                                    row["webhook_url"],
+                                    target_url,
                                     content=body,
                                     headers={
                                         "Content-Type": "application/json",
@@ -600,11 +629,23 @@ async def _webhook_retry_loop() -> None:
                                         "WHERE id=$3::uuid",
                                         new_attempt, status_code, str(row["id"]),
                                     )
-                                    await upd.execute(
-                                        "UPDATE provider_webhooks SET last_fired_at=NOW() "
-                                        "WHERE id=$1::uuid",
-                                        str(row["webhook_id"]),
-                                    )
+                                    # Bookkeeping per kind. Generic webhooks bump
+                                    # provider_webhooks.last_fired_at; WRI alerts
+                                    # log to wri_alert_logs.
+                                    if row_kind == "wri_alert":
+                                        await upd.execute(
+                                            "INSERT INTO wri_alert_logs "
+                                            "(alert_id, service_slug, old_wri, new_wri, "
+                                            " fired_at, response_status, success) "
+                                            "VALUES ($1, '', NULL, NULL, NOW(), $2, true)",
+                                            row["source_id"], status_code,
+                                        )
+                                    elif row["webhook_id"]:
+                                        await upd.execute(
+                                            "UPDATE provider_webhooks SET last_fired_at=NOW() "
+                                            "WHERE id=$1::uuid",
+                                            str(row["webhook_id"]),
+                                        )
                                 elif new_attempt > 5:
                                     await upd.execute(
                                         "UPDATE webhook_deliveries SET status='dead', "
@@ -612,16 +653,29 @@ async def _webhook_retry_loop() -> None:
                                         "response_status=$2, error=$3 WHERE id=$4::uuid",
                                         new_attempt, status_code, error, str(row["id"]),
                                     )
-                                    await upd.execute(
-                                        "UPDATE provider_webhooks SET suspended_at=NOW() "
-                                        "WHERE id=$1::uuid",
-                                        str(row["webhook_id"]),
-                                    )
-                                    asyncio.create_task(_send_webhook_suspension_email(
-                                        row.get("contact_email") or "",
-                                        str(row["webhook_url"]),
-                                        str(row["webhook_id"]),
-                                    ))
+                                    if row_kind == "wri_alert":
+                                        await upd.execute(
+                                            "INSERT INTO wri_alert_logs "
+                                            "(alert_id, service_slug, old_wri, new_wri, "
+                                            " fired_at, response_status, success) "
+                                            "VALUES ($1, '', NULL, NULL, NOW(), $2, false)",
+                                            row["source_id"], status_code,
+                                        )
+                                        # No suspension email — WRI alerts have
+                                        # no per-user contact stored in
+                                        # webhook_deliveries; the alert owner can
+                                        # see the failure via the wri_alert_logs.
+                                    elif row["webhook_id"]:
+                                        await upd.execute(
+                                            "UPDATE provider_webhooks SET suspended_at=NOW() "
+                                            "WHERE id=$1::uuid",
+                                            str(row["webhook_id"]),
+                                        )
+                                        asyncio.create_task(_send_webhook_suspension_email(
+                                            row.get("contact_email") or "",
+                                            str(row.get("webhook_url") or ""),
+                                            str(row["webhook_id"]),
+                                        ))
                                 else:
                                     delay = _RETRY_DELAYS_SEC[min(new_attempt - 2, len(_RETRY_DELAYS_SEC) - 1)]
                                     next_retry = datetime.now(timezone.utc) + timedelta(seconds=delay)
