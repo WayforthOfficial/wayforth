@@ -701,6 +701,58 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_mfa_challenges_token_hash ON mfa_challenges (token_hash)
             """)
+            # v0.8.0 Item 4 — append-only admin audit log.
+            # Mirrored in infra/migrations/043_admin_audit_log.sql.
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS admin_audit_log (
+                    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    admin_id         UUID NOT NULL REFERENCES admin_users(id),
+                    admin_email      TEXT NOT NULL,
+                    action           TEXT NOT NULL,
+                    target_user_id   UUID REFERENCES users(id),
+                    target_resource  TEXT,
+                    payload          JSONB,
+                    ip_address       TEXT,
+                    user_agent       TEXT,
+                    created_at       TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS admin_audit_log_created_idx
+                    ON admin_audit_log(created_at DESC)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS admin_audit_log_admin_idx
+                    ON admin_audit_log(admin_id, created_at DESC)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS admin_audit_log_action_idx
+                    ON admin_audit_log(action, created_at DESC)
+            """)
+            await _mconn.execute("""
+                CREATE OR REPLACE FUNCTION admin_audit_log_append_only()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    RAISE EXCEPTION 'admin_audit_log is append-only';
+                END;
+                $$ LANGUAGE plpgsql
+            """)
+            await _mconn.execute("""
+                DROP TRIGGER IF EXISTS admin_audit_log_no_update ON admin_audit_log
+            """)
+            await _mconn.execute("""
+                CREATE TRIGGER admin_audit_log_no_update
+                    BEFORE UPDATE ON admin_audit_log
+                    FOR EACH ROW EXECUTE FUNCTION admin_audit_log_append_only()
+            """)
+            await _mconn.execute("""
+                DROP TRIGGER IF EXISTS admin_audit_log_no_delete ON admin_audit_log
+            """)
+            await _mconn.execute("""
+                CREATE TRIGGER admin_audit_log_no_delete
+                    BEFORE DELETE ON admin_audit_log
+                    FOR EACH ROW EXECUTE FUNCTION admin_audit_log_append_only()
+            """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expires_at ON mfa_challenges (expires_at)
             """)
