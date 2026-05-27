@@ -1323,7 +1323,7 @@ async def check_auth(request: Request) -> dict:
 # ── Include routers ───────────────────────────────────────────────────────────
 
 from routers import (
-    search, execute, billing, webhooks, provider, admin, x402, auth, agent
+    search, execute, billing, webhooks, provider, admin, x402, auth, agent, llm
 )
 from routers.org import router as org_router
 from routers.mfa import router as mfa_router
@@ -1339,6 +1339,7 @@ app.include_router(auth.router)
 app.include_router(agent.router)
 app.include_router(org_router)
 app.include_router(mfa_router)
+app.include_router(llm.router)
 
 
 # ── OpenAPI customisation (security scheme + description) ─────────────────────
