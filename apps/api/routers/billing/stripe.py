@@ -171,20 +171,16 @@ async def submit_service(request: Request, req: SubmitRequest, db=Depends(get_db
                 send_submission_confirmation,
                 req.contact_email, req.name, str(service_id), req.endpoint_url,
             ))
-        import asyncio as _asyncio
-        await _asyncio.sleep(3)
-        async with app.state.pool.acquire() as conn2:
-            service = await conn2.fetchrow("""
-                SELECT coverage_tier, last_tested_at, consecutive_failures
-                FROM services WHERE id = $1::uuid
-            """, str(service_id))
-        tier = service["coverage_tier"] if service else 0
+        # P1 (v0.7.8): no longer sleep(3) and re-fetch tier. The probe is
+        # backgrounded; the service was just inserted with coverage_tier=0
+        # and the probe will update it asynchronously. Callers poll
+        # /services/{id} or subscribe to webhooks to learn the eventual tier.
         return {
             "status": "submitted",
             "service_id": str(service_id),
             "name": req.name,
-            "initial_tier": tier,
-            "message": f"Service submitted and probed. Current tier: {tier}. Tier 2 requires 90%+ uptime over 7 days.",
+            "initial_tier": 0,
+            "message": "Service submitted and is being probed in the background. Poll /services/{id} for tier updates. Tier 2 requires 90%+ uptime over 7 days.",
             "leaderboard_url": "https://wayforth.io/leaderboard",
             "tier3_url": "https://wayforth.io/tier3",
         }
@@ -497,29 +493,54 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
     except Exception:
         raise HTTPException(status_code=400)
 
-    # Idempotency gate: Stripe explicitly says callers must tolerate duplicate
-    # event delivery. We INSERT the event id and short-circuit if it's already
-    # been processed. Previously the renewal handler (`invoice.payment_succeeded`)
-    # had no dedup at all, so a single Stripe retry would double-credit the user.
     event_id = event.get("id") or ""
     event_type = event.get("type") or ""
-    if event_id:
-        try:
+
+    # S1/S4 (v0.7.8): dedup + credit grant must succeed-or-fail atomically.
+    # The outer transaction binds them: a crash mid-processing rolls back the
+    # dedup row, freeing Stripe's retry to reprocess cleanly. The outer
+    # try/except returns 503 on any unhandled failure — Stripe will not retry
+    # a 200, so we MUST not ack until the write commits.
+    try:
+        return await _process_stripe_event(db, event, event_id, event_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "stripe_webhook processing failed event=%s type=%s: %s",
+            event_id, event_type, e, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "processing_failed", "message": "retry"},
+        )
+
+
+async def _process_stripe_event(db, event, event_id: str, event_type: str):
+    async with db.transaction():
+        if event_id:
             inserted = await db.fetchval(
                 "INSERT INTO stripe_events (event_id, event_type) VALUES ($1, $2) "
                 "ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
                 event_id, event_type,
             )
             if inserted is None:
-                logger.info("stripe webhook duplicate event=%s type=%s — skipping", event_id, event_type)
+                logger.info(
+                    "stripe webhook duplicate event=%s type=%s — skipping",
+                    event_id, event_type,
+                )
                 return {"status": "duplicate_event"}
-        except Exception as _e:
-            # Fail closed: if we can't dedup, we'd rather refuse than risk
-            # double-crediting. Stripe will retry, and the next attempt either
-            # succeeds (DB healed) or keeps returning 503.
-            logger.error("stripe_events dedup insert failed: %s", _e)
-            raise HTTPException(status_code=503, detail="event_dedup_unavailable")
 
+        return await _dispatch_stripe_event(db, event)
+
+
+async def _dispatch_stripe_event(db, event):
+    # L4 (v0.7.8): receipt log for every event so forensic trace exists for
+    # "I paid but got no credits" support tickets.
+    logger.info(
+        "stripe_event received id=%s type=%s",
+        event.get("id"), event.get("type"),
+    )
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         meta = session.get("metadata", {})
@@ -591,6 +612,10 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
             """, sub_id, user_id)
 
         asyncio.create_task(_maybe_grant_founding_bonus(db, user_id))
+        logger.info(
+            "stripe_checkout completed session=%s user=%s package=%s credits_added=%d new_balance=%d",
+            session_id, user_id, package, credits, new_balance,
+        )
         return {"status": "credited", "credits_added": credits, "new_balance": new_balance}
 
     elif event["type"] == "invoice.payment_succeeded":
@@ -708,6 +733,10 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
             except Exception as _email_err:
                 logger.warning("subscription_confirmed email error: %s", _email_err)
 
+        logger.info(
+            "stripe_renewal user=%s sub=%s package=%s credits_added=%d",
+            user_id, sub_id, package, credits,
+        )
         return {"status": "renewed", "credits_added": credits}
 
     elif event["type"] == "customer.subscription.deleted":

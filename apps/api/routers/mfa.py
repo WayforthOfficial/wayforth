@@ -315,7 +315,7 @@ async def mfa_disable(request: Request, body: MFADisableBody, db=Depends(get_db)
                 })
             token = auth_header.removeprefix("Bearer ").strip()
             try:
-                claims = verify_supabase_jwt(token)
+                claims = await verify_supabase_jwt(token)
                 sub = (claims.get("sub") or "").strip()
                 if not sub:
                     raise ValueError("no sub")

@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.7.7"
+VERSION = "0.7.8"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -38,8 +38,13 @@ if SENTRY_DSN:
         environment=ENVIRONMENT,
     )
 
+# L10 (v0.7.8): LOG_LEVEL env override. Defaults to INFO but on-call can flip
+# to DEBUG without a redeploy. Invalid values fall back to INFO so a typo
+# doesn't silence the app.
+_LOG_LEVEL_NAME = os.environ.get("LOG_LEVEL", "INFO").upper()
+_LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_LOG_LEVEL,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("wayforth")
@@ -215,23 +220,28 @@ async def lifespan(app: FastAPI):
     check_service_margins()
     logger.info(f"Wayforth API starting, environment={ENVIRONMENT}")
     try:
-        await asyncio.to_thread(get_jwks)
+        await get_jwks()  # S10 (v0.7.8): get_jwks is now async/httpx
         logger.info("JWKS cache pre-warmed (%d keys)", len(_jwks_cache["keys"]))
     except Exception as _jwks_err:
         logger.warning("JWKS pre-warm failed (will retry on first request): %s", _jwks_err)
-    print("STARTUP: running check_db()", flush=True)
+    # L1 (v0.7.8): startup messages go through the logger so they pick up
+    # the configured level/format and land in any aggregation we add later.
+    logger.info("STARTUP: running check_db()")
     ok = check_db()
     if not ok:
-        logger.warning("DB connection check failed — starting anyway")
-        print(f"STARTUP: check_db failed, _DB_URL prefix={_DB_URL[:20]!r}", flush=True)
+        logger.warning("STARTUP: check_db failed, _DB_URL prefix=%r", _DB_URL[:20])
     app.state.db_ok = ok
     app.state.anon_searches = {}
-    print(f"STARTUP: creating asyncpg pool url_prefix={_ASYNCPG_URL[:20]!r}", flush=True)
+    logger.info("STARTUP: creating asyncpg pool url_prefix=%r", _ASYNCPG_URL[:20])
     try:
         app.state.pool = await asyncpg.create_pool(
             _ASYNCPG_URL,
-            min_size=2,
-            max_size=20,
+            # P6 (v0.7.8): bumped from 20 to 40 for production-grade throughput.
+            # At ~200 req/s with ~50ms DB latency, 20 saturates quickly. 40
+            # gives 2-3× headroom. Configurable via env so we can tune per
+            # deploy without a code change.
+            min_size=int(os.environ.get("WAYFORTH_DB_POOL_MIN", "2")),
+            max_size=int(os.environ.get("WAYFORTH_DB_POOL_MAX", "40")),
             command_timeout=30.0,
             # Recycle connections idle >300s so Railway never reaches its
             # ~10-minute idle-disconnect before we do (300s = 5-min safety margin).
@@ -331,6 +341,15 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 ALTER TABLE wri_alerts
                     ADD COLUMN IF NOT EXISTS hmac_secret TEXT
+            """)
+            # S15 (v0.7.8): backfill any pre-hmac_secret rows with fresh 32-byte
+            # secrets so the api_key_id fallback can be removed from the
+            # delivery path. Idempotent — only touches NULL or UUID-shaped rows.
+            await _mconn.execute("""
+                UPDATE wri_alerts
+                SET hmac_secret = encode(gen_random_bytes(32), 'hex')
+                WHERE hmac_secret IS NULL
+                   OR hmac_secret = api_key_id::text
             """)
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS wri_alert_logs (
@@ -440,6 +459,32 @@ async def lifespan(app: FastAPI):
             """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS provider_services_slug_idx ON provider_services(service_slug)
+            """)
+            # S16 (v0.7.8): only one provider may own a given service_slug
+            # globally. We attempt the constraint conditionally — if existing
+            # rows have dup slugs (legacy data) we log and skip so startup
+            # doesn't crash. Operators reconcile dups via admin tooling and
+            # restart; the constraint then takes hold.
+            await _mconn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'provider_services_slug_unique'
+                    ) THEN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM provider_services
+                            GROUP BY service_slug
+                            HAVING COUNT(*) > 1
+                        ) THEN
+                            ALTER TABLE provider_services
+                              ADD CONSTRAINT provider_services_slug_unique
+                              UNIQUE (service_slug);
+                        ELSE
+                            RAISE WARNING 'provider_services has duplicate service_slug rows; UNIQUE constraint NOT added. Reconcile and restart to enforce.';
+                        END IF;
+                    END IF;
+                END $$;
             """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS provider_sessions_token_idx ON provider_sessions(token)
@@ -639,15 +684,91 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expires_at ON mfa_challenges (expires_at)
             """)
+            # P3/P4/P5 (v0.7.8): three hot-path composite indexes.
+            #  - api_keys(key_hash, active): every authenticated request hits
+            #    this exact WHERE clause; idx_api_keys_hash_active short-circuits
+            #    the UPDATE...RETURNING used by check_auth.
+            #  - search_analytics(user_id, created_at DESC): /account/analytics
+            #    and history queries filter by user_id with a recent-time bound;
+            #    the existing single-column index on created_at can't help.
+            #  - credit_transactions(user_id, type, created_at DESC): monthly
+            #    spend aggregates filter by user_id+type and order by created_at.
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_api_keys_hash_active
+                  ON api_keys(key_hash, active)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_search_analytics_user_created
+                  ON search_analytics(user_id, created_at DESC)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_credit_tx_user_type_created
+                  ON credit_transactions(user_id, type, created_at DESC)
+            """)
+            # E8 (v0.7.8): idempotency key for refunds. Callers that have a
+            # stable per-failure key pass refund_idempotency_key to _do_refund;
+            # the partial unique index makes a duplicate insert raise
+            # UniqueViolation so the caller knows the refund was already
+            # issued. Existing rows without a key remain valid.
+            await _mconn.execute("""
+                ALTER TABLE credit_transactions
+                    ADD COLUMN IF NOT EXISTS refund_uuid UUID
+            """)
+            await _mconn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_tx_refund_uuid
+                  ON credit_transactions(refund_uuid)
+                  WHERE refund_uuid IS NOT NULL
+            """)
+            # Section 9 (v0.7.8): x402 settlement dedup table. Track C (native
+            # x402 mainnet) cannot ship without this — without a UNIQUE on
+            # payment_hash a malicious payer can replay the same X-PAYMENT
+            # header and get multiple service calls settled against one
+            # on-chain payment. The /pay endpoint should INSERT a row keyed
+            # on the payment_hash inside the same transaction as the CDP
+            # transfer; a duplicate hash will raise UniqueViolation and the
+            # caller refuses to settle.
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS x402_settlements (
+                    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    payment_hash  TEXT NOT NULL,
+                    amount        NUMERIC NOT NULL,
+                    service_slug  TEXT NOT NULL,
+                    user_id       UUID REFERENCES users(id),
+                    settled_at    TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT x402_settlements_payment_hash_unique
+                        UNIQUE (payment_hash)
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS x402_settlements_user_idx
+                  ON x402_settlements(user_id, settled_at DESC)
+            """)
     except Exception as e:
-        import traceback
-        print(f"STARTUP ERROR: {type(e).__name__}: {e}", flush=True)
-        print(traceback.format_exc(), flush=True)
-        logger.error(f"DB error: {e}")
-        logger.warning(f"DB pool creation failed: {e} — /services will be unavailable")
+        logger.error("STARTUP ERROR: %s: %s", type(e).__name__, e, exc_info=True)
+        logger.critical("DB pool creation or migrations failed: %s — exiting so the orchestrator can restart cleanly", e)
         app.state.pool = None
+        # E4 (v0.7.8): fail-fast on DB unreachable. Previously the app would
+        # start with pool=None and 503 every request — Railway's health check
+        # might not flag this state, leaving users staring at a broken service.
+        # Exit so the orchestrator restarts; if the DB stays down, the
+        # restart-crash cycle is the correct visible signal.
+        import sys
+        sys.exit(1)
     else:
-        print("STARTUP: pool created and migrations complete", flush=True)
+        logger.info("STARTUP: pool created and migrations complete")
+        # P6 (v0.7.8): log the configured pool sizes so saturation is easy to
+        # spot in Railway logs.
+        try:
+            from core.db import get_pool_stats
+            _stats = get_pool_stats(app.state.pool)
+            logger.info(
+                "DB pool ready min=%s max=%s size=%s idle=%s",
+                os.environ.get("WAYFORTH_DB_POOL_MIN", "2"),
+                os.environ.get("WAYFORTH_DB_POOL_MAX", "40"),
+                _stats.get("size"), _stats.get("idle"),
+            )
+        except Exception:
+            pass
     cleanup_task = asyncio.create_task(_cleanup_anon_searches_loop(app))
     watcher_task = asyncio.create_task(_usdc_payment_watcher())
     renewal_task = asyncio.create_task(_usdc_renewal_reminder())
@@ -1011,7 +1132,11 @@ async def check_auth(request: Request) -> dict:
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
 
     if raw_key:
-        if not raw_key.startswith("wf_live_") or not (40 <= len(raw_key) <= 60):
+        # S14 (v0.7.8): tighten from 40-60 range to the two exact lengths we
+        # actually mint: 56 chars for "wf_live_" + token_hex(24), 51 chars for
+        # "wf_live_" + token_urlsafe(32). Both formats are in production; do
+        # NOT collapse to a single length without first migrating live keys.
+        if not raw_key.startswith("wf_live_") or len(raw_key) not in (51, 56):
             raise _AuthError(401, {
                 "error": "invalid_key",
                 "message": "Invalid API key format.",
@@ -1290,14 +1415,33 @@ async def security_policy_html():
 async def health(request: Request):
     from core.db import get_pool_stats
     pool = getattr(request.app.state, "pool", None)
+    # Section 6 (v0.7.8): rename catalog fields to disambiguate. The old shape
+    # had `catalog.total` filtered by `consecutive_failures < 3` while the
+    # admin dashboard separately read raw COUNT(*) — different definitions
+    # of "total" looked like contradictory numbers. New shape:
+    #   total_services   = SELECT COUNT(*) FROM services (raw, unfiltered)
+    #   healthy_services = WHERE consecutive_failures < 3 (live, reachable)
+    #   tier2_verified   = healthy + coverage_tier >= 2 (curated)
+    #   managed_services = count of in-process managed adapters
+    # Old fields `total` and `tier2` retained for one minor release as
+    # backwards-compat aliases — drop in v0.9.
+    managed = _active_managed_count()
     if pool is None:
         return {
             "status": "degraded",
             "service": "wayforth-api",
             "version": VERSION,
             "db_status": "unavailable",
-            "catalog": {"total": 0, "tier2": 0},
-            "managed_services": _active_managed_count(),
+            "catalog": {
+                "total_services": 0,
+                "healthy_services": 0,
+                "tier2_verified": 0,
+                "managed_services": managed,
+                # legacy aliases — remove in v0.9
+                "total": 0,
+                "tier2": 0,
+            },
+            "managed_services": managed,
             "pool": {},
         }
     pool_stats = get_pool_stats(pool)
@@ -1305,22 +1449,28 @@ async def health(request: Request):
         async with pool.acquire(timeout=4.0) as conn:
             await conn.fetchval("SELECT 1")
             db_status = "ok"
-            tier2 = await conn.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3") or 0
-            total = await conn.fetchval("SELECT COUNT(*) FROM services WHERE consecutive_failures < 3") or 0
-    except Exception:
+            total_services   = await conn.fetchval("SELECT COUNT(*) FROM services") or 0
+            healthy_services = await conn.fetchval("SELECT COUNT(*) FROM services WHERE consecutive_failures < 3") or 0
+            tier2_verified   = await conn.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3") or 0
+    except Exception as e:
+        logger.warning("/health catalog query failed: %s", e)
         db_status = "error"
-        tier2 = 0
-        total = 0
+        total_services = healthy_services = tier2_verified = 0
     return {
         "status": "ok" if db_status == "ok" else "degraded",
         "service": "wayforth-api",
         "version": VERSION,
         "db_status": db_status,
         "catalog": {
-            "total": total,
-            "tier2": tier2,
+            "total_services": total_services,
+            "healthy_services": healthy_services,
+            "tier2_verified": tier2_verified,
+            "managed_services": managed,
+            # legacy aliases — kept for one minor release; remove in v0.9.
+            "total": healthy_services,
+            "tier2": tier2_verified,
         },
-        "managed_services": _active_managed_count(),
+        "managed_services": managed,
         "pool": pool_stats,
     }
 

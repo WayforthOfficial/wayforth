@@ -22,7 +22,29 @@ logger = logging.getLogger("wayforth")
 
 router = APIRouter()
 
-FOUNDING_MEMBER_CUTOFF = datetime(2026, 8, 31, tzinfo=timezone.utc)
+# S21 (v0.7.8): cutoff is env-configurable so we can extend or shorten the
+# founding-member window without a redeploy. Default keeps existing behavior.
+# Format: ISO 8601 with timezone, e.g. "2026-08-31T00:00:00+00:00".
+import os as _os_for_cutoff
+
+
+def _parse_cutoff() -> datetime:
+    raw = _os_for_cutoff.environ.get("FOUNDING_MEMBER_CUTOFF", "")
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            logger.warning(
+                "Invalid FOUNDING_MEMBER_CUTOFF=%r (expected ISO 8601); using default 2026-08-31",
+                raw,
+            )
+    return datetime(2026, 8, 31, tzinfo=timezone.utc)
+
+
+FOUNDING_MEMBER_CUTOFF = _parse_cutoff()
 
 # ── Registration guards ───────────────────────────────────────────────────────
 
@@ -133,6 +155,10 @@ async def get_api_key(request: Request, db=Depends(get_db)):
             "FROM api_keys WHERE key_hash = $1", key_hash,
         )
         if not existing or not existing["active"]:
+            logger.info(
+                "auth_failure reason=invalid_api_key path=/auth/quota key_hash_prefix=%s",
+                key_hash[:12],
+            )
             raise HTTPException(status_code=401, detail="Invalid API key")
         reset_str = (
             existing["quota_reset_at"].strftime("%Y-%m-%d")
@@ -221,6 +247,10 @@ async def key_usage(request: Request, db=Depends(get_db)):
     """, key_hash)
 
     if not key:
+        logger.info(
+            "auth_failure reason=invalid_api_key path=/auth/key-usage key_hash_prefix=%s",
+            key_hash[:12],
+        )
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     quota_pct = (
@@ -264,8 +294,9 @@ async def register_user(request: Request, db=Depends(get_db)):
         })
     token = auth_header.removeprefix("Bearer ").strip()
     try:
-        claims = verify_supabase_jwt(token)
-    except Exception:
+        claims = await verify_supabase_jwt(token)
+    except Exception as e:
+        logger.info("auth_failure reason=invalid_supabase_jwt path=/auth/register err=%s", type(e).__name__)
         raise HTTPException(status_code=401, detail={"error": "invalid_supabase_token"})
 
     supabase_id = (claims.get("sub") or "").strip()
@@ -327,7 +358,8 @@ async def register_user(request: Request, db=Depends(get_db)):
     try:
         _f = get_fernet()
         encrypted_key = _f.encrypt(raw_key.encode()).decode()
-    except Exception:
+    except Exception as e:
+        logger.warning("api_key encrypt-at-rest failed (key stored unencrypted): %s", type(e).__name__)
         encrypted_key = None
 
     await db.execute("""
@@ -369,6 +401,7 @@ async def register_user(request: Request, db=Depends(get_db)):
 async def regenerate_api_key(request: Request, db=Depends(get_db)):
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
     if not raw_key:
+        logger.info("auth_failure reason=missing_api_key path=/auth/regenerate-key")
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
 
     old_hash = hashlib.sha256(raw_key.encode()).hexdigest()
@@ -378,6 +411,10 @@ async def regenerate_api_key(request: Request, db=Depends(get_db)):
     """, old_hash)
 
     if not row:
+        logger.info(
+            "auth_failure reason=invalid_api_key path=/auth/regenerate-key key_hash_prefix=%s",
+            old_hash[:12],
+        )
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
 
     new_raw = "wf_live_" + secrets.token_urlsafe(32)
@@ -385,7 +422,8 @@ async def regenerate_api_key(request: Request, db=Depends(get_db)):
     new_prefix = new_raw[:12]
     try:
         encrypted = get_fernet().encrypt(new_raw.encode()).decode()
-    except Exception:
+    except Exception as e:
+        logger.warning("api_key regenerate encrypt failed (key stored unencrypted): %s", type(e).__name__)
         encrypted = None
 
     await db.execute("""
@@ -486,8 +524,9 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
         })
 
     try:
-        claims = verify_supabase_jwt(supabase_jwt)
-    except Exception:
+        claims = await verify_supabase_jwt(supabase_jwt)
+    except Exception as e:
+        logger.info("auth_failure reason=invalid_supabase_jwt path=/auth/session err=%s", type(e).__name__)
         raise HTTPException(status_code=401, detail={"error": "invalid_supabase_jwt"})
 
     supabase_sub = (claims.get("sub") or "").strip()
@@ -567,13 +606,12 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
 @router.post("/auth/session/refresh")
 @limiter.limit("60/minute")
 async def auth_session_refresh(request: Request):
-    """Extend the session's Redis TTL and re-issue the cookie's Max-Age.
+    """Extend the session's Redis TTL and rotate the cookie token.
 
-    Called by the dashboard periodically while the user is active. The cookie
-    value does NOT rotate — only the TTL extends. See core/session.py for
-    the rationale (token rotation on refresh does not meaningfully shrink the
-    exposure window of a stolen cookie while it does multiply token-handling
-    surface).
+    S17 (v0.7.8): on every refresh the token rotates. A stolen cookie loses
+    validity at the next refresh tick rather than persisting for the full
+    TTL. The dashboard polls /auth/session/refresh while the user is active
+    so a stolen cookie has a small exposure window in practice.
     """
     from core.session import (
         get_request_session, get_request_session_token,
@@ -594,9 +632,10 @@ async def auth_session_refresh(request: Request):
         # as a fresh-login required.
         raise HTTPException(status_code=401, detail={"error": "session_expired"})
 
+    _record, new_token = refreshed
     response = JSONResponse(content={"ok": True})
     response.headers["Cache-Control"] = "no-store, no-cache"
-    set_session_cookie(response, raw_token)
+    set_session_cookie(response, new_token)
     return response
 
 
@@ -722,11 +761,12 @@ async def auth_me(request: Request, db=Depends(get_db)):
     token = auth_header.removeprefix("Bearer ").strip()
 
     try:
-        claims = verify_supabase_jwt(token)
+        claims = await verify_supabase_jwt(token)
         supabase_sub = claims.get("sub", "")
         if not supabase_sub:
             raise ValueError("no sub")
-    except Exception:
+    except Exception as e:
+        logger.info("auth_failure reason=invalid_supabase_jwt path=/auth/me-bearer err=%s", type(e).__name__)
         raise HTTPException(status_code=401, detail="Invalid token")
 
     row = await db.fetchrow("""
@@ -818,7 +858,8 @@ async def get_api_key(request: Request, db=Depends(get_db)):
             _f = get_fernet()
             api_key = _f.decrypt(row["encrypted_key"].encode()).decode()
             encrypted = True
-        except Exception:
+        except Exception as e:
+            logger.error("api_key decrypt failed (encryption key rotated or corrupt?): %s", type(e).__name__)
             raise HTTPException(status_code=500, detail="Key decryption failed")
     else:
         # Legacy row: only the key_prefix was retained; the raw key was issued

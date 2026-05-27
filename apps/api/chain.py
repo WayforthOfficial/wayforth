@@ -1,4 +1,9 @@
+import logging
+
 from web3 import Web3
+from web3.exceptions import BadFunctionCallOutput, ContractLogicError
+
+logger = logging.getLogger("wayforth.chain")
 
 BASE_SEPOLIA_RPC = "https://sepolia.base.org"
 REGISTRY_ADDRESS = "0x55810EfB3444A693556C3f9910dbFbF2dDaC369C"
@@ -81,7 +86,10 @@ PAYMENT_INFO = {
 
 
 def get_web3():
-    return Web3(Web3.HTTPProvider(BASE_SEPOLIA_RPC))
+    # E5 (v0.7.8): 5s request timeout so a stuck RPC node can't hang a route
+    # handler indefinitely. Previously web3.py would block forever on a
+    # non-responsive provider.
+    return Web3(Web3.HTTPProvider(BASE_SEPOLIA_RPC, request_kwargs={"timeout": 5}))
 
 
 def get_registry():
@@ -141,6 +149,10 @@ def build_payment_calldata(service_id: str, service_owner: str, amount_usdc: flo
 
 
 def get_chain_stats() -> dict:
+    # E5 (v0.7.8): distinguish contract reverts (BadFunctionCallOutput,
+    # ContractLogicError) from network errors. Callers and dashboards can
+    # surface "RPC unreachable" vs "contract returned bad data" rather than
+    # a single opaque error message.
     try:
         count = get_registry().functions.serviceCount().call()
         fee_bps = get_escrow().functions.FEE_BPS().call()
@@ -153,5 +165,9 @@ def get_chain_stats() -> dict:
             "network": "base-sepolia",
             "usdc": USDC_ADDRESS,
         }
+    except (BadFunctionCallOutput, ContractLogicError) as e:
+        logger.warning("get_chain_stats contract revert: %s", e)
+        return {"error": "contract_revert", "detail": str(e)}
     except Exception as e:
-        return {"error": str(e)}
+        logger.warning("get_chain_stats RPC failure: %s: %s", type(e).__name__, e)
+        return {"error": "rpc_unreachable", "detail": str(e)}

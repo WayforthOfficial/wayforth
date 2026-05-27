@@ -36,7 +36,11 @@ def rate_limit_key(request: Request) -> str:
     Anonymous requests fall back to the trusted IP."""
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
     if raw_key:
-        return "k:" + hashlib.sha256(raw_key.encode()).hexdigest()[:16]
+        # S20 (v0.7.8): use the full sha256 digest, not [:16]. Truncating to
+        # 16 hex chars (64 bits) was a needless collision-risk concession;
+        # the full digest is the same cost and gives the standard 256-bit
+        # space.
+        return "k:" + hashlib.sha256(raw_key.encode()).hexdigest()
     return "ip:" + get_real_ip(request)
 
 

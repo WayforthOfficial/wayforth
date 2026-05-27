@@ -270,34 +270,47 @@ async def x402_execute(request):
             "message": "This payment has already been processed. Each payment header can only be used once.",
         })
 
-    # Verify payment with 5s timeout; accept optimistically on timeout
+    # E3 (v0.7.8): synchronous on-chain verification only. The old code
+    # accepted optimistically on a 5s timeout and verified asynchronously
+    # afterward — but a stuck RPC meant the service ran for free with no
+    # refund path. Bumped to 15s (typical chain reorg + propagation budget)
+    # and a timeout now returns 504. Real customers may see a transient
+    # 504 during chain congestion; that is the correct conservative behavior.
     payer_address = None
     try:
         verify_result = await asyncio.wait_for(
             _verify_x402_payment(payment_header, wayforth_wallet, price_str),
-            timeout=5.0,
+            timeout=15.0,
         )
-        if not verify_result.get("valid"):
-            received = verify_result.get("received_micro", 0)
-            received_usdc = f"${received / 1_000_000:.3f}"
-            return JSONResponse(status_code=402, content={
-                "x402Version": 1,
-                "error": f"Payment of ${price_str} USDC required, received {received_usdc} USDC. Please retry.",
-                "accepts": [{
-                    "scheme": "exact",
-                    "network": "eip155:8453",
-                    "maxAmountRequired": str(micro),
-                    "asset": USDC_BASE_ADDRESS,
-                    "payTo": wayforth_wallet,
-                    "resource": _execute_resource,
-                    "description": f"{display_name} via Wayforth — ${price_str} USDC",
-                    "maxTimeoutSeconds": 300,
-                }],
-            })
-        payer_address = verify_result.get("from_address")
     except asyncio.TimeoutError:
-        logger.warning("x402 verification timeout — accepting optimistically for service=%s", service_slug)
-        asyncio.create_task(_verify_payment_async(payment_header, service_slug))
+        logger.warning(
+            "x402 verification timeout (15s) — refusing service=%s payment_hash=%s",
+            service_slug, _ph_hash,
+        )
+        return JSONResponse(status_code=504, content={
+            "x402Version": 1,
+            "error": "Payment verification timed out. Please retry; no service was rendered and no funds were captured by Wayforth.",
+            "retry_after_seconds": 30,
+        })
+
+    if not verify_result.get("valid"):
+        received = verify_result.get("received_micro", 0)
+        received_usdc = f"${received / 1_000_000:.3f}"
+        return JSONResponse(status_code=402, content={
+            "x402Version": 1,
+            "error": f"Payment of ${price_str} USDC required, received {received_usdc} USDC. Please retry.",
+            "accepts": [{
+                "scheme": "exact",
+                "network": "eip155:8453",
+                "maxAmountRequired": str(micro),
+                "asset": USDC_BASE_ADDRESS,
+                "payTo": wayforth_wallet,
+                "resource": _execute_resource,
+                "description": f"{display_name} via Wayforth — ${price_str} USDC",
+                "maxTimeoutSeconds": 300,
+            }],
+        })
+    payer_address = verify_result.get("from_address")
 
     # Tier-based rate limiting (wallet identity lookup)
     if payer_address:
