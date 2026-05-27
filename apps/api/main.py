@@ -395,6 +395,17 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_idx
                 ON webhook_deliveries(webhook_id, created_at DESC)
             """)
+            # v0.8.0 Item 5 — kind + per-row notify_url/hmac_secret/source_id so
+            # WRI alerts can ride the existing webhook retry loop instead of
+            # being dropped on the floor when a single POST fails. Mirrored in
+            # infra/migrations/044_webhook_deliveries_kind.sql.
+            await _mconn.execute("""
+                ALTER TABLE webhook_deliveries
+                    ADD COLUMN IF NOT EXISTS kind        TEXT NOT NULL DEFAULT 'generic',
+                    ADD COLUMN IF NOT EXISTS notify_url  TEXT,
+                    ADD COLUMN IF NOT EXISTS hmac_secret TEXT,
+                    ADD COLUMN IF NOT EXISTS source_id   UUID
+            """)
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS x402_agent_identities (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

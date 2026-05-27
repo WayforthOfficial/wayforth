@@ -641,3 +641,201 @@ def test_admin_audit_log_endpoint_is_read_only_and_ceo_gated():
     assert '"CEO role required"' in snippet or "session[\"role\"] != \"ceo\"" in snippet, (
         "v0.8.0 Item 4: audit-log reader must require CEO role."
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 5: WRI alert retry queue (reuse webhook_deliveries)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _WebhookDeliveriesDB:
+    """asyncpg-shaped fake for the webhook_deliveries + wri_alerts tables."""
+
+    def __init__(self):
+        self.deliveries: list[dict] = []
+        self.wri_alerts: dict = {}  # id → row
+        self.wri_alert_logs: list[dict] = []
+
+    @classmethod
+    def from_pool(cls):
+        return cls()
+
+    def acquire(self):
+        outer = self
+
+        class _Ctx:
+            async def __aenter__(self): return outer
+            async def __aexit__(self, *a): return False
+
+        return _Ctx()
+
+    async def execute(self, query, *args):
+        q = " ".join(query.split())
+        if "UPDATE wri_alerts" in q and "last_fired_at" in q:
+            fired_at, alert_id = args
+            if alert_id in self.wri_alerts:
+                self.wri_alerts[alert_id]["last_fired_at"] = fired_at
+                self.wri_alerts[alert_id]["fired_count"] = \
+                    self.wri_alerts[alert_id].get("fired_count", 0) + 1
+            return
+        if "INSERT INTO webhook_deliveries" in q and "'wri_alert'" in q:
+            source_id, payload, notify_url, hmac_secret = args
+            self.deliveries.append({
+                "kind": "wri_alert",
+                "webhook_id": None,
+                "source_id": source_id,
+                "event": "wri.threshold_crossed",
+                "payload": payload,
+                "notify_url": notify_url,
+                "hmac_secret": hmac_secret,
+                "status": "pending",
+                "attempt": 1,
+            })
+            return
+        if "INSERT INTO wri_alert_logs" in q:
+            self.wri_alert_logs.append({
+                "alert_id": args[0],
+                "response_status": args[1] if len(args) > 1 else None,
+            })
+            return
+
+
+@pytest.mark.asyncio
+async def test_fire_wri_alerts_enqueues_into_webhook_deliveries(monkeypatch):
+    """A matched WRI alert must produce one row in webhook_deliveries with
+    kind='wri_alert' and the alert's notify_url + hmac_secret carried over,
+    rather than performing a direct POST."""
+    from routers.webhooks import _fire_wri_alerts
+
+    pool = _WebhookDeliveriesDB()
+
+    # Seed: one alert that should match the inbound score event.
+    alert_id = "alert-abc"
+    pool.wri_alerts[alert_id] = {
+        "id": alert_id, "api_key_id": "key-1", "category": None,
+        "threshold_score": 80.0, "min_signals": 1,
+        "notify_url": "https://example.com/hooks/wri",
+        "last_fired_at": None, "hmac_secret": "secret-shared-32bytes",
+        "fired_count": 0,
+    }
+
+    # The implementation reads alerts via pool.fetch — model it on top of acquire().
+    class _Conn:
+        async def fetch(self, q, *args):
+            if "FROM wri_alerts" in q:
+                return list(pool.wri_alerts.values())
+            return []
+
+    # Monkey-patch acquire to first return the conn (for the SELECT), then the pool fake.
+    iteration = {"i": 0}
+    orig_acquire = pool.acquire
+
+    def _hybrid_acquire():
+        i = iteration["i"]
+        iteration["i"] += 1
+        if i == 0:
+            class _Ctx:
+                async def __aenter__(self): return _Conn()
+                async def __aexit__(self, *a): return False
+            return _Ctx()
+        return orig_acquire()
+
+    monkeypatch.setattr(pool, "acquire", _hybrid_acquire)
+
+    scored = [{
+        "service": "deepl",
+        "old_wri": 70.0,
+        "new_wri": 85.0,
+        "total_signals": 12,
+        "payment_rate": 30,
+        "category": "translation",
+    }]
+
+    fired = await _fire_wri_alerts(pool, scored)
+    assert fired == 1
+    assert len(pool.deliveries) == 1
+    dlv = pool.deliveries[0]
+    assert dlv["kind"] == "wri_alert"
+    assert dlv["webhook_id"] is None
+    assert dlv["source_id"] == alert_id
+    assert dlv["notify_url"] == "https://example.com/hooks/wri"
+    assert dlv["hmac_secret"] == "secret-shared-32bytes"
+    assert dlv["status"] == "pending"
+
+    # And the cooldown was updated immediately, so a re-fire in the same
+    # batch does not re-enqueue.
+    assert pool.wri_alerts[alert_id]["fired_count"] == 1
+
+
+def test_enqueue_skips_alert_without_hmac_secret(monkeypatch):
+    """An alert with hmac_secret=NULL is unsignable, so enqueue must refuse
+    rather than write a row the worker would later POST without a signature."""
+    import asyncio
+    from routers.webhooks import _enqueue_wri_alert
+
+    pool = _WebhookDeliveriesDB()
+    alert = {
+        "id": "alert-no-secret", "threshold_score": 80.0, "category": None,
+        "notify_url": "https://example.com/hooks/wri", "hmac_secret": None,
+    }
+    entry = {
+        "service": "deepl", "old_wri": 70.0, "new_wri": 85.0,
+        "total_signals": 12, "payment_rate": 30, "category": "translation",
+    }
+    from datetime import datetime, timezone
+    fired_at = datetime.now(timezone.utc)
+    result = asyncio.get_event_loop().run_until_complete(
+        _enqueue_wri_alert(pool, alert, entry, fired_at, fired_at.isoformat())
+    )
+    assert result is False
+    assert pool.deliveries == []
+
+
+def test_webhook_retry_loop_handles_both_kinds_statically():
+    """Static check: the retry loop must read both the row's notify_url +
+    hmac_secret (kind='wri_alert' path) AND continue to handle the generic
+    webhook_url + secret_token JOIN. A regression that drops either path
+    would silently mis-deliver alerts."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parent.parent / "core" / "credits.py"
+    text = src.read_text()
+    assert 'row_kind == "wri_alert"' in text, (
+        "v0.8.0 Item 5: _webhook_retry_loop must branch on row_kind to "
+        "handle wri_alert vs generic deliveries differently."
+    )
+    # LEFT JOIN to provider_webhooks (not the original inner JOIN) — without
+    # this, kind='wri_alert' rows would be excluded from the SELECT.
+    assert "LEFT JOIN provider_webhooks" in text, (
+        "v0.8.0 Item 5: SELECT must LEFT JOIN provider_webhooks so "
+        "wri_alert rows (webhook_id IS NULL) are not filtered out."
+    )
+    # wri_alert logs must be written on both success and dead outcomes for
+    # WRI alerts (observability for the alert owner).
+    assert text.count("INSERT INTO wri_alert_logs") >= 2, (
+        "v0.8.0 Item 5: expected wri_alert_logs INSERTs in both the "
+        "success and dead branches of the retry loop."
+    )
+
+
+def test_fire_wri_alerts_does_not_post_directly():
+    """Static check: _fire_wri_alerts must dispatch via _enqueue_wri_alert.
+    A regression that re-introduces direct POSTs (asyncio.gather of
+    _deliver_wri_alert) would lose the retry guarantee."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parent.parent / "routers" / "webhooks.py"
+    text = src.read_text()
+    # _fire_wri_alerts must NOT call _deliver_wri_alert directly anymore.
+    # Find the function definition and look at its body up to the next def.
+    start = text.find("async def _fire_wri_alerts(")
+    assert start != -1
+    next_def = text.find("\nasync def ", start + 1)
+    if next_def == -1:
+        next_def = text.find("\n@router", start + 1)
+    body = text[start:next_def]
+    assert "_enqueue_wri_alert" in body, (
+        "v0.8.0 Item 5: _fire_wri_alerts must enqueue via _enqueue_wri_alert."
+    )
+    assert "_deliver_wri_alert" not in body, (
+        "v0.8.0 Item 5: _fire_wri_alerts must no longer call "
+        "_deliver_wri_alert directly — that loses the retry guarantee."
+    )
