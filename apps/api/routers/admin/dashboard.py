@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from core.audit import log_admin_action
 from core.credits import PLANS, _dispatch_webhooks
 from core.db import get_db
 from core.login_security import check_login_lockout, record_login_failure, clear_login_failures
@@ -97,6 +98,13 @@ async def admin_login(request: Request, db=Depends(get_db)):
 
     if not user or not bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
         await record_login_failure(email, redis, ip=ip)
+        # v0.8.0 Item 4: audit failed logins so a brute-force attempt is visible
+        # to anyone reading the audit log, not just to whoever scrapes logs.
+        if user:
+            await log_admin_action(
+                db, {"admin_user_id": user["id"], "email": email},
+                "admin_login_failed", payload={"reason": "bad_password"}, request=request,
+            )
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     await clear_login_failures(email, redis)
@@ -118,6 +126,11 @@ async def admin_login(request: Request, db=Depends(get_db)):
 
     await db.execute(
         "UPDATE admin_users SET last_login_at = NOW() WHERE id = $1", user['id']
+    )
+
+    await log_admin_action(
+        db, {"admin_user_id": user["id"], "email": email},
+        "admin_login", payload={"role": user["role"]}, request=request,
     )
 
     return {
@@ -202,6 +215,12 @@ async def admin_invite(request: Request, db=Depends(get_db)):
         logger.info(
             "ADMIN_ACTION action=team_invite invited_by=%s invited_email=%s role=%s",
             session.get('admin_user_id'), email, role,
+        )
+        await log_admin_action(
+            db, session, "invite_team_member",
+            target_resource=str(member["id"]),
+            payload={"invited_email": email, "role": role, "full_name": full_name},
+            request=request,
         )
         return {"status": "invited", "member": dict(member)}
     except Exception:
@@ -558,6 +577,13 @@ async def admin_change_tier(request: Request, user_id: str, db=Depends(get_db)):
         }
     ))
 
+    await log_admin_action(
+        db, session, "tier_change",
+        target_user_id=user_id,
+        payload={"old_tier": old_tier, "new_tier": new_tier, "reason": reason},
+        request=request,
+    )
+
     return {
         "status": "updated",
         "tier": new_tier,
@@ -583,6 +609,13 @@ async def admin_reset_usage(request: Request, user_id: str, db=Depends(get_db)):
         UPDATE api_keys SET usage_this_month = 0, quota_reset_at = NOW()
         WHERE user_id = $1::uuid
     """, user_id)
+
+    await log_admin_action(
+        db, session, "reset_usage",
+        target_user_id=user_id,
+        payload={"reason": reason},
+        request=request,
+    )
 
     return {"status": "reset", "changed_by": session['email'], "reason": reason}
 
@@ -632,6 +665,18 @@ async def admin_add_credits(request: Request, user_id: str, db=Depends(get_db)):
             VALUES ($1::uuid, $2, $3, 'admin_grant', $4)
         """, user_id, credits, new_balance, reason)
 
+    await log_admin_action(
+        db, session, "credit_grant",
+        target_user_id=user_id,
+        payload={
+            "credits": credits,
+            "new_balance": new_balance,
+            "reason": reason,
+            "payment_method": payment_method,
+        },
+        request=request,
+    )
+
     return {
         "status": "credits_added",
         "credits_added": credits,
@@ -675,6 +720,14 @@ async def admin_regenerate_key(request: Request, user_id: str, db=Depends(get_db
           AND created_at = (SELECT MAX(created_at) FROM api_keys WHERE user_id = $3::uuid)
     """, key_hash, key_prefix, user_id)
 
+    await log_admin_action(
+        db, session, "api_key_revoke",
+        target_user_id=user_id,
+        target_resource=key_prefix,
+        payload={"reason": reason},
+        request=request,
+    )
+
     return {
         "status": "regenerated",
         "new_key": raw_key,
@@ -704,6 +757,13 @@ async def admin_suspend_user(request: Request, user_id: str, db=Depends(get_db))
         UPDATE api_keys SET active = $1 WHERE user_id = $2::uuid
     """, not suspended, user_id)
 
+    await log_admin_action(
+        db, session, "user_suspend" if suspended else "user_unsuspend",
+        target_user_id=user_id,
+        payload={"reason": reason},
+        request=request,
+    )
+
     return {
         "status": "suspended" if suspended else "unsuspended",
         "changed_by": session['email'],
@@ -728,6 +788,13 @@ async def admin_custom_quota(request: Request, user_id: str, db=Depends(get_db))
     await db.execute("""
         UPDATE api_keys SET monthly_quota = $1 WHERE user_id = $2::uuid
     """, quota, user_id)
+
+    await log_admin_action(
+        db, session, "quota_set",
+        target_user_id=user_id,
+        payload={"quota": quota, "reason": reason},
+        request=request,
+    )
 
     return {"status": "quota_set", "quota": quota, "changed_by": session['email'], "reason": reason}
 
@@ -1003,6 +1070,11 @@ async def admin_catalog_verify_service(
     )
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="Service not found")
+    await log_admin_action(
+        db, session, "service_approve",
+        target_resource=slug,
+        request=request,
+    )
     return {"status": "verified", "slug": slug, "changed_by": session["email"]}
 
 
@@ -1016,6 +1088,11 @@ async def admin_catalog_demote_service(
     )
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="Service not found")
+    await log_admin_action(
+        db, session, "service_reject",
+        target_resource=slug,
+        request=request,
+    )
     return {"status": "demoted", "slug": slug, "changed_by": session["email"]}
 
 
@@ -1205,3 +1282,91 @@ async def _rotate_api_keys_worker(pool, from_v: int, to_v: int, job_id: str) -> 
             "rotation job=%s complete total=%d failed=%d from_v=%d to_v=%d",
             job_id, total, failed, from_v, to_v,
         )
+
+
+# ── v0.8.0 Item 4: admin audit log reader ────────────────────────────────────
+
+
+@router.get("/admin-api/audit-log")
+async def admin_audit_log_read(
+    request: Request,
+    db=Depends(get_db),
+    admin_id: str | None = None,
+    action: str | None = None,
+    target_user_id: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    cursor: str | None = None,
+    limit: int = 50,
+):
+    """Read the append-only admin audit log. CEO-only.
+
+    Filterable by admin_id, action, target_user_id, and a created_at range
+    (ISO 8601). Cursor pagination uses the last row's created_at; pass it
+    back in `cursor` to fetch the next page. There is no POST/PATCH/DELETE
+    counterpart by design — this resource is read-only.
+    """
+    session = await get_admin_session(request, db)
+    if session["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="CEO role required")
+
+    limit = max(1, min(int(limit), 200))
+    where_parts: list[str] = []
+    params: list = []
+    idx = 1
+
+    if admin_id:
+        where_parts.append(f"admin_id = ${idx}::uuid")
+        params.append(admin_id)
+        idx += 1
+    if action:
+        where_parts.append(f"action = ${idx}")
+        params.append(action)
+        idx += 1
+    if target_user_id:
+        where_parts.append(f"target_user_id = ${idx}::uuid")
+        params.append(target_user_id)
+        idx += 1
+    if since:
+        where_parts.append(f"created_at >= ${idx}::timestamptz")
+        params.append(since)
+        idx += 1
+    if until:
+        where_parts.append(f"created_at <= ${idx}::timestamptz")
+        params.append(until)
+        idx += 1
+    if cursor:
+        where_parts.append(f"created_at < ${idx}::timestamptz")
+        params.append(cursor)
+        idx += 1
+
+    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    params.append(limit)
+
+    rows = await db.fetch(
+        f"""SELECT id, admin_id, admin_email, action,
+                   target_user_id, target_resource, payload,
+                   ip_address, user_agent, created_at
+              FROM admin_audit_log
+              {where_sql}
+          ORDER BY created_at DESC
+             LIMIT ${idx}""",
+        *params,
+    )
+    entries = [
+        {
+            "id": str(r["id"]),
+            "admin_id": str(r["admin_id"]),
+            "admin_email": r["admin_email"],
+            "action": r["action"],
+            "target_user_id": str(r["target_user_id"]) if r["target_user_id"] else None,
+            "target_resource": r["target_resource"],
+            "payload": r["payload"],
+            "ip_address": r["ip_address"],
+            "user_agent": r["user_agent"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+    next_cursor = entries[-1]["created_at"] if len(entries) == limit else None
+    return {"entries": entries, "next_cursor": next_cursor}

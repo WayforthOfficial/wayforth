@@ -478,3 +478,166 @@ def test_admin_keys_rotate_requires_ceo(monkeypatch, _isolated_key_versions):
             _dash.admin_keys_rotate(_Req(), db=None)
         )
     assert exc.value.status_code == 403
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 4: append-only admin audit log
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _AuditDB:
+    """Records every INSERT into admin_audit_log so tests can assert on them."""
+
+    def __init__(self):
+        self.audit_rows: list[dict] = []
+
+    async def execute(self, query: str, *args):
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO admin_audit_log"):
+            self.audit_rows.append({
+                "admin_id":        args[0],
+                "admin_email":     args[1],
+                "action":          args[2],
+                "target_user_id":  args[3],
+                "target_resource": args[4],
+                "payload":         args[5],
+                "ip_address":      args[6],
+                "user_agent":      args[7],
+            })
+
+
+@pytest.mark.asyncio
+async def test_log_admin_action_writes_row():
+    """Helper inserts a row with the expected shape."""
+    from core.audit import log_admin_action
+
+    class _Req:
+        client = type("_C", (), {"host": "10.0.0.5"})()
+        headers = {"user-agent": "pytest"}
+
+    db = _AuditDB()
+    await log_admin_action(
+        db,
+        {"admin_user_id": "admin-1", "email": "ceo@example.com"},
+        "tier_change",
+        target_user_id="user-7",
+        payload={"old_tier": "free", "new_tier": "growth"},
+        request=_Req(),
+    )
+    assert len(db.audit_rows) == 1
+    row = db.audit_rows[0]
+    assert row["admin_id"] == "admin-1"
+    assert row["admin_email"] == "ceo@example.com"
+    assert row["action"] == "tier_change"
+    assert row["target_user_id"] == "user-7"
+    assert row["ip_address"] == "10.0.0.5"
+    assert row["user_agent"] == "pytest"
+    # Payload is JSON-serialised on write.
+    import json
+    assert json.loads(row["payload"]) == {"old_tier": "free", "new_tier": "growth"}
+
+
+@pytest.mark.asyncio
+async def test_log_admin_action_no_request_uses_nulls():
+    """When the helper is called without a request, IP/UA must be NULL,
+    not crash. Used by jobs that have no inbound request context."""
+    from core.audit import log_admin_action
+    db = _AuditDB()
+    await log_admin_action(
+        db,
+        {"admin_user_id": "admin-1", "email": "ceo@example.com"},
+        "background_rotation",
+    )
+    row = db.audit_rows[0]
+    assert row["ip_address"] is None
+    assert row["user_agent"] is None
+    assert row["payload"] is None
+
+
+@pytest.mark.asyncio
+async def test_log_admin_action_missing_admin_id_is_a_noop():
+    """A session without admin_user_id must not write a half-row. We'd
+    rather log loudly than poison the audit trail with anonymous entries."""
+    from core.audit import log_admin_action
+    db = _AuditDB()
+    await log_admin_action(
+        db, {"admin_user_id": None, "email": "leaked@x.com"},
+        "some_action",
+    )
+    assert db.audit_rows == []
+
+
+@pytest.mark.asyncio
+async def test_log_admin_action_db_failure_does_not_raise():
+    """An audit-write failure must NOT block the underlying admin action.
+    The existing logger.warning still captures the attempt in app logs."""
+    from core.audit import log_admin_action
+
+    class _BrokenDB:
+        async def execute(self, query, *args):
+            raise RuntimeError("audit table unreachable")
+
+    # Should NOT raise.
+    await log_admin_action(
+        _BrokenDB(),
+        {"admin_user_id": "admin-1", "email": "ceo@example.com"},
+        "tier_change",
+    )
+
+
+def test_admin_dashboard_calls_log_admin_action_at_every_mutating_endpoint():
+    """Static check: every mutating admin endpoint in dashboard.py must call
+    log_admin_action(). A regression that drops a call would leave a
+    tamper-resistant gap in the audit trail."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parent.parent / "routers" / "admin" / "dashboard.py"
+    text = src.read_text()
+    # 9 spec-listed actions + login success + login failure = 11 minimum.
+    # (admin_login emits 2: one on success, one on bad password.)
+    required_actions = {
+        "tier_change",
+        "credit_grant",
+        "quota_set",
+        "user_suspend",
+        "api_key_revoke",
+        "service_approve",
+        "service_reject",
+        "invite_team_member",
+        "admin_login",
+        "admin_login_failed",
+        "reset_usage",
+    }
+    for action in required_actions:
+        # Each action string must appear in a log_admin_action(...) call.
+        # Allow either quote style — we don't pin to a specific format.
+        needle = f'"{action}"'
+        assert needle in text, (
+            f"v0.8.0 Item 4: action {action!r} is not logged via "
+            f"log_admin_action in routers/admin/dashboard.py. Add a call "
+            f"with that action verb at the matching endpoint."
+        )
+
+
+def test_admin_audit_log_endpoint_is_read_only_and_ceo_gated():
+    """Static check: there must be a GET /admin-api/audit-log endpoint and
+    no POST/PATCH/DELETE counterpart. The CEO-only gate must be visible
+    in the source so a misconfigured role check is caught at test time."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parent.parent / "routers" / "admin" / "dashboard.py"
+    text = src.read_text()
+    assert '@router.get("/admin-api/audit-log")' in text, (
+        "v0.8.0 Item 4: GET /admin-api/audit-log must exist for the CEO to read the audit trail."
+    )
+    # And no write endpoints for this resource.
+    for verb in ("post", "patch", "delete", "put"):
+        assert f'@router.{verb}("/admin-api/audit-log")' not in text, (
+            f"v0.8.0 Item 4: /admin-api/audit-log must be read-only — no @router.{verb}."
+        )
+    # CEO gate must be present in the audit-log reader.
+    # We grep for the most distinctive line of the handler to anchor.
+    handler_idx = text.find("async def admin_audit_log_read")
+    assert handler_idx != -1
+    snippet = text[handler_idx:handler_idx + 1500]
+    assert '"CEO role required"' in snippet or "session[\"role\"] != \"ceo\"" in snippet, (
+        "v0.8.0 Item 4: audit-log reader must require CEO role."
+    )
