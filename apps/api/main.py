@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.7.8"
+VERSION = "0.7.9"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -395,6 +395,17 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_idx
                 ON webhook_deliveries(webhook_id, created_at DESC)
             """)
+            # v0.8.0 Item 5 — kind + per-row notify_url/hmac_secret/source_id so
+            # WRI alerts can ride the existing webhook retry loop instead of
+            # being dropped on the floor when a single POST fails. Mirrored in
+            # infra/migrations/044_webhook_deliveries_kind.sql.
+            await _mconn.execute("""
+                ALTER TABLE webhook_deliveries
+                    ADD COLUMN IF NOT EXISTS kind        TEXT NOT NULL DEFAULT 'generic',
+                    ADD COLUMN IF NOT EXISTS notify_url  TEXT,
+                    ADD COLUMN IF NOT EXISTS hmac_secret TEXT,
+                    ADD COLUMN IF NOT EXISTS source_id   UUID
+            """)
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS x402_agent_identities (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -431,6 +442,20 @@ async def lifespan(app: FastAPI):
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     last_login_at TIMESTAMPTZ
                 )
+            """)
+            # v0.8.0 Item 2: tokenised email verification on registration. Without
+            # this an attacker can register support@groq.com and impersonate a
+            # known brand. Mirror columns in migrations/041_provider_email_verification.sql.
+            await _mconn.execute("""
+                ALTER TABLE providers
+                    ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false,
+                    ADD COLUMN IF NOT EXISTS email_verification_token TEXT,
+                    ADD COLUMN IF NOT EXISTS email_verification_sent_at TIMESTAMPTZ
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS providers_email_verification_token_idx
+                    ON providers(email_verification_token)
+                    WHERE email_verification_token IS NOT NULL
             """)
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS provider_services (
@@ -568,6 +593,12 @@ async def lifespan(app: FastAPI):
                 ALTER TABLE api_keys
                     ADD COLUMN IF NOT EXISTS dunning_failure_count INTEGER NOT NULL DEFAULT 0
             """)
+            # v0.8.0 Item 3 — key_version column for encryption rotation.
+            # Mirrored in infra/migrations/042_api_key_version.sql.
+            await _mconn.execute("""
+                ALTER TABLE api_keys
+                    ADD COLUMN IF NOT EXISTS key_version INTEGER DEFAULT 1
+            """)
             await _mconn.execute("""
                 ALTER TABLE user_credits
                     ADD COLUMN IF NOT EXISTS warning_80_sent_at TIMESTAMPTZ,
@@ -681,6 +712,58 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_mfa_challenges_token_hash ON mfa_challenges (token_hash)
             """)
+            # v0.8.0 Item 4 — append-only admin audit log.
+            # Mirrored in infra/migrations/043_admin_audit_log.sql.
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS admin_audit_log (
+                    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    admin_id         UUID NOT NULL REFERENCES admin_users(id),
+                    admin_email      TEXT NOT NULL,
+                    action           TEXT NOT NULL,
+                    target_user_id   UUID REFERENCES users(id),
+                    target_resource  TEXT,
+                    payload          JSONB,
+                    ip_address       TEXT,
+                    user_agent       TEXT,
+                    created_at       TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS admin_audit_log_created_idx
+                    ON admin_audit_log(created_at DESC)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS admin_audit_log_admin_idx
+                    ON admin_audit_log(admin_id, created_at DESC)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS admin_audit_log_action_idx
+                    ON admin_audit_log(action, created_at DESC)
+            """)
+            await _mconn.execute("""
+                CREATE OR REPLACE FUNCTION admin_audit_log_append_only()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    RAISE EXCEPTION 'admin_audit_log is append-only';
+                END;
+                $$ LANGUAGE plpgsql
+            """)
+            await _mconn.execute("""
+                DROP TRIGGER IF EXISTS admin_audit_log_no_update ON admin_audit_log
+            """)
+            await _mconn.execute("""
+                CREATE TRIGGER admin_audit_log_no_update
+                    BEFORE UPDATE ON admin_audit_log
+                    FOR EACH ROW EXECUTE FUNCTION admin_audit_log_append_only()
+            """)
+            await _mconn.execute("""
+                DROP TRIGGER IF EXISTS admin_audit_log_no_delete ON admin_audit_log
+            """)
+            await _mconn.execute("""
+                CREATE TRIGGER admin_audit_log_no_delete
+                    BEFORE DELETE ON admin_audit_log
+                    FOR EACH ROW EXECUTE FUNCTION admin_audit_log_append_only()
+            """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expires_at ON mfa_challenges (expires_at)
             """)
@@ -719,14 +802,12 @@ async def lifespan(app: FastAPI):
                   ON credit_transactions(refund_uuid)
                   WHERE refund_uuid IS NOT NULL
             """)
-            # Section 9 (v0.7.8): x402 settlement dedup table. Track C (native
-            # x402 mainnet) cannot ship without this — without a UNIQUE on
-            # payment_hash a malicious payer can replay the same X-PAYMENT
-            # header and get multiple service calls settled against one
-            # on-chain payment. The /pay endpoint should INSERT a row keyed
-            # on the payment_hash inside the same transaction as the CDP
-            # transfer; a duplicate hash will raise UniqueViolation and the
-            # caller refuses to settle.
+            # x402 settlement dedup table — added in v0.7.8 Section 9, wired in
+            # v0.8.0 Item 1. The INSERT happens in routers/x402.py (x402_execute
+            # and x402_search), AFTER payment verification and AFTER tier/flag
+            # gates, BEFORE the service adapter call. UNIQUE(payment_hash) makes
+            # a replayed X-PAYMENT header raise UniqueViolation, which is
+            # translated to a 400 replay_rejected response.
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS x402_settlements (
                     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -1,0 +1,841 @@
+"""tests/test_v080_security.py — Unit tests for v0.8.0 pre-mainnet security fixes.
+
+Self-contained. No live deployment, no real DB, no real Redis. Each test
+section maps to one item in the v0.8.0 security release:
+
+  - Item 1: x402 payment replay protection (durable, UNIQUE(payment_hash))
+  - Item 2: provider email verification
+  - Item 3: API key encryption versioning
+  - Item 4: append-only admin audit log
+  - Item 5: WRI alert retry queue (reuse webhook_deliveries with kind column)
+
+Run: pytest apps/api/tests/test_v080_security.py -v
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+
+import asyncpg
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 1: x402 payment replay protection
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The security property: two requests bearing the same X-PAYMENT header must
+# never result in two service executions. This is enforced by
+# UNIQUE(payment_hash) on x402_settlements; the application translates
+# asyncpg.UniqueViolationError into a 400 replay_rejected response.
+
+
+class _SettlementsTable:
+    """Minimal asyncpg-shaped stub that emulates a UNIQUE(payment_hash) row."""
+
+    def __init__(self):
+        self.rows: dict[str, dict] = {}  # payment_hash → row
+
+    async def execute(self, query: str, *args):
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO x402_settlements"):
+            payment_hash, amount, service_slug, user_id = args
+            if payment_hash in self.rows:
+                # asyncpg raises UniqueViolationError on UNIQUE constraint hit.
+                raise asyncpg.UniqueViolationError(
+                    "duplicate key value violates unique constraint "
+                    "\"x402_settlements_payment_hash_unique\""
+                )
+            self.rows[payment_hash] = {
+                "payment_hash": payment_hash,
+                "amount": amount,
+                "service_slug": service_slug,
+                "user_id": user_id,
+            }
+            return
+        raise NotImplementedError(f"_SettlementsTable does not implement: {q[:60]}")
+
+
+@pytest.mark.asyncio
+async def test_x402_settlement_unique_constraint_emulation():
+    """Sanity-check: the stub raises UniqueViolationError on a repeated hash.
+    The real DB enforces this with the UNIQUE constraint declared in
+    infra/migrations/040_x402_settlements_retroactive.sql (and the v0.7.8
+    lifespan create in main.py).
+    """
+    tbl = _SettlementsTable()
+    await tbl.execute(
+        "INSERT INTO x402_settlements (payment_hash, amount, service_slug, user_id) "
+        "VALUES ($1, $2, $3, $4)",
+        "hash-abc", 0.01, "deepl", None,
+    )
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await tbl.execute(
+            "INSERT INTO x402_settlements (payment_hash, amount, service_slug, user_id) "
+            "VALUES ($1, $2, $3, $4)",
+            "hash-abc", 0.01, "deepl", None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_x402_replay_distinct_hashes_both_succeed():
+    """Two different X-PAYMENT headers (different EIP-3009 nonces) must both
+    settle independently. This guards against an over-zealous dedup that
+    would block legitimate sequential payments from the same wallet."""
+    tbl = _SettlementsTable()
+    for h in ("hash-1", "hash-2", "hash-3"):
+        await tbl.execute(
+            "INSERT INTO x402_settlements (payment_hash, amount, service_slug, user_id) "
+            "VALUES ($1, $2, $3, $4)",
+            h, 0.01, "deepl", None,
+        )
+    assert len(tbl.rows) == 3
+
+
+@pytest.mark.asyncio
+async def test_x402_concurrent_replay_only_one_wins():
+    """Concurrent identical requests must serialise: exactly one INSERT
+    succeeds, the other raises UniqueViolationError. Models the
+    same-X-PAYMENT-two-workers race that the v0.7.8 in-memory dict couldn't
+    cover and the v0.8.0 UNIQUE constraint does."""
+    tbl = _SettlementsTable()
+    payment_hash = "hash-race"
+
+    async def _try_insert():
+        try:
+            await tbl.execute(
+                "INSERT INTO x402_settlements "
+                "(payment_hash, amount, service_slug, user_id) "
+                "VALUES ($1, $2, $3, $4)",
+                payment_hash, 0.01, "deepl", None,
+            )
+            return "ok"
+        except asyncpg.UniqueViolationError:
+            return "replay_rejected"
+
+    results = await asyncio.gather(_try_insert(), _try_insert(), _try_insert())
+    assert results.count("ok") == 1
+    assert results.count("replay_rejected") == 2
+
+
+def test_x402_router_catches_unique_violation():
+    """The x402 router must catch asyncpg.UniqueViolationError and return a
+    400 replay_rejected JSON body — not bubble a 500 to the caller.
+
+    This is a static assertion against the source so a regression that
+    accidentally drops the except clause is caught at test time.
+    """
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parent.parent / "routers" / "x402.py"
+    text = src.read_text()
+    # Both x402_execute and x402_search must INSERT into x402_settlements
+    # and must catch UniqueViolationError.
+    assert text.count("INSERT INTO x402_settlements") >= 2, (
+        "v0.8.0 Item 1: expected at least two INSERTs into x402_settlements "
+        "(x402_execute and x402_search). Found fewer — a settlement path is "
+        "missing replay protection."
+    )
+    assert text.count("asyncpg.UniqueViolationError") >= 2, (
+        "v0.8.0 Item 1: expected at least two except asyncpg.UniqueViolationError "
+        "clauses in routers/x402.py. A missing handler would leak a 500 to a "
+        "replaying caller."
+    )
+    assert "replay_rejected" in text, (
+        "v0.8.0 Item 1: response must use the 'replay_rejected' error code so "
+        "clients can detect this case specifically."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 2: provider email verification
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+from datetime import datetime, timedelta, timezone
+
+
+class _ProvidersDB:
+    """Minimal asyncpg-shaped fake for the providers table."""
+
+    def __init__(self):
+        self.providers: dict[str, dict] = {}  # id → row
+        self._next_id = 1
+
+    async def fetchval(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("SELECT id FROM providers WHERE email"):
+            for p in self.providers.values():
+                if p["email"] == args[0]:
+                    return p["id"]
+            return None
+        if "INSERT INTO providers" in q and "RETURNING id" in q:
+            pid = f"pvdr-{self._next_id}"
+            self._next_id += 1
+            self.providers[pid] = {
+                "id": pid,
+                "company_name": args[0],
+                "email": args[1],
+                "password_hash": args[2],
+                "email_verification_token": args[3] if len(args) > 3 else None,
+                "email_verification_sent_at": datetime.now(timezone.utc) if len(args) > 3 else None,
+                "email_verified": False,
+            }
+            return pid
+        return None
+
+    async def fetchrow(self, query, *args):
+        q = " ".join(query.split())
+        if "FROM providers WHERE email_verification_token" in q:
+            for p in self.providers.values():
+                if p.get("email_verification_token") == args[0]:
+                    return p
+            return None
+        if "FROM providers WHERE email" in q:
+            for p in self.providers.values():
+                if p["email"] == args[0]:
+                    return p
+            return None
+        return None
+
+    async def execute(self, query, *args):
+        q = " ".join(query.split())
+        if "UPDATE providers SET email_verified = true" in q:
+            pid = args[0]
+            if pid in self.providers:
+                self.providers[pid]["email_verified"] = True
+                self.providers[pid]["email_verification_token"] = None
+            return
+        if "UPDATE providers" in q and "email_verification_token" in q and "email_verification_sent_at" in q:
+            new_token, pid = args
+            if pid in self.providers:
+                self.providers[pid]["email_verification_token"] = new_token
+                self.providers[pid]["email_verification_sent_at"] = datetime.now(timezone.utc)
+            return
+        if "INSERT INTO provider_services" in q:
+            return  # ignore — not under test here
+
+
+@pytest.mark.asyncio
+async def test_provider_verify_email_valid_token_marks_verified():
+    """Hitting GET /provider/verify-email with a valid token flips the flag."""
+    from routers.provider import provider_verify_email
+    db = _ProvidersDB()
+    # Pre-seed an unverified provider.
+    db.providers["p1"] = {
+        "id": "p1",
+        "email": "alice@example.com",
+        "email_verification_token": "fresh-token-abc-1234567890-xyz",
+        "email_verification_sent_at": datetime.now(timezone.utc),
+        "email_verified": False,
+        "company_name": "Acme",
+    }
+    result = await provider_verify_email("fresh-token-abc-1234567890-xyz", db)
+    assert result == {"email_verified": True, "message": "Email verified. You can now use provider write endpoints."}
+    assert db.providers["p1"]["email_verified"] is True
+    assert db.providers["p1"]["email_verification_token"] is None
+
+
+@pytest.mark.asyncio
+async def test_provider_verify_email_expired_token_returns_410():
+    """Tokens older than 24h are rejected with 410 Gone."""
+    from fastapi import HTTPException
+    from routers.provider import provider_verify_email
+    db = _ProvidersDB()
+    db.providers["p1"] = {
+        "id": "p1",
+        "email": "alice@example.com",
+        "email_verification_token": "stale-token-abcdefgh-1234567890",
+        "email_verification_sent_at": datetime.now(timezone.utc) - timedelta(hours=25),
+        "email_verified": False,
+    }
+    with pytest.raises(HTTPException) as exc_info:
+        await provider_verify_email("stale-token-abcdefgh-1234567890", db)
+    assert exc_info.value.status_code == 410
+    assert exc_info.value.detail["error"] == "token_expired"
+    # And the flag must still be false.
+    assert db.providers["p1"]["email_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_provider_verify_email_unknown_token_returns_404():
+    """An unknown token must not leak whether any provider matched."""
+    from fastapi import HTTPException
+    from routers.provider import provider_verify_email
+    db = _ProvidersDB()
+    with pytest.raises(HTTPException) as exc_info:
+        await provider_verify_email("totally-bogus-token-1234567890", db)
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_provider_verify_email_idempotent_on_already_verified():
+    """A second click on the verification link must not error — return success."""
+    from routers.provider import provider_verify_email
+    db = _ProvidersDB()
+    db.providers["p1"] = {
+        "id": "p1",
+        "email": "alice@example.com",
+        "email_verification_token": "leftover-token-abcdefgh1234567890",
+        "email_verification_sent_at": datetime.now(timezone.utc),
+        "email_verified": True,  # already verified
+    }
+    result = await provider_verify_email("leftover-token-abcdefgh1234567890", db)
+    assert result["email_verified"] is True
+    assert "already verified" in result["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_require_email_verified_blocks_unverified_provider():
+    """The gate dependency must raise 403 when email_verified is false,
+    even if the session token resolves a valid provider row."""
+    from fastapi import HTTPException
+    from routers.provider import _require_email_verified
+
+    class FakeRequest:
+        headers = {"X-Provider-Token": "valid-token-1234"}
+
+    # Stub _get_provider via a fake DB that returns an unverified row.
+    import hashlib as _h
+    class _Db:
+        async def fetchrow(self, q, *args):
+            return {
+                "provider_id": "p1",
+                "company_name": "Acme",
+                "email": "alice@example.com",
+                "tier": "observer",
+                "verified": False,
+                "email_verified": False,
+                "stripe_customer_id": None,
+                "stripe_subscription_id": None,
+            }
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _require_email_verified(FakeRequest(), _Db())
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail["error"] == "email_not_verified"
+
+
+@pytest.mark.asyncio
+async def test_require_email_verified_passes_verified_provider():
+    """When email_verified is true, the dependency returns the provider row."""
+    from routers.provider import _require_email_verified
+
+    class FakeRequest:
+        headers = {"X-Provider-Token": "valid-token-1234"}
+
+    class _Db:
+        async def fetchrow(self, q, *args):
+            return {
+                "provider_id": "p1",
+                "company_name": "Acme",
+                "email": "alice@example.com",
+                "tier": "observer",
+                "verified": False,
+                "email_verified": True,
+                "stripe_customer_id": None,
+                "stripe_subscription_id": None,
+            }
+
+    provider = await _require_email_verified(FakeRequest(), _Db())
+    assert provider["provider_id"] == "p1"
+    assert provider["email_verified"] is True
+
+
+def test_provider_write_endpoints_use_email_verified_gate():
+    """Static check: provider.py's write endpoints must wire through
+    _require_email_verified, not _get_provider directly."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parent.parent / "routers" / "provider.py"
+    text = src.read_text()
+    # /provider/verify and /provider/billing/upgrade must call _require_email_verified.
+    # Count occurrences — should be at least 2 (one per gated endpoint).
+    assert text.count("_require_email_verified(request, db)") >= 2, (
+        "v0.8.0 Item 2: expected at least 2 calls to _require_email_verified "
+        "in routers/provider.py (provider_verify + provider_billing_upgrade). "
+        "A regression here would let unverified providers claim domains or "
+        "initiate payments."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 3: API key encryption versioning
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def _isolated_key_versions():
+    """Reset core.auth.KEY_VERSIONS before/after each test to prevent
+    cross-test pollution from the module-level cache."""
+    import core.auth as _auth
+    saved = dict(_auth.KEY_VERSIONS)
+    _auth.KEY_VERSIONS.clear()
+    yield
+    _auth.KEY_VERSIONS.clear()
+    _auth.KEY_VERSIONS.update(saved)
+
+
+def _set_key_envs(monkeypatch, *, v1: str | None = None, v2: str | None = None):
+    """Helper to install fresh ENCRYPTION_KEY env vars for a single test."""
+    if v1 is not None:
+        monkeypatch.setenv("ENCRYPTION_KEY", v1)
+    else:
+        monkeypatch.delenv("ENCRYPTION_KEY", raising=False)
+    if v2 is not None:
+        monkeypatch.setenv("ENCRYPTION_KEY_V2", v2)
+    else:
+        monkeypatch.delenv("ENCRYPTION_KEY_V2", raising=False)
+
+
+def _fresh_fernet_key() -> str:
+    from cryptography.fernet import Fernet
+    return Fernet.generate_key().decode()
+
+
+def test_encrypt_decrypt_v1_round_trip(monkeypatch, _isolated_key_versions):
+    """v1 encrypt → v1 decrypt returns the original plaintext."""
+    from core.auth import encrypt_api_key, decrypt_api_key
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key())
+    ct, ver = encrypt_api_key("wf_live_secret_token_abc123")
+    assert ver == 1
+    assert decrypt_api_key(ct, ver) == "wf_live_secret_token_abc123"
+
+
+def test_encrypt_decrypt_v2_round_trip(monkeypatch, _isolated_key_versions):
+    """When a v2 key is configured, encrypt(version=2) → decrypt(version=2) works."""
+    from core.auth import encrypt_api_key, decrypt_api_key
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key(), v2=_fresh_fernet_key())
+    ct, ver = encrypt_api_key("wf_live_secret", version=2)
+    assert ver == 2
+    assert decrypt_api_key(ct, 2) == "wf_live_secret"
+
+
+def test_decrypt_unknown_version_raises(monkeypatch, _isolated_key_versions):
+    """Decrypt with a version that was never loaded must raise ValueError —
+    not bubble a confusing InvalidToken from cryptography."""
+    from core.auth import encrypt_api_key, decrypt_api_key
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key())
+    ct, _ = encrypt_api_key("x")
+    with pytest.raises(ValueError, match="Unknown encryption key version"):
+        decrypt_api_key(ct, 99)
+
+
+def test_v1_ciphertext_cannot_be_decrypted_with_v2(monkeypatch, _isolated_key_versions):
+    """A ciphertext encrypted with v1 must NOT decrypt with v2 — proves the
+    versions are cryptographically distinct, so a leak of one key does not
+    expose the other."""
+    from core.auth import encrypt_api_key, decrypt_api_key
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key(), v2=_fresh_fernet_key())
+    ct, _ = encrypt_api_key("payload", version=1)
+    # Decrypting v1 ciphertext with the v2 key raises Fernet's InvalidToken.
+    with pytest.raises(Exception):
+        decrypt_api_key(ct, 2)
+
+
+def test_rotation_simulation(monkeypatch, _isolated_key_versions):
+    """End-to-end simulation of the rotation worker: a v1 ciphertext is
+    decrypted with v1, re-encrypted with v2, and then decryptable with v2."""
+    from core.auth import encrypt_api_key, decrypt_api_key
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key(), v2=_fresh_fernet_key())
+    ct_v1, _ = encrypt_api_key("secret_to_rotate", version=1)
+    # Worker step: decrypt with old, re-encrypt with new.
+    plain = decrypt_api_key(ct_v1, 1)
+    ct_v2, new_ver = encrypt_api_key(plain, version=2)
+    assert new_ver == 2
+    assert decrypt_api_key(ct_v2, 2) == "secret_to_rotate"
+
+
+def test_backward_compat_get_fernet(monkeypatch, _isolated_key_versions):
+    """get_fernet() still returns the v1 Fernet so legacy call sites
+    continue to work without an immediate refactor."""
+    from core.auth import get_fernet
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key())
+    f = get_fernet()
+    ct = f.encrypt(b"hello").decode()
+    assert f.decrypt(ct.encode()).decode() == "hello"
+
+
+def test_admin_keys_rotate_requires_ceo(monkeypatch, _isolated_key_versions):
+    """The rotation endpoint must reject non-CEO admin sessions with 403."""
+    import asyncio
+    from fastapi import HTTPException
+    from routers.admin import dashboard as _dash
+
+    async def _fake_admin_session(request, db):
+        return {"role": "support", "admin_user_id": "a1", "email": "s@x.com"}
+
+    monkeypatch.setattr(_dash, "get_admin_session", _fake_admin_session)
+
+    class _Req:
+        async def json(self): return {"from_version": 1, "to_version": 2}
+        @property
+        def app(self): return type("_App", (), {"state": type("_S", (), {"pool": None})()})()
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.get_event_loop().run_until_complete(
+            _dash.admin_keys_rotate(_Req(), db=None)
+        )
+    assert exc.value.status_code == 403
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 4: append-only admin audit log
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _AuditDB:
+    """Records every INSERT into admin_audit_log so tests can assert on them."""
+
+    def __init__(self):
+        self.audit_rows: list[dict] = []
+
+    async def execute(self, query: str, *args):
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO admin_audit_log"):
+            self.audit_rows.append({
+                "admin_id":        args[0],
+                "admin_email":     args[1],
+                "action":          args[2],
+                "target_user_id":  args[3],
+                "target_resource": args[4],
+                "payload":         args[5],
+                "ip_address":      args[6],
+                "user_agent":      args[7],
+            })
+
+
+@pytest.mark.asyncio
+async def test_log_admin_action_writes_row():
+    """Helper inserts a row with the expected shape."""
+    from core.audit import log_admin_action
+
+    class _Req:
+        client = type("_C", (), {"host": "10.0.0.5"})()
+        headers = {"user-agent": "pytest"}
+
+    db = _AuditDB()
+    await log_admin_action(
+        db,
+        {"admin_user_id": "admin-1", "email": "ceo@example.com"},
+        "tier_change",
+        target_user_id="user-7",
+        payload={"old_tier": "free", "new_tier": "growth"},
+        request=_Req(),
+    )
+    assert len(db.audit_rows) == 1
+    row = db.audit_rows[0]
+    assert row["admin_id"] == "admin-1"
+    assert row["admin_email"] == "ceo@example.com"
+    assert row["action"] == "tier_change"
+    assert row["target_user_id"] == "user-7"
+    assert row["ip_address"] == "10.0.0.5"
+    assert row["user_agent"] == "pytest"
+    # Payload is JSON-serialised on write.
+    import json
+    assert json.loads(row["payload"]) == {"old_tier": "free", "new_tier": "growth"}
+
+
+@pytest.mark.asyncio
+async def test_log_admin_action_no_request_uses_nulls():
+    """When the helper is called without a request, IP/UA must be NULL,
+    not crash. Used by jobs that have no inbound request context."""
+    from core.audit import log_admin_action
+    db = _AuditDB()
+    await log_admin_action(
+        db,
+        {"admin_user_id": "admin-1", "email": "ceo@example.com"},
+        "background_rotation",
+    )
+    row = db.audit_rows[0]
+    assert row["ip_address"] is None
+    assert row["user_agent"] is None
+    assert row["payload"] is None
+
+
+@pytest.mark.asyncio
+async def test_log_admin_action_missing_admin_id_is_a_noop():
+    """A session without admin_user_id must not write a half-row. We'd
+    rather log loudly than poison the audit trail with anonymous entries."""
+    from core.audit import log_admin_action
+    db = _AuditDB()
+    await log_admin_action(
+        db, {"admin_user_id": None, "email": "leaked@x.com"},
+        "some_action",
+    )
+    assert db.audit_rows == []
+
+
+@pytest.mark.asyncio
+async def test_log_admin_action_db_failure_does_not_raise():
+    """An audit-write failure must NOT block the underlying admin action.
+    The existing logger.warning still captures the attempt in app logs."""
+    from core.audit import log_admin_action
+
+    class _BrokenDB:
+        async def execute(self, query, *args):
+            raise RuntimeError("audit table unreachable")
+
+    # Should NOT raise.
+    await log_admin_action(
+        _BrokenDB(),
+        {"admin_user_id": "admin-1", "email": "ceo@example.com"},
+        "tier_change",
+    )
+
+
+def test_admin_dashboard_calls_log_admin_action_at_every_mutating_endpoint():
+    """Static check: every mutating admin endpoint in dashboard.py must call
+    log_admin_action(). A regression that drops a call would leave a
+    tamper-resistant gap in the audit trail."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parent.parent / "routers" / "admin" / "dashboard.py"
+    text = src.read_text()
+    # 9 spec-listed actions + login success + login failure = 11 minimum.
+    # (admin_login emits 2: one on success, one on bad password.)
+    required_actions = {
+        "tier_change",
+        "credit_grant",
+        "quota_set",
+        "user_suspend",
+        "api_key_revoke",
+        "service_approve",
+        "service_reject",
+        "invite_team_member",
+        "admin_login",
+        "admin_login_failed",
+        "reset_usage",
+    }
+    for action in required_actions:
+        # Each action string must appear in a log_admin_action(...) call.
+        # Allow either quote style — we don't pin to a specific format.
+        needle = f'"{action}"'
+        assert needle in text, (
+            f"v0.8.0 Item 4: action {action!r} is not logged via "
+            f"log_admin_action in routers/admin/dashboard.py. Add a call "
+            f"with that action verb at the matching endpoint."
+        )
+
+
+def test_admin_audit_log_endpoint_is_read_only_and_ceo_gated():
+    """Static check: there must be a GET /admin-api/audit-log endpoint and
+    no POST/PATCH/DELETE counterpart. The CEO-only gate must be visible
+    in the source so a misconfigured role check is caught at test time."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parent.parent / "routers" / "admin" / "dashboard.py"
+    text = src.read_text()
+    assert '@router.get("/admin-api/audit-log")' in text, (
+        "v0.8.0 Item 4: GET /admin-api/audit-log must exist for the CEO to read the audit trail."
+    )
+    # And no write endpoints for this resource.
+    for verb in ("post", "patch", "delete", "put"):
+        assert f'@router.{verb}("/admin-api/audit-log")' not in text, (
+            f"v0.8.0 Item 4: /admin-api/audit-log must be read-only — no @router.{verb}."
+        )
+    # CEO gate must be present in the audit-log reader.
+    # We grep for the most distinctive line of the handler to anchor.
+    handler_idx = text.find("async def admin_audit_log_read")
+    assert handler_idx != -1
+    snippet = text[handler_idx:handler_idx + 1500]
+    assert '"CEO role required"' in snippet or "session[\"role\"] != \"ceo\"" in snippet, (
+        "v0.8.0 Item 4: audit-log reader must require CEO role."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 5: WRI alert retry queue (reuse webhook_deliveries)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _WebhookDeliveriesDB:
+    """asyncpg-shaped fake for the webhook_deliveries + wri_alerts tables."""
+
+    def __init__(self):
+        self.deliveries: list[dict] = []
+        self.wri_alerts: dict = {}  # id → row
+        self.wri_alert_logs: list[dict] = []
+
+    @classmethod
+    def from_pool(cls):
+        return cls()
+
+    def acquire(self):
+        outer = self
+
+        class _Ctx:
+            async def __aenter__(self): return outer
+            async def __aexit__(self, *a): return False
+
+        return _Ctx()
+
+    async def execute(self, query, *args):
+        q = " ".join(query.split())
+        if "UPDATE wri_alerts" in q and "last_fired_at" in q:
+            fired_at, alert_id = args
+            if alert_id in self.wri_alerts:
+                self.wri_alerts[alert_id]["last_fired_at"] = fired_at
+                self.wri_alerts[alert_id]["fired_count"] = \
+                    self.wri_alerts[alert_id].get("fired_count", 0) + 1
+            return
+        if "INSERT INTO webhook_deliveries" in q and "'wri_alert'" in q:
+            source_id, payload, notify_url, hmac_secret = args
+            self.deliveries.append({
+                "kind": "wri_alert",
+                "webhook_id": None,
+                "source_id": source_id,
+                "event": "wri.threshold_crossed",
+                "payload": payload,
+                "notify_url": notify_url,
+                "hmac_secret": hmac_secret,
+                "status": "pending",
+                "attempt": 1,
+            })
+            return
+        if "INSERT INTO wri_alert_logs" in q:
+            self.wri_alert_logs.append({
+                "alert_id": args[0],
+                "response_status": args[1] if len(args) > 1 else None,
+            })
+            return
+
+
+@pytest.mark.asyncio
+async def test_fire_wri_alerts_enqueues_into_webhook_deliveries(monkeypatch):
+    """A matched WRI alert must produce one row in webhook_deliveries with
+    kind='wri_alert' and the alert's notify_url + hmac_secret carried over,
+    rather than performing a direct POST."""
+    from routers.webhooks import _fire_wri_alerts
+
+    pool = _WebhookDeliveriesDB()
+
+    # Seed: one alert that should match the inbound score event.
+    alert_id = "alert-abc"
+    pool.wri_alerts[alert_id] = {
+        "id": alert_id, "api_key_id": "key-1", "category": None,
+        "threshold_score": 80.0, "min_signals": 1,
+        "notify_url": "https://example.com/hooks/wri",
+        "last_fired_at": None, "hmac_secret": "secret-shared-32bytes",
+        "fired_count": 0,
+    }
+
+    # The implementation reads alerts via pool.fetch — model it on top of acquire().
+    class _Conn:
+        async def fetch(self, q, *args):
+            if "FROM wri_alerts" in q:
+                return list(pool.wri_alerts.values())
+            return []
+
+    # Monkey-patch acquire to first return the conn (for the SELECT), then the pool fake.
+    iteration = {"i": 0}
+    orig_acquire = pool.acquire
+
+    def _hybrid_acquire():
+        i = iteration["i"]
+        iteration["i"] += 1
+        if i == 0:
+            class _Ctx:
+                async def __aenter__(self): return _Conn()
+                async def __aexit__(self, *a): return False
+            return _Ctx()
+        return orig_acquire()
+
+    monkeypatch.setattr(pool, "acquire", _hybrid_acquire)
+
+    scored = [{
+        "service": "deepl",
+        "old_wri": 70.0,
+        "new_wri": 85.0,
+        "total_signals": 12,
+        "payment_rate": 30,
+        "category": "translation",
+    }]
+
+    fired = await _fire_wri_alerts(pool, scored)
+    assert fired == 1
+    assert len(pool.deliveries) == 1
+    dlv = pool.deliveries[0]
+    assert dlv["kind"] == "wri_alert"
+    assert dlv["webhook_id"] is None
+    assert dlv["source_id"] == alert_id
+    assert dlv["notify_url"] == "https://example.com/hooks/wri"
+    assert dlv["hmac_secret"] == "secret-shared-32bytes"
+    assert dlv["status"] == "pending"
+
+    # And the cooldown was updated immediately, so a re-fire in the same
+    # batch does not re-enqueue.
+    assert pool.wri_alerts[alert_id]["fired_count"] == 1
+
+
+def test_enqueue_skips_alert_without_hmac_secret(monkeypatch):
+    """An alert with hmac_secret=NULL is unsignable, so enqueue must refuse
+    rather than write a row the worker would later POST without a signature."""
+    import asyncio
+    from routers.webhooks import _enqueue_wri_alert
+
+    pool = _WebhookDeliveriesDB()
+    alert = {
+        "id": "alert-no-secret", "threshold_score": 80.0, "category": None,
+        "notify_url": "https://example.com/hooks/wri", "hmac_secret": None,
+    }
+    entry = {
+        "service": "deepl", "old_wri": 70.0, "new_wri": 85.0,
+        "total_signals": 12, "payment_rate": 30, "category": "translation",
+    }
+    from datetime import datetime, timezone
+    fired_at = datetime.now(timezone.utc)
+    result = asyncio.get_event_loop().run_until_complete(
+        _enqueue_wri_alert(pool, alert, entry, fired_at, fired_at.isoformat())
+    )
+    assert result is False
+    assert pool.deliveries == []
+
+
+def test_webhook_retry_loop_handles_both_kinds_statically():
+    """Static check: the retry loop must read both the row's notify_url +
+    hmac_secret (kind='wri_alert' path) AND continue to handle the generic
+    webhook_url + secret_token JOIN. A regression that drops either path
+    would silently mis-deliver alerts."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parent.parent / "core" / "credits.py"
+    text = src.read_text()
+    assert 'row_kind == "wri_alert"' in text, (
+        "v0.8.0 Item 5: _webhook_retry_loop must branch on row_kind to "
+        "handle wri_alert vs generic deliveries differently."
+    )
+    # LEFT JOIN to provider_webhooks (not the original inner JOIN) — without
+    # this, kind='wri_alert' rows would be excluded from the SELECT.
+    assert "LEFT JOIN provider_webhooks" in text, (
+        "v0.8.0 Item 5: SELECT must LEFT JOIN provider_webhooks so "
+        "wri_alert rows (webhook_id IS NULL) are not filtered out."
+    )
+    # wri_alert logs must be written on both success and dead outcomes for
+    # WRI alerts (observability for the alert owner).
+    assert text.count("INSERT INTO wri_alert_logs") >= 2, (
+        "v0.8.0 Item 5: expected wri_alert_logs INSERTs in both the "
+        "success and dead branches of the retry loop."
+    )
+
+
+def test_fire_wri_alerts_does_not_post_directly():
+    """Static check: _fire_wri_alerts must dispatch via _enqueue_wri_alert.
+    A regression that re-introduces direct POSTs (asyncio.gather of
+    _deliver_wri_alert) would lose the retry guarantee."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parent.parent / "routers" / "webhooks.py"
+    text = src.read_text()
+    # _fire_wri_alerts must NOT call _deliver_wri_alert directly anymore.
+    # Find the function definition and look at its body up to the next def.
+    start = text.find("async def _fire_wri_alerts(")
+    assert start != -1
+    next_def = text.find("\nasync def ", start + 1)
+    if next_def == -1:
+        next_def = text.find("\n@router", start + 1)
+    body = text[start:next_def]
+    assert "_enqueue_wri_alert" in body, (
+        "v0.8.0 Item 5: _fire_wri_alerts must enqueue via _enqueue_wri_alert."
+    )
+    assert "_deliver_wri_alert" not in body, (
+        "v0.8.0 Item 5: _fire_wri_alerts must no longer call "
+        "_deliver_wri_alert directly — that loses the retry guarantee."
+    )

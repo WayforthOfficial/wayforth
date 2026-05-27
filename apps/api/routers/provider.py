@@ -40,7 +40,7 @@ async def _get_provider(request: Request, db):
     token_hash = _hashlib.sha256(token.encode()).hexdigest()
     row = await db.fetchrow("""
         SELECT ps.provider_id, p.company_name, p.email, p.tier, p.verified,
-               p.stripe_customer_id, p.stripe_subscription_id
+               p.email_verified, p.stripe_customer_id, p.stripe_subscription_id
         FROM provider_sessions ps
         JOIN providers p ON p.id = ps.provider_id
         WHERE ps.token_hash = $1 AND ps.expires_at > NOW()
@@ -48,6 +48,27 @@ async def _get_provider(request: Request, db):
     if not row:
         raise HTTPException(status_code=401, detail={"error": "invalid_or_expired_token"})
     return row
+
+
+async def _require_email_verified(request: Request, db):
+    """Resolve provider AND require email_verified=true.
+
+    v0.8.0 Item 2: gates write endpoints behind tokenised email verification.
+    Read endpoints (dashboard, queries, earnings, etc.) bypass this — an
+    unverified provider can still log in and browse, they just can't trigger
+    domain verification or billing changes until they prove control of the
+    email address they registered with.
+    """
+    provider = await _get_provider(request, db)
+    if not provider.get("email_verified"):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "email_not_verified",
+                "message": "Verify your email before performing this action. Check your inbox or POST /provider/resend-verification.",
+            },
+        )
+    return provider
 
 
 async def _get_provider_service(db, provider_id):
@@ -108,7 +129,14 @@ async def _verify_header_check(endpoint_url: str, code: str) -> bool:
 @router.post("/provider/register", tags=["Provider"])
 @limiter.limit("10/minute")
 async def provider_register(request: Request, db=Depends(get_db)):
-    """Register a new provider account."""
+    """Register a new provider account.
+
+    v0.8.0 Item 2: account is created with email_verified=false. The caller
+    must click the link in the verification email before they can invoke
+    write endpoints (domain verification, billing upgrade). The 202 status
+    code signals "accepted, pending email confirmation".
+    """
+    from fastapi.responses import JSONResponse
     body = await request.json()
     company_name = (body.get("company_name") or "").strip()
     email = (body.get("email") or "").strip().lower()
@@ -126,15 +154,19 @@ async def provider_register(request: Request, db=Depends(get_db)):
 
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     verification_code = "wayforth-verify-" + secrets.token_hex(8)
+    email_verify_token = secrets.token_urlsafe(32)
 
     # Resolve service display name
     service_name = SERVICE_DISPLAY_NAMES.get(service_slug, service_slug.title())
 
     provider_id = await db.fetchval("""
-        INSERT INTO providers (company_name, email, password_hash)
-        VALUES ($1, $2, $3)
+        INSERT INTO providers (
+            company_name, email, password_hash,
+            email_verification_token, email_verification_sent_at
+        )
+        VALUES ($1, $2, $3, $4, NOW())
         RETURNING id
-    """, company_name, email, password_hash)
+    """, company_name, email, password_hash, email_verify_token)
 
     await db.execute("""
         INSERT INTO provider_services (provider_id, service_slug, service_name, verification_code)
@@ -142,10 +174,27 @@ async def provider_register(request: Request, db=Depends(get_db)):
         ON CONFLICT (provider_id, service_slug) DO NOTHING
     """, provider_id, service_slug, service_name, verification_code)
 
+    # Best-effort send: a Resend outage must not prevent registration. If the
+    # email fails, the provider can hit POST /provider/resend-verification.
+    verify_url = (
+        os.environ.get("WAYFORTH_GATEWAY_URL", "https://gateway.wayforth.io")
+        + "/provider/verify-email?token=" + email_verify_token
+    )
+    try:
+        from core.email import send_email
+        await send_email(email, "provider_verify", {
+            "company_name": company_name,
+            "verify_url": verify_url,
+        })
+    except Exception as e:
+        logger.error("provider_verify email send failed for %s: %s", email, e)
+
     # Extract domain from email for DNS instructions
     domain = email.split("@")[-1] if "@" in email else service_slug + ".com"
 
-    return {
+    return JSONResponse(status_code=202, content={
+        "status": "pending_email_verification",
+        "message": "Check your inbox to verify your email address. Write endpoints unlock once verified.",
         "provider_id": str(provider_id),
         "email": email,
         "tier": "observer",
@@ -156,6 +205,92 @@ async def provider_register(request: Request, db=Depends(get_db)):
             "header_instructions": f"Return header X-Wayforth-Verify: {verification_code} from your API endpoint",
             "manual_note": "Email support@wayforth.io to verify manually",
         },
+    })
+
+
+@router.get("/provider/verify-email", tags=["Provider"])
+async def provider_verify_email(token: str, db=Depends(get_db)):
+    """Complete email verification by clicking the link from the registration email.
+
+    v0.8.0 Item 2. Token TTL is 24 hours; expired tokens return 410 so the
+    caller can request a fresh one via POST /provider/resend-verification.
+    """
+    if not token or len(token) < 16:
+        raise HTTPException(status_code=404, detail={"error": "invalid_or_unknown_token"})
+
+    row = await db.fetchrow("""
+        SELECT id, email_verification_sent_at, email_verified
+        FROM providers
+        WHERE email_verification_token = $1
+    """, token)
+    if not row:
+        raise HTTPException(status_code=404, detail={"error": "invalid_or_unknown_token"})
+
+    if row["email_verified"]:
+        # Token leftover from a previous successful verification — idempotent success.
+        return {"email_verified": True, "message": "Email already verified."}
+
+    sent_at = row["email_verification_sent_at"]
+    if sent_at is None or (datetime.now(timezone.utc) - sent_at) > timedelta(hours=24):
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "error": "token_expired",
+                "message": "Token expired. POST /provider/resend-verification to request a new one.",
+            },
+        )
+
+    await db.execute("""
+        UPDATE providers
+           SET email_verified = true,
+               email_verification_token = NULL
+         WHERE id = $1
+    """, row["id"])
+
+    return {"email_verified": True, "message": "Email verified. You can now use provider write endpoints."}
+
+
+@router.post("/provider/resend-verification", tags=["Provider"])
+@limiter.limit("3/hour")
+async def provider_resend_verification(request: Request, db=Depends(get_db)):
+    """Issue a fresh email-verification token. Rate-limited to 3/hour per IP.
+
+    Always returns 200 with a generic message, even if the email is unknown,
+    so an attacker can't enumerate registered providers via this endpoint.
+    """
+    body = await request.json()
+    email = (body.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=422, detail={"error": "email required"})
+
+    row = await db.fetchrow(
+        "SELECT id, company_name, email_verified FROM providers WHERE email = $1",
+        email,
+    )
+    if row and not row["email_verified"]:
+        new_token = secrets.token_urlsafe(32)
+        await db.execute("""
+            UPDATE providers
+               SET email_verification_token = $1,
+                   email_verification_sent_at = NOW()
+             WHERE id = $2
+        """, new_token, row["id"])
+        verify_url = (
+            os.environ.get("WAYFORTH_GATEWAY_URL", "https://gateway.wayforth.io")
+            + "/provider/verify-email?token=" + new_token
+        )
+        try:
+            from core.email import send_email
+            await send_email(email, "provider_verify", {
+                "company_name": row["company_name"],
+                "verify_url": verify_url,
+            })
+        except Exception as e:
+            logger.error("provider_verify resend failed for %s: %s", email, e)
+
+    return {
+        "status": "sent",
+        "message": "If the email is registered and unverified, a fresh link is on its way.",
     }
 
 
@@ -215,8 +350,12 @@ async def provider_login(request: Request, db=Depends(get_db)):
 @router.post("/provider/verify", tags=["Provider"])
 @limiter.limit("10/minute")
 async def provider_verify(request: Request, db=Depends(get_db)):
-    """Verify provider ownership of a service via DNS TXT record or response header."""
-    provider = await _get_provider(request, db)
+    """Verify provider ownership of a service via DNS TXT record or response header.
+
+    v0.8.0 Item 2: gated behind email verification — must prove control of the
+    registered email before claiming ownership of a service domain.
+    """
+    provider = await _require_email_verified(request, db)
     body = await request.json()
     method = (body.get("method") or "dns_txt").strip()
 
@@ -867,9 +1006,13 @@ async def provider_earnings_history(request: Request, db=Depends(get_db)):
 @router.post("/provider/billing/upgrade", tags=["Provider"])
 @limiter.limit("10/minute")
 async def provider_billing_upgrade(request: Request, db=Depends(get_db)):
-    """Create a Stripe checkout session to upgrade the provider's tier."""
+    """Create a Stripe checkout session to upgrade the provider's tier.
+
+    v0.8.0 Item 2: gated behind email verification — payment flows must not
+    be initiated by an account whose email control has not been proven.
+    """
     import stripe
-    provider = await _get_provider(request, db)
+    provider = await _require_email_verified(request, db)
     body = await request.json()
     target_tier = (body.get("tier") or "").strip().lower()
 

@@ -25,8 +25,8 @@ from services.managed import SERVICE_CONFIGS
 class TestVersion:
 
     def test_version_is_070(self):
-        # v0.7.8 — pre-production hardening pass.
-        assert VERSION == "0.7.8"
+        # v0.8.0 — pre-mainnet security fixes.
+        assert VERSION == "0.8.0"
 
     def test_version_is_string(self):
         assert isinstance(VERSION, str)
