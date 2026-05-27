@@ -432,6 +432,20 @@ async def lifespan(app: FastAPI):
                     last_login_at TIMESTAMPTZ
                 )
             """)
+            # v0.8.0 Item 2: tokenised email verification on registration. Without
+            # this an attacker can register support@groq.com and impersonate a
+            # known brand. Mirror columns in migrations/041_provider_email_verification.sql.
+            await _mconn.execute("""
+                ALTER TABLE providers
+                    ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false,
+                    ADD COLUMN IF NOT EXISTS email_verification_token TEXT,
+                    ADD COLUMN IF NOT EXISTS email_verification_sent_at TIMESTAMPTZ
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS providers_email_verification_token_idx
+                    ON providers(email_verification_token)
+                    WHERE email_verification_token IS NOT NULL
+            """)
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS provider_services (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
