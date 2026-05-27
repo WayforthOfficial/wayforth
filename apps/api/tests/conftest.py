@@ -4,9 +4,28 @@ import pytest
 from tests.test_suite_v060 import API_KEY, BASE_URL, _500_errors, _forbidden_hits, _warnings
 
 
+_LIVE_TEST_MODULES = (
+    "test_suite_v060.py", "test_suite_v062.py", "test_suite_v0610.py",
+    "test_security_v063.py", "test_v0614.py", "test_email.py", "test_mfa.py",
+    "test_refund.py",
+)
+
+
 @pytest.fixture(scope="session", autouse=True)
-def service_up():
-    """Skip the entire suite if the live deployment is unreachable."""
+def service_up(request):
+    """Skip the entire suite if the live deployment is unreachable.
+
+    Only applies when running live-integration test modules. Pure-unit tests
+    (test_body_size_limit.py, test_tier1_caps.py, etc.) do not need a live
+    deployment and are not gated here.
+    """
+    # Check whether any collected item belongs to a live-test module.
+    items = request.session.items
+    if not any(
+        any(m in str(item.fspath) for m in _LIVE_TEST_MODULES)
+        for item in items
+    ):
+        return  # No live tests requested — skip the gateway probe.
     try:
         r = httpx.get(f"{BASE_URL}/status", timeout=15.0, follow_redirects=True)
         if r.status_code >= 500:

@@ -5,6 +5,7 @@ import logging
 import os as _os
 import time as _time
 import httpx
+from fastapi import HTTPException
 
 _httpx_log = logging.getLogger("httpx")
 
@@ -169,6 +170,9 @@ async def call_deepl(params: dict, api_key: str) -> dict:
     target_lang = params.get("target_lang", "")
     if not text or not target_lang:
         raise Exception("params.text and params.target_lang are required")
+    # Tier 1 input cap: 2,000 characters
+    if len(text) > 2000:
+        raise HTTPException(413, "Text exceeds Tier 1 limit (2,000 chars). Use BYOK for larger payloads.")
     payload = {"text": [text], "target_lang": target_lang}
     if "source_lang" in params:
         payload["source_lang"] = params["source_lang"]
@@ -307,6 +311,18 @@ async def call_assemblyai(params: dict, api_key: str) -> dict:
     audio_url = params.get("audio_url", "")
     if not audio_url:
         raise Exception("params.audio_url is required")
+    # Tier 1 input cap: ~10 min audio (~12 MB Content-Length heuristic).
+    # HEAD the URL to check size; allow through if Content-Length is absent or HEAD fails.
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as head_client:
+            head_resp = await head_client.head(audio_url)
+            content_length = head_resp.headers.get("content-length")
+            if content_length is not None and int(content_length) > 12_000_000:
+                raise HTTPException(413, "Audio file exceeds Tier 1 limit (~10 min). Use BYOK for larger files.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # HEAD failed or no Content-Length — allow through
     language_code = params.get("language_code", "en")
     headers = {"authorization": api_key, "content-type": "application/json"}
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -353,6 +369,11 @@ async def call_stability(params: dict, api_key: str) -> dict:
     prompt = params.get("prompt", "")
     if not prompt:
         raise Exception("params.prompt is required")
+    # Tier 1: 1 image per call (credit cost enforces this implicitly)
+    samples = int(params.get("samples", 1))
+    n = int(params.get("n", 1))
+    if samples > 1 or n > 1:
+        raise HTTPException(413, "Stability AI Tier 1 limit: 1 image per call. Use BYOK for batch generation.")
     quality = params.get("quality", "core")  # "core" | "ultra"
 
     if quality == "ultra":
@@ -526,6 +547,9 @@ async def call_elevenlabs(params: dict, api_key: str) -> dict:
     text = params.get("text", "")
     if not text:
         raise Exception("params.text is required")
+    # Tier 1 input cap: 500 characters
+    if len(text) > 500:
+        raise HTTPException(413, "Text exceeds Tier 1 limit (500 chars). Use BYOK for larger payloads.")
     voice_id = params.get("voice_id", "21m00Tcm4TlvDq8ikWAM")  # default: Rachel
     model_id = params.get("model_id", "eleven_multilingual_v2")
     async with httpx.AsyncClient(timeout=30.0) as client:
