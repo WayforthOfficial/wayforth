@@ -17,6 +17,7 @@ _SUBJECTS: dict[str, str] = {
     "subscription_confirmed": "Wayforth {{plan_name}} — confirmed",
     "low_credits": "Your Wayforth credits are running low",
     "founding_member": "500 founding member credits added",
+    "provider_verify": "Verify your Wayforth provider account",
 }
 
 # Rendered HTML inserted into welcome.html for founding member accounts
@@ -125,6 +126,21 @@ invoice — no action needed.
 This is a one-time bonus. It does not affect your monthly credit renewal.
 
 View your balance: https://wayforth.io/dashboard
+
+---
+Wayforth Technologies Inc. · wayforth.io · support@wayforth.io
+""",
+    "provider_verify": """\
+Verify your Wayforth provider account.
+
+A provider account was registered with this email for {{company_name}}.
+Click the link below to confirm you control this address and unlock the
+provider dashboard.
+
+VERIFY: {{verify_url}}
+
+This link expires in 24 hours. If you did not request a Wayforth provider
+account, you can safely ignore this message.
 
 ---
 Wayforth Technologies Inc. · wayforth.io · support@wayforth.io
