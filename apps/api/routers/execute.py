@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from core.auth import _resolve_user, _validate_agent_id, get_fernet
+from core.auth import _resolve_user, _validate_agent_id, decrypt_api_key, encrypt_api_key
 from core.credits import (
     CREDITS_PER_CALL,
     _check_spend_anomaly,
@@ -441,8 +441,7 @@ async def add_service_key(request: Request, db=Depends(get_db)):
         preview = "****"
 
     try:
-        f = get_fernet()
-        encrypted = f.encrypt(raw_key.encode()).decode()
+        encrypted, key_version = encrypt_api_key(raw_key, version=1)
     except Exception as _enc_err:
         logger.error("BYOK: failed to encrypt key for %s: %s", service_slug, _enc_err)
         raise HTTPException(status_code=500, detail={
@@ -452,8 +451,8 @@ async def add_service_key(request: Request, db=Depends(get_db)):
 
     await db.execute("""
         INSERT INTO user_service_keys
-            (user_id, service_slug, service_name, encrypted_key, key_preview, endpoint_url, default_method, active)
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, true)
+            (user_id, service_slug, service_name, encrypted_key, key_preview, endpoint_url, default_method, active, key_version)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, true, $8)
         ON CONFLICT (user_id, service_slug)
         DO UPDATE SET
             service_name=EXCLUDED.service_name,
@@ -462,8 +461,9 @@ async def add_service_key(request: Request, db=Depends(get_db)):
             endpoint_url=EXCLUDED.endpoint_url,
             default_method=EXCLUDED.default_method,
             active=true,
+            key_version=EXCLUDED.key_version,
             updated_at=NOW()
-    """, user_id, service_slug, service_name or service_slug, encrypted, preview, endpoint_url, default_method)
+    """, user_id, service_slug, service_name or service_slug, encrypted, preview, endpoint_url, default_method, key_version)
 
     return {
         "service_slug": service_slug,
@@ -897,7 +897,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
     # ── Universal BYOK path (any external API, not in managed catalog) ────────
     if is_byok:
         byok_row = await db.fetchrow(
-            "SELECT encrypted_key, endpoint_url, default_method FROM user_service_keys "
+            "SELECT encrypted_key, key_version, endpoint_url, default_method FROM user_service_keys "
             "WHERE user_id=$1::uuid AND service_slug=$2 AND active=true",
             user_id, service_slug,
         )
@@ -906,8 +906,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
                 "error": f"No BYOK key found for '{service_slug}'. Add one at /call/keys/add"
             })
         try:
-            f = get_fernet()
-            byok_key = f.decrypt(byok_row["encrypted_key"].encode()).decode()
+            byok_key = decrypt_api_key(byok_row["encrypted_key"], byok_row["key_version"] or 1)
         except Exception as _dec_err:
             logger.error("BYOK: failed to decrypt key for %s: %s", service_slug, _dec_err)
             raise HTTPException(status_code=500, detail={"error": "decryption_failed"})
@@ -1051,7 +1050,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
             })
     else:
         row = await db.fetchrow(
-            "SELECT encrypted_key FROM user_service_keys WHERE user_id=$1::uuid AND service_slug=$2 AND active=true",
+            "SELECT encrypted_key, key_version FROM user_service_keys WHERE user_id=$1::uuid AND service_slug=$2 AND active=true",
             user_id, service_slug,
         )
         if not row:
@@ -1059,8 +1058,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
                 "error": "No API key found for service. Add one at /call/keys/add"
             })
         try:
-            f = get_fernet()
-            svc_key = f.decrypt(row["encrypted_key"].encode()).decode()
+            svc_key = decrypt_api_key(row["encrypted_key"], row["key_version"] or 1)
         except Exception as _dec_err:
             logger.error("BYOK: failed to decrypt key for service %s: %s", service_slug, _dec_err)
             raise HTTPException(status_code=500, detail={
