@@ -5,8 +5,8 @@ import os
 import re
 from datetime import datetime, timezone
 
+import httpx
 import jwt
-import requests
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -31,23 +31,33 @@ _JWKS_URL = "https://oafqjvdvamcygiqbnoby.supabase.co/auth/v1/.well-known/jwks.j
 _jwks_cache: dict = {"keys": [], "fetched_at": 0}
 
 
-def get_jwks() -> list:
+async def get_jwks() -> list:
+    """Fetch Supabase JWKS, cached for 1 hour.
+
+    S10 (v0.7.8): switched from sync requests.get to httpx.AsyncClient so a
+    cache miss doesn't block the event loop for the duration of the network
+    round-trip. Callers must `await get_jwks()`.
+    """
     import time
     if time.time() - _jwks_cache["fetched_at"] > 3600:
-        resp = requests.get(_JWKS_URL, timeout=5)
-        resp.raise_for_status()
-        _jwks_cache["keys"] = resp.json()["keys"]
-        _jwks_cache["fetched_at"] = time.time()
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(_JWKS_URL)
+            resp.raise_for_status()
+            _jwks_cache["keys"] = resp.json()["keys"]
+            _jwks_cache["fetched_at"] = time.time()
     return _jwks_cache["keys"]
 
 
-def verify_supabase_jwt(token: str) -> dict:
+async def verify_supabase_jwt(token: str) -> dict:
     """Asymmetric verification via Supabase JWKS. Supports RS256 and ES256.
-    Checks signature, expiry, and audience."""
+    Checks signature, expiry, and audience.
+
+    S10 (v0.7.8): async to let JWKS refresh happen without blocking.
+    """
     from jwt.algorithms import RSAAlgorithm, ECAlgorithm
     header = jwt.get_unverified_header(token)
     kid = header.get("kid")
-    keys = get_jwks()
+    keys = await get_jwks()
     key = next((k for k in keys if k["kid"] == kid), None)
     if not key:
         raise ValueError("No matching JWKS key found")
@@ -218,7 +228,9 @@ async def check_auth(request: Request) -> dict:
 
 async def _resolve_user(db, api_key: str):
     """Return (user_id, api_key_id, tier) for a valid active API key, or raise 401."""
-    if not api_key.startswith("wf_live_") or not (40 <= len(api_key) <= 60):
+    # S14 (v0.7.8): tighten to the two exact mint lengths (51 or 56). Keep the
+    # set in sync with check_auth in main.py.
+    if not api_key.startswith("wf_live_") or len(api_key) not in (51, 56):
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
     key_record = await db.fetchrow(
         "SELECT id, user_id, tier FROM api_keys WHERE key_hash=$1 AND active=true",
@@ -272,7 +284,7 @@ async def resolve_dashboard_caller(request: Request, db) -> dict:
     if auth_header.startswith("Bearer "):
         token = auth_header.removeprefix("Bearer ").strip()
         try:
-            claims = verify_supabase_jwt(token)
+            claims = await verify_supabase_jwt(token)
             sub = (claims.get("sub") or "").strip()
             if not sub:
                 raise ValueError("no sub")

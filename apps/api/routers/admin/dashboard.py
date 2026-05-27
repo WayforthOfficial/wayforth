@@ -35,7 +35,10 @@ async def get_admin_session(request: Request, db):
     # IS used, so abuse leaves a trail (sessioned admin paths produce one too).
     admin_key = request.headers.get("X-Admin-Key", "")
     if admin_key and ADMIN_KEY:
-        admin_key_enabled = _os.environ.get("WAYFORTH_ADMIN_KEY_ENABLED", "true").lower() == "true"
+        # S2 (v0.7.8): default to disabled. Break-glass requires explicit
+        # WAYFORTH_ADMIN_KEY_ENABLED=true in the deploy env. Set it on Railway
+        # production only when you need break-glass access; unset it after.
+        admin_key_enabled = _os.environ.get("WAYFORTH_ADMIN_KEY_ENABLED", "false").lower() == "true"
         env_name = _os.environ.get("ENVIRONMENT", "development").lower()
         if not admin_key_enabled:
             logger.warning("X-Admin-Key presented but disabled by WAYFORTH_ADMIN_KEY_ENABLED=false")
@@ -192,7 +195,15 @@ async def admin_invite(request: Request, db=Depends(get_db)):
             RETURNING id, email, full_name, role, created_at
         """, email, password_hash, full_name, role,
             session.get('admin_user_id'))
-        return {"member": dict(member), "temp_password": temp_password}
+        # S12 (v0.7.8): never echo the temp password back in the response.
+        # The CEO supplied it in the request body and is responsible for
+        # transmitting it to the invitee out-of-band. The response is just
+        # a confirmation so no log capture exposes the credential.
+        logger.info(
+            "ADMIN_ACTION action=team_invite invited_by=%s invited_email=%s role=%s",
+            session.get('admin_user_id'), email, role,
+        )
+        return {"status": "invited", "member": dict(member)}
     except Exception:
         raise HTTPException(status_code=400, detail="Email already exists")
 
@@ -220,83 +231,79 @@ async def admin_update_member(
     return {"status": "updated"}
 
 
+# E1 (v0.7.8): degrade-but-don't-lie helpers for admin_overview. The previous
+# `except: var = 0` pattern hid DB failures behind clean zeros — the dashboard
+# looked fine while the DB was on fire. These helpers log every failure with
+# the metric name so operators can see exactly which counter is degraded.
+async def _safe_count(db, name: str, query: str, *args) -> int:
+    try:
+        return int(await db.fetchval(query, *args) or 0)
+    except Exception as e:
+        logger.error("admin_overview metric=%s failed: %s", name, e, exc_info=True)
+        return 0
+
+
+async def _safe_decimal(db, name: str, query: str, *args) -> float:
+    try:
+        return float(await db.fetchval(query, *args) or 0.0)
+    except Exception as e:
+        logger.error("admin_overview metric=%s failed: %s", name, e, exc_info=True)
+        return 0.0
+
+
+async def _safe_fetch(db, name: str, query: str, *args) -> list:
+    try:
+        return list(await db.fetch(query, *args))
+    except Exception as e:
+        logger.error("admin_overview metric=%s failed: %s", name, e, exc_info=True)
+        return []
+
+
 @router.get("/admin-api/overview")
 async def admin_overview(request: Request, db=Depends(get_db)):
     session = await get_admin_session(request, db)
 
-    try:
-        total_services = await db.fetchval("SELECT COUNT(*) FROM services") or 0
-    except: total_services = 0
-
-    try:
-        tier2 = await db.fetchval("SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3") or 0
-    except: tier2 = 0
-
-    try:
-        total_users = await db.fetchval("SELECT COUNT(*) FROM users") or 0
-    except: total_users = 0
-
-    try:
-        total_keys = await db.fetchval("SELECT COUNT(*) FROM api_keys") or 0
-    except: total_keys = 0
-
-    try:
-        searches_24h = await db.fetchval(
-            "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '24h'"
-        ) or 0
-    except: searches_24h = 0
-
-    try:
-        searches_7d = await db.fetchval(
-            "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '7 days'"
-        ) or 0
-    except: searches_7d = 0
-
-    try:
-        pending_tier3 = await db.fetchval(
-            "SELECT COUNT(*) FROM tier3_applications WHERE kyb_status = 'pending'"
-        ) or 0
-    except: pending_tier3 = 0
-
-    try:
-        total_agents = await db.fetchval("SELECT COUNT(*) FROM agent_identities") or 0
-    except: total_agents = 0
-
-    try:
-        daily = await db.fetch("""
-            SELECT DATE(created_at) as date, COUNT(*) as count
-            FROM search_analytics
-            WHERE created_at > NOW() - INTERVAL '30 days'
-            GROUP BY DATE(created_at)
-            ORDER BY date ASC
-        """)
-    except: daily = []
-
-    try:
-        signups = await db.fetch("""
-            SELECT DATE(created_at) as date, COUNT(*) as count
-            FROM users
-            WHERE created_at > NOW() - INTERVAL '30 days'
-            GROUP BY DATE(created_at)
-            ORDER BY date ASC
-        """)
-    except: signups = []
-
-    try:
-        calls_30d = await db.fetchval("""
-            SELECT COUNT(*) FROM credit_transactions
-            WHERE type = 'execution'
-              AND created_at > NOW() - INTERVAL '30 days'
-        """) or 0
-    except: calls_30d = 0
-
-    try:
-        revenue_30d_usd = await db.fetchval("""
-            SELECT COALESCE(SUM(amount_usd), 0) FROM package_purchases
-            WHERE payment_status = 'completed'
-              AND purchased_at > NOW() - INTERVAL '30 days'
-        """) or 0.0
-    except: revenue_30d_usd = 0.0
+    total_services = await _safe_count(db, "total_services", "SELECT COUNT(*) FROM services")
+    tier2 = await _safe_count(db, "tier2", "SELECT COUNT(*) FROM services WHERE coverage_tier >= 2 AND consecutive_failures < 3")
+    total_users = await _safe_count(db, "total_users", "SELECT COUNT(*) FROM users")
+    total_keys = await _safe_count(db, "total_keys", "SELECT COUNT(*) FROM api_keys")
+    searches_24h = await _safe_count(
+        db, "searches_24h",
+        "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '24h'",
+    )
+    searches_7d = await _safe_count(
+        db, "searches_7d",
+        "SELECT COUNT(*) FROM search_analytics WHERE created_at > NOW() - INTERVAL '7 days'",
+    )
+    pending_tier3 = await _safe_count(
+        db, "pending_tier3",
+        "SELECT COUNT(*) FROM tier3_applications WHERE kyb_status = 'pending'",
+    )
+    total_agents = await _safe_count(db, "total_agents", "SELECT COUNT(*) FROM agent_identities")
+    daily = await _safe_fetch(db, "daily_searches", """
+        SELECT DATE(created_at) as date, COUNT(*) as count
+        FROM search_analytics
+        WHERE created_at > NOW() - INTERVAL '30 days'
+        GROUP BY DATE(created_at)
+        ORDER BY date ASC
+    """)
+    signups = await _safe_fetch(db, "daily_signups", """
+        SELECT DATE(created_at) as date, COUNT(*) as count
+        FROM users
+        WHERE created_at > NOW() - INTERVAL '30 days'
+        GROUP BY DATE(created_at)
+        ORDER BY date ASC
+    """)
+    calls_30d = await _safe_count(db, "calls_30d", """
+        SELECT COUNT(*) FROM credit_transactions
+        WHERE type = 'execution'
+          AND created_at > NOW() - INTERVAL '30 days'
+    """)
+    revenue_30d_usd = await _safe_decimal(db, "revenue_30d_usd", """
+        SELECT COALESCE(SUM(amount_usd), 0) FROM package_purchases
+        WHERE payment_status = 'completed'
+          AND purchased_at > NOW() - INTERVAL '30 days'
+    """)
 
     return {
         "stats": {
@@ -498,6 +505,13 @@ async def admin_change_tier(request: Request, user_id: str, db=Depends(get_db)):
     if new_tier not in VALID_TIERS:
         raise HTTPException(status_code=400, detail=f"Invalid tier. Valid: {VALID_TIERS}")
 
+    # L5 (v0.7.8): audit log every admin write before mutating state.
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=tier_change target_user=%s new_tier=%s reason=%r",
+        session.get('admin_user_id') or session.get('email'),
+        user_id, new_tier, reason,
+    )
+
     plan = PLANS[new_tier]
     new_quota = plan["calls_included"]
     new_credits = plan["monthly_credits"]
@@ -561,6 +575,10 @@ async def admin_reset_usage(request: Request, user_id: str, db=Depends(get_db)):
     body = await request.json()
     reason = body.get("reason", "Admin reset")
 
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=reset_usage target_user=%s reason=%r",
+        session.get('admin_user_id') or session.get('email'), user_id, reason,
+    )
     await db.execute("""
         UPDATE api_keys SET usage_this_month = 0, quota_reset_at = NOW()
         WHERE user_id = $1::uuid
@@ -583,6 +601,11 @@ async def admin_add_credits(request: Request, user_id: str, db=Depends(get_db)):
 
     if credits <= 0 or credits > 1000000:
         raise HTTPException(status_code=400, detail="Credits must be 1-1,000,000")
+
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=add_credits target_user=%s credits=%d reason=%r",
+        session.get('admin_user_id') or session.get('email'), user_id, credits, reason,
+    )
 
     async with db.transaction():
         row = await db.fetchrow(
@@ -629,6 +652,11 @@ async def admin_regenerate_key(request: Request, user_id: str, db=Depends(get_db
     body = await request.json()
     reason = body.get("reason", "Admin revoked")
 
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=regenerate_user_key target_user=%s reason=%r",
+        session.get('admin_user_id') or session.get('email'), user_id, reason,
+    )
+
     raw_key = "wf_live_" + secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     key_prefix = raw_key[:12]
@@ -666,6 +694,12 @@ async def admin_suspend_user(request: Request, user_id: str, db=Depends(get_db))
     suspended = body.get("suspended", True)
     reason = body.get("reason", "")
 
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=%s target_user=%s reason=%r",
+        session.get('admin_user_id') or session.get('email'),
+        "suspend" if suspended else "unsuspend", user_id, reason,
+    )
+
     await db.execute("""
         UPDATE api_keys SET active = $1 WHERE user_id = $2::uuid
     """, not suspended, user_id)
@@ -685,6 +719,11 @@ async def admin_custom_quota(request: Request, user_id: str, db=Depends(get_db))
     body = await request.json()
     quota = int(body.get("quota", 0))
     reason = body.get("reason", "")
+
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=custom_quota target_user=%s quota=%d reason=%r",
+        session.get('admin_user_id') or session.get('email'), user_id, quota, reason,
+    )
 
     await db.execute("""
         UPDATE api_keys SET monthly_quota = $1 WHERE user_id = $2::uuid
