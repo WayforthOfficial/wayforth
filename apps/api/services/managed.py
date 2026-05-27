@@ -8,6 +8,7 @@ import httpx
 from fastapi import HTTPException
 
 _httpx_log = logging.getLogger("httpx")
+logger = logging.getLogger(__name__)
 
 SERVICE_CONFIGS = {
     # Inference
@@ -319,10 +320,14 @@ async def call_assemblyai(params: dict, api_key: str) -> dict:
             content_length = head_resp.headers.get("content-length")
             if content_length is not None and int(content_length) > 12_000_000:
                 raise HTTPException(413, "Audio file exceeds Tier 1 limit (~10 min). Use BYOK for larger files.")
+            if content_length is None:
+                logger.info(
+                    "assemblyai: audio size unknown (no Content-Length on HEAD %s) — allowing through", audio_url
+                )
     except HTTPException:
         raise
-    except Exception:
-        pass  # HEAD failed or no Content-Length — allow through
+    except Exception as _head_err:
+        logger.info("assemblyai: HEAD request failed (%s) — allowing through", _head_err)
     language_code = params.get("language_code", "en")
     headers = {"authorization": api_key, "content-type": "application/json"}
     async with httpx.AsyncClient(timeout=10.0) as client:
