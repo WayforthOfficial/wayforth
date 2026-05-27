@@ -582,6 +582,12 @@ async def lifespan(app: FastAPI):
                 ALTER TABLE api_keys
                     ADD COLUMN IF NOT EXISTS dunning_failure_count INTEGER NOT NULL DEFAULT 0
             """)
+            # v0.8.0 Item 3 — key_version column for encryption rotation.
+            # Mirrored in infra/migrations/042_api_key_version.sql.
+            await _mconn.execute("""
+                ALTER TABLE api_keys
+                    ADD COLUMN IF NOT EXISTS key_version INTEGER DEFAULT 1
+            """)
             await _mconn.execute("""
                 ALTER TABLE user_credits
                     ADD COLUMN IF NOT EXISTS warning_80_sent_at TIMESTAMPTZ,

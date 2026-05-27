@@ -1079,3 +1079,129 @@ async def admin_catalog_bulk_services(
         await db.execute("DELETE FROM services WHERE slug = ANY($1)", slugs)
 
     return {"status": action + "d", "count": len(slugs), "changed_by": session["email"]}
+
+
+# ── v0.8.0 Item 3: API-key encryption rotation ────────────────────────────────
+
+
+@router.get("/admin-api/keys/rotation-status")
+async def admin_keys_rotation_status(request: Request, db=Depends(get_db)):
+    """Report how many api_keys rows exist per encryption key version.
+
+    Used by the CEO before and after a rotation to track progress. Any non-CEO
+    role can read; this is operational telemetry, not a state mutation.
+    """
+    session = await get_admin_session(request, db)
+    if session["role"] not in ("ceo", "operations"):
+        raise HTTPException(status_code=403, detail="Insufficient admin role")
+    rows = await db.fetch("""
+        SELECT COALESCE(key_version, 1) AS version, COUNT(*) AS count
+          FROM api_keys
+         WHERE encrypted_key IS NOT NULL
+      GROUP BY 1
+      ORDER BY 1
+    """)
+    from core.auth import KEY_VERSIONS, load_key_versions, ROTATION_IN_PROGRESS
+    load_key_versions()
+    return {
+        "rotation_in_progress": ROTATION_IN_PROGRESS,
+        "loaded_versions": sorted(KEY_VERSIONS.keys()),
+        "rows_per_version": [
+            {"version": int(r["version"]), "count": int(r["count"])} for r in rows
+        ],
+    }
+
+
+@router.post("/admin-api/keys/rotate")
+async def admin_keys_rotate(request: Request, db=Depends(get_db)):
+    """Spawn a background re-encryption job from one key version to another.
+
+    Body: {"from_version": int, "to_version": int}
+
+    CEO-only. The job streams api_keys rows where key_version=from_version,
+    decrypts with the old version, re-encrypts with the new, and updates
+    encrypted_key + key_version atomically per row. Progress is logged; the
+    response returns immediately with the job id.
+    """
+    session = await get_admin_session(request, db)
+    if session["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="CEO role required")
+    body = await request.json()
+    from_v = int(body.get("from_version", 0))
+    to_v = int(body.get("to_version", 0))
+    if from_v <= 0 or to_v <= 0 or from_v == to_v:
+        raise HTTPException(
+            status_code=400,
+            detail="from_version and to_version must be positive integers and differ",
+        )
+
+    from core.auth import KEY_VERSIONS, load_key_versions
+    load_key_versions()
+    if from_v not in KEY_VERSIONS:
+        raise HTTPException(status_code=400, detail=f"from_version {from_v} not loaded")
+    if to_v not in KEY_VERSIONS:
+        raise HTTPException(status_code=400, detail=f"to_version {to_v} not loaded")
+
+    import asyncio as _asyncio
+    import uuid as _uuid
+    job_id = str(_uuid.uuid4())
+
+    logger.warning(
+        "ADMIN_ACTION admin=%s action=keys_rotate from=%s to=%s job=%s",
+        session.get("admin_user_id") or session.get("email"),
+        from_v, to_v, job_id,
+    )
+
+    pool = request.app.state.pool
+    _asyncio.create_task(_rotate_api_keys_worker(pool, from_v, to_v, job_id))
+    return {"status": "started", "job_id": job_id, "from_version": from_v, "to_version": to_v}
+
+
+async def _rotate_api_keys_worker(pool, from_v: int, to_v: int, job_id: str) -> None:
+    """Background worker: stream rows in batches of 100 and re-encrypt each.
+
+    Per-row transaction (decrypt with old, re-encrypt with new, UPDATE) means
+    a partial failure leaves the table in a mixed-version state that the next
+    rotation can resume — never in a corrupted state.
+    """
+    from core.auth import decrypt_api_key, encrypt_api_key
+    import core.auth as _auth_mod
+
+    _auth_mod.ROTATION_IN_PROGRESS = True
+    total = 0
+    failed = 0
+    try:
+        while True:
+            async with pool.acquire() as conn:
+                batch = await conn.fetch(
+                    """SELECT id, encrypted_key
+                         FROM api_keys
+                        WHERE key_version = $1
+                          AND encrypted_key IS NOT NULL
+                        LIMIT 100""",
+                    from_v,
+                )
+            if not batch:
+                break
+            for row in batch:
+                try:
+                    plaintext = decrypt_api_key(row["encrypted_key"], from_v)
+                    new_ct, _ = encrypt_api_key(plaintext, version=to_v)
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            """UPDATE api_keys
+                                  SET encrypted_key = $1, key_version = $2
+                                WHERE id = $3 AND key_version = $4""",
+                            new_ct, to_v, row["id"], from_v,
+                        )
+                    total += 1
+                except Exception as e:
+                    failed += 1
+                    logger.error("rotation job=%s row=%s failed: %s", job_id, row["id"], e)
+            logger.info("rotation job=%s progress total=%d failed=%d", job_id, total, failed)
+    finally:
+        _auth_mod.ROTATION_IN_PROGRESS = False
+        logger.warning(
+            "rotation job=%s complete total=%d failed=%d from_v=%d to_v=%d",
+            job_id, total, failed, from_v, to_v,
+        )

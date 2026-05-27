@@ -358,3 +358,123 @@ def test_provider_write_endpoints_use_email_verified_gate():
         "A regression here would let unverified providers claim domains or "
         "initiate payments."
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Item 3: API key encryption versioning
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def _isolated_key_versions():
+    """Reset core.auth.KEY_VERSIONS before/after each test to prevent
+    cross-test pollution from the module-level cache."""
+    import core.auth as _auth
+    saved = dict(_auth.KEY_VERSIONS)
+    _auth.KEY_VERSIONS.clear()
+    yield
+    _auth.KEY_VERSIONS.clear()
+    _auth.KEY_VERSIONS.update(saved)
+
+
+def _set_key_envs(monkeypatch, *, v1: str | None = None, v2: str | None = None):
+    """Helper to install fresh ENCRYPTION_KEY env vars for a single test."""
+    if v1 is not None:
+        monkeypatch.setenv("ENCRYPTION_KEY", v1)
+    else:
+        monkeypatch.delenv("ENCRYPTION_KEY", raising=False)
+    if v2 is not None:
+        monkeypatch.setenv("ENCRYPTION_KEY_V2", v2)
+    else:
+        monkeypatch.delenv("ENCRYPTION_KEY_V2", raising=False)
+
+
+def _fresh_fernet_key() -> str:
+    from cryptography.fernet import Fernet
+    return Fernet.generate_key().decode()
+
+
+def test_encrypt_decrypt_v1_round_trip(monkeypatch, _isolated_key_versions):
+    """v1 encrypt → v1 decrypt returns the original plaintext."""
+    from core.auth import encrypt_api_key, decrypt_api_key
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key())
+    ct, ver = encrypt_api_key("wf_live_secret_token_abc123")
+    assert ver == 1
+    assert decrypt_api_key(ct, ver) == "wf_live_secret_token_abc123"
+
+
+def test_encrypt_decrypt_v2_round_trip(monkeypatch, _isolated_key_versions):
+    """When a v2 key is configured, encrypt(version=2) → decrypt(version=2) works."""
+    from core.auth import encrypt_api_key, decrypt_api_key
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key(), v2=_fresh_fernet_key())
+    ct, ver = encrypt_api_key("wf_live_secret", version=2)
+    assert ver == 2
+    assert decrypt_api_key(ct, 2) == "wf_live_secret"
+
+
+def test_decrypt_unknown_version_raises(monkeypatch, _isolated_key_versions):
+    """Decrypt with a version that was never loaded must raise ValueError —
+    not bubble a confusing InvalidToken from cryptography."""
+    from core.auth import encrypt_api_key, decrypt_api_key
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key())
+    ct, _ = encrypt_api_key("x")
+    with pytest.raises(ValueError, match="Unknown encryption key version"):
+        decrypt_api_key(ct, 99)
+
+
+def test_v1_ciphertext_cannot_be_decrypted_with_v2(monkeypatch, _isolated_key_versions):
+    """A ciphertext encrypted with v1 must NOT decrypt with v2 — proves the
+    versions are cryptographically distinct, so a leak of one key does not
+    expose the other."""
+    from core.auth import encrypt_api_key, decrypt_api_key
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key(), v2=_fresh_fernet_key())
+    ct, _ = encrypt_api_key("payload", version=1)
+    # Decrypting v1 ciphertext with the v2 key raises Fernet's InvalidToken.
+    with pytest.raises(Exception):
+        decrypt_api_key(ct, 2)
+
+
+def test_rotation_simulation(monkeypatch, _isolated_key_versions):
+    """End-to-end simulation of the rotation worker: a v1 ciphertext is
+    decrypted with v1, re-encrypted with v2, and then decryptable with v2."""
+    from core.auth import encrypt_api_key, decrypt_api_key
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key(), v2=_fresh_fernet_key())
+    ct_v1, _ = encrypt_api_key("secret_to_rotate", version=1)
+    # Worker step: decrypt with old, re-encrypt with new.
+    plain = decrypt_api_key(ct_v1, 1)
+    ct_v2, new_ver = encrypt_api_key(plain, version=2)
+    assert new_ver == 2
+    assert decrypt_api_key(ct_v2, 2) == "secret_to_rotate"
+
+
+def test_backward_compat_get_fernet(monkeypatch, _isolated_key_versions):
+    """get_fernet() still returns the v1 Fernet so legacy call sites
+    continue to work without an immediate refactor."""
+    from core.auth import get_fernet
+    _set_key_envs(monkeypatch, v1=_fresh_fernet_key())
+    f = get_fernet()
+    ct = f.encrypt(b"hello").decode()
+    assert f.decrypt(ct.encode()).decode() == "hello"
+
+
+def test_admin_keys_rotate_requires_ceo(monkeypatch, _isolated_key_versions):
+    """The rotation endpoint must reject non-CEO admin sessions with 403."""
+    import asyncio
+    from fastapi import HTTPException
+    from routers.admin import dashboard as _dash
+
+    async def _fake_admin_session(request, db):
+        return {"role": "support", "admin_user_id": "a1", "email": "s@x.com"}
+
+    monkeypatch.setattr(_dash, "get_admin_session", _fake_admin_session)
+
+    class _Req:
+        async def json(self): return {"from_version": 1, "to_version": 2}
+        @property
+        def app(self): return type("_App", (), {"state": type("_S", (), {"pool": None})()})()
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.get_event_loop().run_until_complete(
+            _dash.admin_keys_rotate(_Req(), db=None)
+        )
+    assert exc.value.status_code == 403
