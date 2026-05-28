@@ -1042,10 +1042,10 @@ async def execute_service(request: Request, db=Depends(get_db)):
             "hint": missing_param_hint(_missing),
         })
 
-    # Stability has variable credits: 45 for core (default), 100 for ultra
+    # Stability has variable credits: 86 for core (default), 150 for ultra
     if service_slug == "stability":
         quality = params.get("quality", "core")
-        credit_cost = 100 if quality == "ultra" else 45
+        credit_cost = 150 if quality == "ultra" else 86
     else:
         credit_cost = config["credits"]
 
@@ -1214,7 +1214,7 @@ async def _execute_one(call: dict, pool, user_id: str, api_key_id: str) -> dict:
     svc_key = os.environ.get(config["key_var"], "")
 
     if slug == "stability":
-        credit_cost = 100 if params.get("quality") == "ultra" else 45
+        credit_cost = 150 if params.get("quality") == "ultra" else 86
     else:
         credit_cost = config["credits"]
 
@@ -1270,7 +1270,7 @@ def _batch_call_cost(call: dict) -> int:
     config = SERVICE_CONFIGS[slug]
     if slug == "stability":
         params = call.get("params") or {}
-        return 100 if params.get("quality") == "ultra" else 45
+        return 150 if params.get("quality") == "ultra" else 86
     return config["credits"]
 
 
@@ -1586,7 +1586,7 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
     # Step 4 — Execute (managed path, mirrors /execute)
     config = SERVICE_CONFIGS[selected_slug]
     if selected_slug == "stability":
-        credit_cost = 100 if mapped_params.get("quality") == "ultra" else 45
+        credit_cost = 150 if mapped_params.get("quality") == "ultra" else 86
     else:
         credit_cost = config["credits"]
 
