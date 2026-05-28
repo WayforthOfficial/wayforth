@@ -13,28 +13,28 @@ logger = logging.getLogger(__name__)
 SERVICE_CONFIGS = {
     # Inference
     "groq":        {"key_var": "GROQ_API_KEY",          "credits": 3,   "real_cost_per_call": 0.001},
-    "together":    {"key_var": "TOGETHER_API_KEY",      "credits": 4,   "real_cost_per_call": 0.001},
+    "together":    {"key_var": "TOGETHER_API_KEY",      "credits": 4,   "real_cost_per_call": 0.00027},
     # Translation
-    "deepl":       {"key_var": "DEEPL_API_KEY",         "credits": 20,  "real_cost_per_call": 0.013},
+    "deepl":       {"key_var": "DEEPL_API_KEY",         "credits": 20,  "real_cost_per_call": 0.0},
     # Search
     "serper":      {"key_var": "SERPER_API_KEY",        "credits": 3,   "real_cost_per_call": 0.001},
     "tavily":      {"key_var": "TAVILY_API_KEY",        "credits": 10,  "real_cost_per_call": 0.008},
-    "brave":       {"key_var": "BRAVE_API_KEY",         "credits": 5,   "real_cost_per_call": 0.002},
+    "brave":       {"key_var": "BRAVE_API_KEY",         "credits": 6,   "real_cost_per_call": 0.005},
     "perplexity":  {"key_var": "PERPLEXITY_API_KEY",    "credits": 10,  "real_cost_per_call": 0.006},
     # Data
-    "openweather": {"key_var": "OPENWEATHER_API_KEY",   "credits": 2,   "real_cost_per_call": 0.001},
+    "openweather": {"key_var": "OPENWEATHER_API_KEY",   "credits": 2,   "real_cost_per_call": 0.0},
     "newsapi":     {"key_var": "NEWSAPI_API_KEY",       "credits": 5,   "real_cost_per_call": 0.003},
-    "alphavantage":{"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 4,   "real_cost_per_call": 0.002},
-    "jina":        {"key_var": "JINA_API_KEY",          "credits": 4,   "real_cost_per_call": 0.002},
+    "alphavantage":{"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 4,   "real_cost_per_call": 0.0},
+    "jina":        {"key_var": "JINA_API_KEY",          "credits": 4,   "real_cost_per_call": 0.0001},
     # Audio / Voice
-    "assemblyai":  {"key_var": "ASSEMBLYAI_API_KEY",    "credits": 20,  "real_cost_per_call": 0.012},
+    "assemblyai":  {"key_var": "ASSEMBLYAI_API_KEY",    "credits": 25,  "real_cost_per_call": 0.0195},
     "elevenlabs":  {"key_var": "ELEVENLABS_API_KEY",    "credits": 200, "real_cost_per_call": 0.150},
     # Image — stability credits: 86 for core (default), 150 for ultra (resolved at call time)
     "stability":   {"key_var": "STABILITY_API_KEY",     "credits": 86,  "real_cost_per_call": 0.080},
     # Email
-    "resend":      {"key_var": "RESEND_API_KEY",        "credits": 3,   "real_cost_per_call": 0.001},
+    "resend":      {"key_var": "RESEND_API_KEY",        "credits": 3,   "real_cost_per_call": 0.0},
     # Web scraping
-    "firecrawl":   {"key_var": "FIRECRAWL_API_KEY",     "credits": 5,   "real_cost_per_call": 0.003},
+    "firecrawl":   {"key_var": "FIRECRAWL_API_KEY",     "credits": 6,   "real_cost_per_call": 0.00533},
     # Inference (additional)
     "mistral":     {"key_var": "MISTRAL_API_KEY",        "credits": 4,   "real_cost_per_call": 0.00025},
     "gemini":      {"key_var": "GEMINI_API_KEY",         "credits": 3,   "real_cost_per_call": 0.0002},
