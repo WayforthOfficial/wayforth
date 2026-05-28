@@ -36,8 +36,8 @@ SERVICE_CONFIGS = {
     # Web scraping
     "firecrawl":   {"key_var": "FIRECRAWL_API_KEY",     "credits": 5,   "real_cost_per_call": 0.003},
     # Inference (additional)
-    "mistral":     {"key_var": "MISTRAL_API_KEY",        "credits": 3,   "real_cost_per_call": 0.001},
-    "gemini":      {"key_var": "GEMINI_API_KEY",         "credits": 3,   "real_cost_per_call": 0.001},
+    "mistral":     {"key_var": "MISTRAL_API_KEY",        "credits": 4,   "real_cost_per_call": 0.00025},
+    "gemini":      {"key_var": "GEMINI_API_KEY",         "credits": 3,   "real_cost_per_call": 0.0002},
 }
 
 # Fallback alternatives — used when a service fails with 5xx (bidirectional pairs)
@@ -713,7 +713,7 @@ async def call_gemini(params: dict, api_key: str) -> dict:
         contents = [{"role": m["role"].replace("assistant", "model"), "parts": [{"text": m["content"]}]} for m in messages]
     else:
         contents = [{"parts": [{"text": prompt}]}]
-    model = params.get("model", "gemini-1.5-flash")
+    model = params.get("model", "gemini-2.5-flash")
     async with httpx.AsyncClient(timeout=15.0) as client:
         r = await client.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
