@@ -18,7 +18,7 @@ SERVICE_CONFIGS = {
     "deepl":       {"key_var": "DEEPL_API_KEY",         "credits": 20,  "real_cost_per_call": 0.013},
     # Search
     "serper":      {"key_var": "SERPER_API_KEY",        "credits": 3,   "real_cost_per_call": 0.001},
-    "tavily":      {"key_var": "TAVILY_API_KEY",        "credits": 4,   "real_cost_per_call": 0.002},
+    "tavily":      {"key_var": "TAVILY_API_KEY",        "credits": 10,  "real_cost_per_call": 0.008},
     "brave":       {"key_var": "BRAVE_API_KEY",         "credits": 5,   "real_cost_per_call": 0.002},
     "perplexity":  {"key_var": "PERPLEXITY_API_KEY",    "credits": 10,  "real_cost_per_call": 0.006},
     # Data
