@@ -23,7 +23,6 @@ SERVICE_CONFIGS = {
     "perplexity":  {"key_var": "PERPLEXITY_API_KEY",    "credits": 10,  "real_cost_per_call": 0.006},
     # Data
     "openweather": {"key_var": "OPENWEATHER_API_KEY",   "credits": 2,   "real_cost_per_call": 0.0},
-    "newsapi":     {"key_var": "NEWSAPI_API_KEY",       "credits": 5,   "real_cost_per_call": 0.003},
     "alphavantage":{"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 4,   "real_cost_per_call": 0.0},
     "jina":        {"key_var": "JINA_API_KEY",          "credits": 4,   "real_cost_per_call": 0.0001},
     # Audio / Voice
@@ -48,7 +47,7 @@ SERVICE_ALTERNATIVES = {
     "tavily":      "serper",
     "brave":       "serper",
     "serper":      "brave",
-    "newsapi":     "serper",
+
 }
 
 SERVICE_DISPLAY_NAMES = {
@@ -60,7 +59,7 @@ SERVICE_DISPLAY_NAMES = {
     "brave":       "Brave Search",
     "perplexity":  "Perplexity Sonar",
     "openweather": "OpenWeather",
-    "newsapi":     "NewsAPI",
+
     "alphavantage":"Alpha Vantage",
     "jina":        "Jina Reader",
     "assemblyai":  "AssemblyAI",
@@ -224,36 +223,6 @@ async def call_openweather(params: dict, api_key: str) -> dict:
         "wind_kph": round(data["wind"]["speed"] * 3.6, 1),
     }
 
-
-async def call_newsapi(params: dict, api_key: str) -> dict:
-    q = params.get("q") or params.get("query", "")
-    if not q:
-        raise Exception("params.q or params.query is required")
-    page_size = min(int(params.get("page_size", 5)), 10)
-    query_params = {
-        "q": q,
-        "language": params.get("language", "en"),
-        "pageSize": page_size,
-    }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(
-            "https://newsapi.org/v2/everything",
-            params=query_params,
-            headers={"X-Api-Key": api_key},
-        )
-    if r.status_code != 200:
-        raise Exception(f"NewsAPI error {r.status_code}: {r.text[:200]}")
-    data = r.json()
-    articles = []
-    for a in data.get("articles", [])[:page_size]:
-        articles.append({
-            "title": a.get("title", ""),
-            "description": a.get("description", ""),
-            "url": a.get("url", ""),
-            "published_at": a.get("publishedAt", ""),
-            "source": (a.get("source") or {}).get("name", ""),
-        })
-    return {"articles": articles}
 
 
 async def call_resend(params: dict, api_key: str) -> dict:
@@ -743,7 +712,7 @@ ADAPTERS = {
     "brave":       call_brave,
     "perplexity":  call_perplexity,
     "openweather": call_openweather,
-    "newsapi":     call_newsapi,
+
     "alphavantage":call_alphavantage,
     "jina":        call_jina,
     "assemblyai":  call_assemblyai,

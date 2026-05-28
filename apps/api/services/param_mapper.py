@@ -27,7 +27,7 @@ SERVICE_REQUIRED_PARAMS: dict[str, list[str]] = {
     "brave":        ["query"],
     "perplexity":   ["messages"],
     "openweather":  ["city"],
-    "newsapi":      ["query"],
+
     "alphavantage": ["symbol"],
     "jina":         ["url"],
     "resend":       ["to", "subject", "html"],
@@ -42,7 +42,7 @@ SERVICE_DEFAULTS: dict[str, dict] = {
     "groq":         {"model": "llama-3.3-70b-versatile", "max_tokens": 1024},
     "together":     {"model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "max_tokens": 1024},
     "stability":    {"steps": 30, "cfg_scale": 7},
-    "newsapi":      {"pageSize": 5},
+
     "alphavantage": {"function": "GLOBAL_QUOTE"},
     "tavily":       {"max_results": 5},
     "brave":        {"count": 10},
@@ -67,7 +67,7 @@ CATALOG_TO_MANAGED: dict[str, str] = {
     "perplexity":       "perplexity",
     "openweathermap":   "openweather",
     "openweather":      "openweather",
-    "newsapi":          "newsapi",
+
     "alpha_vantage":    "alphavantage",
     "alphavantage":     "alphavantage",
     "jina_embeddings":  "jina",
@@ -222,7 +222,7 @@ MANAGED_TO_CATALOG: dict[str, str] = {
     "brave":       "brave_search_2",
     "perplexity":  "perplexity_ai",
     "openweather": "openweathermap",
-    "newsapi":     "newsapi",
+
     "alphavantage":"alpha_vantage",
     "jina":        "jina_reader",
     "assemblyai":  "assemblyai",
