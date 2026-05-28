@@ -47,7 +47,7 @@ SERVICE_DEFAULTS: dict[str, dict] = {
     "tavily":       {"max_results": 5},
     "brave":        {"count": 10},
     "mistral":      {"model": "mistral-small-latest", "max_tokens": 1024},
-    "gemini":       {"model": "gemini-1.5-flash"},
+    "gemini":       {"model": "gemini-2.5-flash"},
 }
 
 # Catalog slug → SERVICE_CONFIGS key (handles naming mismatches from migration 033)
@@ -122,7 +122,7 @@ def map_params(service_slug: str, input_dict: dict) -> tuple[dict, list[str]]:
                     break
 
     # Special case: inference services accept plain text → wrap as messages
-    if service_slug in ("groq", "together", "perplexity") and "messages" not in mapped:
+    if service_slug in ("groq", "together", "perplexity", "mistral") and "messages" not in mapped:
         text = mapped.get("text") or mapped.get("content") or mapped.get("prompt")
         if text:
             mapped["messages"] = [{"role": "user", "content": str(text)}]
