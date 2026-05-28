@@ -1033,6 +1033,15 @@ async def execute_service(request: Request, db=Depends(get_db)):
     # ── Managed-catalog path ──────────────────────────────────────────────────
     config = SERVICE_CONFIGS[service_slug]
 
+    # Normalise params: resolve aliases, inject defaults, wrap prompt→messages
+    params, _missing = map_params(service_slug, params)
+    if _missing:
+        raise HTTPException(status_code=422, detail={
+            "error": "missing_param",
+            "missing": _missing,
+            "hint": missing_param_hint(_missing),
+        })
+
     # Stability has variable credits: 45 for core (default), 100 for ultra
     if service_slug == "stability":
         quality = params.get("quality", "core")
