@@ -1123,6 +1123,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
                 error_msg = "Service timeout"
             except Exception as e:
                 error_msg = str(e)[:300]
+                logger.warning("managed adapter error: %s attempt=%d error=%s", service_slug, attempt, error_msg)
                 break
 
     execution_ms = round((_time.time() - start) * 1000)
