@@ -1635,28 +1635,41 @@ async def system_status_v075(db=Depends(get_db)):
     # managed_services — only count services whose API key is actually configured.
     # Missing keys are expected gaps, not failures. A service without a key is simply
     # not yet active and must not contribute to the health status.
+    # Additionally, a service that has never had a successful probe is "inactive"
+    # (broken/blocked key), not an operational failure — exclude it from health calc.
     configured_slugs = [
         slug for slug, cfg in SERVICE_CONFIGS.items()
         if os.environ.get(cfg["key_var"])
     ]
     if not configured_slugs:
         # No keys at all — early state, not an outage
-        components["managed_services"] = "degraded"
+        components["managed_services"] = "operational"
     else:
         catalog_slugs = [MANAGED_TO_CATALOG.get(s, s) for s in configured_slugs]
         try:
             rows = await db.fetch(
-                "SELECT slug, consecutive_failures FROM services WHERE slug = ANY($1::text[])",
+                """
+                SELECT s.slug, s.consecutive_failures,
+                       COUNT(p.id) FILTER (WHERE p.reachable = true) > 0 AS ever_succeeded
+                FROM services s
+                LEFT JOIN service_probes p ON p.service_id = s.id
+                WHERE s.slug = ANY($1::text[])
+                GROUP BY s.slug, s.consecutive_failures
+                """,
                 catalog_slugs,
             )
-            failing = sum(1 for r in rows if (r["consecutive_failures"] or 0) > 2)
-            total = len(rows)
-            if failing == 0:
+            # Only evaluate health for services that have had at least one success.
+            # Services with zero successes have a non-functional key (inactive), not
+            # an operational outage — they must not pull the fleet status to degraded.
+            active_rows = [r for r in rows if r["ever_succeeded"]]
+            failing = sum(1 for r in active_rows if (r["consecutive_failures"] or 0) > 2)
+            total = len(active_rows)
+            if total == 0 or failing == 0:
                 components["managed_services"] = "operational"
             elif failing < total:
                 components["managed_services"] = "degraded"
             else:
-                # Every configured service is actively failing
+                # Every active service is failing
                 components["managed_services"] = "outage"
         except Exception:
             # Can't read probe data — degrade, don't call it an outage
