@@ -972,6 +972,141 @@ async def admin_reinstate_provider(
     return {"status": "reinstated", "changed_by": session["email"]}
 
 
+# ── Pioneer Boost Management ──────────────────────────────────────────────────
+
+@router.get("/admin-api/providers/boosts")
+async def admin_boosts_list(request: Request, db=Depends(get_db)):
+    """List all providers with active or historical Pioneer Boosts."""
+    session = await get_admin_session(request, db)
+    rows = await db.fetch("""
+        SELECT p.id, p.company_name, p.email, p.boost_tier,
+               p.boost_used, p.boost_paused, p.boost_wri_bonus,
+               p.boost_activated_at, p.boost_expires_at,
+               ps.service_slug
+          FROM providers p
+          LEFT JOIN provider_services ps ON ps.provider_id = p.id
+         WHERE p.boost_used = TRUE
+         ORDER BY p.boost_activated_at DESC NULLS LAST
+    """)
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    result = []
+    for r in rows:
+        expires = r["boost_expires_at"]
+        active = (
+            not bool(r["boost_paused"])
+            and expires is not None
+            and expires > now
+        )
+        days_remaining = max(0, (expires - now).days) if expires else 0
+        result.append({
+            "provider_id":    str(r["id"]),
+            "company_name":   r["company_name"],
+            "email":          r["email"],
+            "service_slug":   r["service_slug"],
+            "boost_tier":     r["boost_tier"],
+            "boost_active":   active,
+            "boost_paused":   bool(r["boost_paused"]),
+            "days_remaining": days_remaining,
+            "wri_bonus":      r["boost_wri_bonus"],
+            "activated_at":   r["boost_activated_at"].isoformat() if r["boost_activated_at"] else None,
+            "expires_at":     expires.isoformat() if expires else None,
+        })
+    return {"boosts": result, "total": len(result)}
+
+
+@router.post("/admin-api/providers/{provider_id}/boost/pause")
+async def admin_boost_pause(request: Request, provider_id: str, db=Depends(get_db)):
+    """Manually pause a provider's Pioneer Boost."""
+    session = await get_admin_session(request, db)
+    result = await db.execute(
+        "UPDATE providers SET boost_paused = TRUE, boost_wri_bonus = 0 WHERE id = $1::uuid AND boost_used = TRUE",
+        provider_id,
+    )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Provider not found or boost not activated")
+    try:
+        from core.audit import log_admin_action
+        await log_admin_action(db, session["email"], "boost_manually_paused", provider_id, {})
+    except Exception:
+        pass
+    return {"status": "paused", "provider_id": provider_id, "changed_by": session["email"]}
+
+
+@router.post("/admin-api/providers/{provider_id}/boost/unpause")
+async def admin_boost_unpause(request: Request, provider_id: str, db=Depends(get_db)):
+    """Manually unpause a provider's Pioneer Boost (restores correct wri_bonus from boost_tier)."""
+    from routers.provider import _BOOST_CONFIG
+    session = await get_admin_session(request, db)
+    row = await db.fetchrow(
+        "SELECT boost_tier, boost_expires_at FROM providers WHERE id = $1::uuid AND boost_used = TRUE",
+        provider_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Provider not found or boost not activated")
+    from datetime import datetime, timezone
+    if row["boost_expires_at"] and row["boost_expires_at"] < datetime.now(timezone.utc):
+        raise HTTPException(status_code=409, detail={"error": "boost_expired", "message": "Boost window has elapsed; cannot unpause."})
+    cfg = _BOOST_CONFIG.get(row["boost_tier"] or "", {})
+    correct_bonus = cfg.get("wri_bonus", 0)
+    await db.execute(
+        "UPDATE providers SET boost_paused = FALSE, boost_wri_bonus = $2 WHERE id = $1::uuid",
+        provider_id, correct_bonus,
+    )
+    try:
+        from core.audit import log_admin_action
+        await log_admin_action(db, session["email"], "boost_manually_unpaused", provider_id,
+                               {"wri_bonus_restored": correct_bonus})
+    except Exception:
+        pass
+    return {"status": "unpaused", "wri_bonus_restored": correct_bonus,
+            "provider_id": provider_id, "changed_by": session["email"]}
+
+
+# ── Pioneer Developer Program Stats ───────────────────────────────────────────
+
+@router.get("/admin-api/pioneer/stats")
+async def admin_pioneer_stats(request: Request, db=Depends(get_db)):
+    """Platform-wide Pioneer Program statistics."""
+    await get_admin_session(request, db)
+
+    total_opted_in = await db.fetchval(
+        "SELECT COUNT(*) FROM users WHERE pioneer_opt_in = TRUE"
+    ) or 0
+
+    credits_awarded_total = await db.fetchval("""
+        SELECT COALESCE(SUM(amount), 0)
+          FROM credit_transactions
+         WHERE type = 'pioneer_bonus'
+           AND created_at >= date_trunc('month', NOW())
+    """) or 0
+
+    pioneer_calls_month = await db.fetchval("""
+        SELECT COUNT(DISTINCT sa.id)
+          FROM search_analytics sa
+          JOIN search_outcomes so ON so.query_id = sa.id
+         WHERE so.pioneer_routed = TRUE
+           AND sa.created_at >= date_trunc('month', NOW())
+    """) or 0
+
+    # Breakdown of opted-in users by tier
+    tier_rows = await db.fetch("""
+        SELECT ak.tier, COUNT(*) AS cnt
+          FROM users u
+          JOIN api_keys ak ON ak.user_id = u.id AND ak.active = TRUE
+         WHERE u.pioneer_opt_in = TRUE
+         GROUP BY ak.tier
+    """)
+    by_tier = {r["tier"]: int(r["cnt"]) for r in tier_rows}
+
+    return {
+        "total_pioneer_developers": int(total_opted_in),
+        "pioneer_calls_this_month": int(pioneer_calls_month),
+        "credits_awarded_this_month": int(credits_awarded_total),
+        "opted_in_by_tier": by_tier,
+    }
+
+
 # ── Catalog / Services Management ─────────────────────────────────────────────
 
 @router.get("/admin-api/catalog/services")
