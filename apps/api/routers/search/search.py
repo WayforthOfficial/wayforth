@@ -214,6 +214,53 @@ async def search_services(
                     _s["score"] = (_s.get("score") or 0) - 20
             ranked.sort(key=lambda _s: (_s.get("score") or 0), reverse=True)
 
+    # ── Pioneer routing (60/40 split) ────────────────────────────────────────
+    # For users with pioneer_opt_in=TRUE: if boosted providers exist in the
+    # result category, promote them to the front on 60% of calls.
+    # Deterministic per-search via MD5 of query_id — not purely random,
+    # consistent within a request.
+    _pioneer_routing = False
+    _pioneer_routed_to_boosted = False
+    _pioneer_signal_weight = 1.0
+    _pioneer_boosted_slugs: set = set()
+
+    if auth.get("authenticated") and auth.get("user_id"):
+        try:
+            _pioneer_row = await db.fetchrow(
+                "SELECT pioneer_opt_in FROM users WHERE id = $1::uuid",
+                auth["user_id"],
+            )
+            if _pioneer_row and _pioneer_row["pioneer_opt_in"]:
+                _pioneer_routing = True
+                # Use explicit category or fall back to no filter
+                _cat_param = category  # None means any category
+                _proto_query_id = str(uuid_lib.uuid4())  # temporary — final set below
+                _boosted = await db.fetch("""
+                    SELECT ps.service_slug
+                      FROM provider_services ps
+                      JOIN providers p ON p.id = ps.provider_id
+                      JOIN services s ON s.slug = ps.service_slug
+                     WHERE p.boost_used    = TRUE
+                       AND p.boost_paused  = FALSE
+                       AND p.boost_expires_at > NOW()
+                       AND ($1::text IS NULL OR s.category = $1)
+                """, _cat_param)
+                _pioneer_boosted_slugs = {r["service_slug"] for r in _boosted}
+
+                if _pioneer_boosted_slugs:
+                    # query_id not yet generated; use hash of q+auth for determinism
+                    import hashlib as _hl
+                    _seed = int(_hl.md5(f"{q}{auth['user_id']}".encode()).hexdigest()[:8], 16)
+                    if _seed % 10 < 6:  # 60% path — route to boosted first
+                        _pioneer_routed_to_boosted = True
+                        _pioneer_signal_weight = 0.75
+                        _boosted_first = [s for s in ranked if s.get("slug") in _pioneer_boosted_slugs]
+                        _others = [s for s in ranked if s.get("slug") not in _pioneer_boosted_slugs]
+                        ranked = _boosted_first + _others
+        except Exception:
+            pass
+    # ── end pioneer routing ───────────────────────────────────────────────────
+
     top = ranked[:limit]
 
     fallback_used = False
@@ -397,6 +444,42 @@ async def search_services(
         if remaining > 0:
             response["signup_url"] = "https://wayforth.io/signup"
             response["message"] = f"{remaining} free {'search' if remaining == 1 else 'searches'} remaining. Sign up free for 100/month."
+
+    # Pioneer routing metadata — always present for pioneer users
+    if _pioneer_routing:
+        response["pioneer_routing"] = True
+        response["pioneer_routed_to_boosted"] = _pioneer_routed_to_boosted
+        response["signal_weight"] = _pioneer_signal_weight
+        response["boost_active"] = len(_pioneer_boosted_slugs) > 0
+
+        # Record pioneer routing outcome in search_outcomes (background)
+        if pool:
+            async def _record_pioneer_outcome(
+                _qid=query_id, _q=q, _top=top, _sid=session_id,
+                _routed=_pioneer_routed_to_boosted, _sw=_pioneer_signal_weight,
+            ):
+                try:
+                    async with pool.acquire() as conn:
+                        _service_id = None
+                        if _top:
+                            _slug = _top[0].get("slug")
+                            if _slug:
+                                _srow = await conn.fetchrow(
+                                    "SELECT id FROM services WHERE slug = $1", _slug
+                                )
+                                if _srow:
+                                    _service_id = str(_srow["id"])
+                        await conn.execute("""
+                            INSERT INTO search_outcomes
+                              (query_id, query_text, service_id, outcome_type,
+                               session_id, signal_weight, pioneer_routed)
+                            VALUES ($1::uuid, $2, $3::uuid, 'result_viewed',
+                                    $4, $5, $6)
+                        """, _qid, _q, _service_id, _sid or None, _sw, _routed)
+                except Exception:
+                    pass
+            asyncio.create_task(_record_pioneer_outcome())
+
     return response
 
 
