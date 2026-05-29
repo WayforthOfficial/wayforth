@@ -21,8 +21,8 @@ PAYMENT_MULTIPLIERS: dict[str, float] = {
 
 PLANS = {
     "free": {
-        "monthly_credits":    600,
-        "calls_included":     100,
+        "monthly_credits":    100,
+        "calls_included":     100,   # credits per month (was call-count; now equals monthly_credits)
         "price_usd":          0,
         "price_usdc":         0,
         "usdc_bonus_credits": 0,
@@ -31,7 +31,7 @@ PLANS = {
     },
     "builder": {
         "monthly_credits":    6_000,
-        "calls_included":     1_000,
+        "calls_included":     6_000,
         "price_usd":          12,
         "price_usdc":         12,
         "usdc_bonus_credits": 300,    # 5%
@@ -40,7 +40,7 @@ PLANS = {
     },
     "starter": {
         "monthly_credits":    21_000,
-        "calls_included":     3_500,
+        "calls_included":     21_000,
         "price_usd":          29,
         "price_usdc":         29,
         "usdc_bonus_credits": 1_050,  # 5%
@@ -49,7 +49,7 @@ PLANS = {
     },
     "pro": {
         "monthly_credits":    72_000,
-        "calls_included":     12_000,
+        "calls_included":     72_000,
         "price_usd":          99,
         "price_usdc":         99,
         "usdc_bonus_credits": 3_600,   # 5%
@@ -58,7 +58,7 @@ PLANS = {
     },
     "growth": {
         "monthly_credits":    240_000,
-        "calls_included":     40_000,
+        "calls_included":     240_000,
         "price_usd":          299,
         "price_usdc":         299,
         "usdc_bonus_credits": 12_000,  # 5%
@@ -67,7 +67,7 @@ PLANS = {
     },
     "enterprise": {
         "monthly_credits":    1_000_000,
-        "calls_included":     100_000,
+        "calls_included":     1_000_000,
         "price_usd":          0,
         "price_usdc":         0,
         "usdc_bonus_credits": 0,
@@ -243,22 +243,26 @@ def _do_send_webhook_suspension_email(contact_email: str, webhook_url: str, webh
         logger.warning("send_webhook_suspension_email error: %s", _e)
 
 
-async def _increment_calls(pool, api_key_id: str) -> int:
-    """Single increment site for calls_count and monthly_calls_count.
-    All call paths (/run, /execute) go through here — nowhere else.
-    Returns calls_remaining, or 0 on failure.
+async def _increment_calls(pool, api_key_id: str, cost: int = 1) -> int:
+    """Increment call counter and credit-usage tracker after a successful execution.
+
+    `cost` is the credit cost of the call (e.g. 3 for groq, 20 for deepl).
+    monthly_calls_count now tracks credits consumed this month, not raw call count,
+    so compute_calls_remaining() returns the correct credit-based balance.
+
+    Returns credits_remaining, or 0 on failure.
     """
     try:
         async with pool.acquire() as _conn:
             row = await _conn.fetchrow(
                 "UPDATE api_keys "
                 "SET calls_count = calls_count + 1, "
-                "    monthly_calls_count = monthly_calls_count + 1, "
+                "    monthly_calls_count = monthly_calls_count + $2, "
                 "    monthly_calls_reset_at = COALESCE(monthly_calls_reset_at, "
                 "        date_trunc('month', NOW()) + INTERVAL '1 month') "
                 "WHERE id = $1::uuid "
                 "RETURNING calls_count, monthly_calls_count, tier, user_id",
-                api_key_id,
+                api_key_id, cost,
             )
         if row:
             p = PLANS.get(row["tier"], PLANS["free"])
@@ -840,6 +844,21 @@ async def _monthly_topup_reset():
                     WHERE monthly_calls_reset_at IS NOT NULL
                       AND monthly_calls_reset_at <= NOW()
                 """)
+                # Replenish credits_balance to the plan's monthly_credits allowance.
+                # Cap at monthly_credits so USDC top-ups and pioneer drip accruals
+                # above the base allowance are not wiped; only the base allowance portion
+                # resets. The GREATEST() guard ensures we never reduce a balance that is
+                # legitimately above the plan limit (e.g. unused credits carried forward
+                # by USDC subscribers who paid in advance).
+                for _rk in reset_keys:
+                    _p = PLANS.get(_rk["tier"], PLANS["free"])
+                    _monthly = _p["monthly_credits"]
+                    await db.execute("""
+                        UPDATE user_credits
+                           SET credits_balance = GREATEST(credits_balance, $1),
+                               updated_at = NOW()
+                         WHERE user_id = $2::uuid
+                    """, _monthly, _rk["user_id"])
             if updated and updated != "UPDATE 0":
                 logger.info("Monthly topup spend reset: %s", updated)
             if calls_reset and calls_reset != "UPDATE 0":

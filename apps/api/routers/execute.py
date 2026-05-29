@@ -929,7 +929,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
             })
 
         if _api_key_id:
-            await _increment_calls(app.state.pool, str(_api_key_id))
+            await _increment_calls(app.state.pool, str(_api_key_id), cost=total_credits)
         return {
             "status": "ok",
             "service": service_slug,
@@ -1065,7 +1065,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
         from main import app
         asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), service_slug))
         if _api_key_id:
-            await _increment_calls(app.state.pool, str(_api_key_id))
+            await _increment_calls(app.state.pool, str(_api_key_id), cost=credit_cost)
         return {
             "status": "ok",
             "service": service_slug,
@@ -1237,7 +1237,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
     )
     asyncio.create_task(_check_spend_anomaly(app.state.pool, str(user_id)))
     if _api_key_id:
-        await _increment_calls(app.state.pool, str(_api_key_id))
+        await _increment_calls(app.state.pool, str(_api_key_id), cost=credit_cost)
 
     resp = {
         "status": "ok",
@@ -1683,10 +1683,10 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
             "top_up": "https://wayforth.io/billing",
         })
 
-    _calls_remaining: int = balance_after // CREDITS_PER_CALL  # fallback if key absent
+    _calls_remaining: int = balance_after  # credits remaining; fallback if key absent
     if _api_key_id:
-        _inc = await _increment_calls(app.state.pool, str(_api_key_id))
-        if _inc:
+        _inc = await _increment_calls(app.state.pool, str(_api_key_id), cost=credit_cost)
+        if _inc is not None:
             _calls_remaining = _inc
 
     # ── Streaming path (inference LLM intents only) ───────────────────────────

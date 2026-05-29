@@ -284,30 +284,34 @@ async def get_balance(request: Request, db=Depends(get_db)):
     monthly_reset_at = key_record.get("monthly_calls_reset_at")
     payment_rail = key_record.get("payment_rail") or "card"
 
-    base_calls = plan_def["calls_included"]
+    base_credits = plan_def["monthly_credits"]
     multiplier = PAYMENT_MULTIPLIERS.get(payment_method, 1.00)
-    bonus_calls = math.floor(base_calls * (multiplier - 1.0))
-    calls_remaining = await compute_calls_remaining(db, str(key_record["id"]))
+    bonus_credits = math.floor(base_credits * (multiplier - 1.0))
+    # credits_remaining reads from the authoritative credit ledger (user_credits.credits_balance),
+    # not from monthly_calls_count which used to track raw call counts. monthly_calls_count now
+    # tracks credits consumed this month (incremented by credit_cost per call).
+    credits_remaining = balance  # balance already read from user_credits above
 
-    # Forecast — uses month-to-date average; returns null if < 3 days of history
+    # Forecast — daily average in credits (not calls). Returns null if < 3 days history.
     forecast = None
-    monthly_count = key_record.get("monthly_calls_count") or 0
+    monthly_credits_consumed = key_record.get("monthly_calls_count") or 0
     if monthly_reset_at:
         now_utc = datetime.now(timezone.utc)
         period_start = monthly_reset_at.replace(tzinfo=timezone.utc) - timedelta(days=30)
-        days_elapsed = max(0, (now_utc - period_start).days)
+        days_elapsed = max(1, (now_utc - period_start).days)
         days_until_reset = max(0, (monthly_reset_at.replace(tzinfo=timezone.utc) - now_utc).days)
-        if days_elapsed >= 3 and monthly_count > 0:
-            daily_avg = round(monthly_count / days_elapsed, 2)
-            if daily_avg > 0:
-                days_remaining = int(calls_remaining / daily_avg)
+        if days_elapsed >= 3 and monthly_credits_consumed > 0:
+            daily_avg_credits = round(monthly_credits_consumed / days_elapsed, 2)
+            if daily_avg_credits > 0:
+                days_remaining = int(credits_remaining / daily_avg_credits)
                 will_exhaust = days_remaining < days_until_reset
             else:
                 days_remaining = "unlimited"
                 will_exhaust = False
-            projected = max(0, calls_remaining - int((daily_avg or 0) * days_until_reset))
+            projected = max(0, credits_remaining - int((daily_avg_credits or 0) * days_until_reset))
             forecast = {
-                "daily_avg_calls": daily_avg,
+                "daily_avg_credits": daily_avg_credits,
+                "daily_avg_calls": daily_avg_credits,   # backward compat alias
                 "days_remaining_at_current_rate": days_remaining,
                 "projected_reset_balance": projected,
                 "will_exhaust_before_reset": will_exhaust,
@@ -315,12 +319,12 @@ async def get_balance(request: Request, db=Depends(get_db)):
 
     return {
         "plan": tier,
-        "credits_remaining": calls_remaining,
-        "credits_included": base_calls + bonus_calls,
-        "calls_remaining": calls_remaining,   # backward compat
-        "calls_included": base_calls + bonus_calls,  # backward compat
-        "base_calls": base_calls,
-        "bonus_calls": bonus_calls,
+        "credits_remaining": credits_remaining,
+        "credits_included": base_credits + bonus_credits,
+        "calls_remaining": credits_remaining,         # backward compat
+        "calls_included": base_credits + bonus_credits,  # backward compat
+        "base_calls": base_credits,
+        "bonus_calls": bonus_credits,
         "payment_method": payment_method,
         "payment_multiplier": multiplier,
         "resets_at": resets_at.isoformat() if resets_at else None,
