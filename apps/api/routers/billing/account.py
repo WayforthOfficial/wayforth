@@ -1342,22 +1342,45 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
     tier = await _resolve_pioneer_tier(db, user_id)
     cooldown_until = user["pioneer_cooldown_until"]
     cooldown_active = bool(cooldown_until and cooldown_until > now)
+
+    # Count providers whose boost is currently active (opted-in, not paused, not expired).
+    active_boosted_providers = 0
+    try:
+        active_boosted_providers = await db.fetchval("""
+            SELECT COUNT(DISTINCT p.id)
+              FROM providers p
+             WHERE p.boost_used    = TRUE
+               AND p.boost_paused  = FALSE
+               AND p.boost_expires_at > NOW()
+        """) or 0
+    except Exception:
+        pass
+
     return {
-        "opted_in":                   bool(user["pioneer_opt_in"]),
-        "opted_in_at":                user["pioneer_opted_in_at"].isoformat() if user["pioneer_opted_in_at"] else None,
-        "opted_out_at":               user["pioneer_opt_out_at"].isoformat() if user["pioneer_opt_out_at"] else None,
-        "daily_credits":              _PIONEER_DAILY_CREDITS.get(tier, 0),
-        "tier":                       tier,
-        "last_drip_date":             user["pioneer_last_drip_date"].isoformat() if user["pioneer_last_drip_date"] else None,
-        "cooldown_until":             cooldown_until.isoformat() if cooldown_active else None,
+        "opted_in":                              bool(user["pioneer_opt_in"]),
+        "opted_in_at":                           user["pioneer_opted_in_at"].isoformat() if user["pioneer_opted_in_at"] else None,
+        "opted_out_at":                          user["pioneer_opt_out_at"].isoformat() if user["pioneer_opt_out_at"] else None,
+        "daily_credits":                         _PIONEER_DAILY_CREDITS.get(tier, 0),
+        "tier":                                  tier,
+        "last_drip_date":                        user["pioneer_last_drip_date"].isoformat() if user["pioneer_last_drip_date"] else None,
+        "cooldown_until":                        cooldown_until.isoformat() if cooldown_active else None,
         # days until the rejoin cooldown expires (only non-null when cooldown_active).
         # Pioneer enrollment is INDEFINITE — there is no 30-day cap. This field
         # does NOT count down from 30; it only counts down after opting out.
-        "cooldown_days_remaining":    _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,
-        "days_remaining":             _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,  # backward compat
-        "credits_earned_this_month":  int(credits_earned_this_month),
-        "pioneer_calls_made":         int(pioneer_calls_made),
-        "pioneer_calls_this_month":   int(pioneer_calls_this_month),
+        "cooldown_days_remaining":               _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,
+        "days_remaining":                        _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,  # backward compat
+        "credits_earned_this_month":             int(credits_earned_this_month),
+        # Searches that were in the 60% boosted bucket AND had a boosted provider
+        # promoted to the front. Not "API calls made" — pioneer_calls_* names kept
+        # as backward-compat aliases.
+        "pioneer_boosted_searches":              int(pioneer_calls_made),
+        "pioneer_boosted_searches_this_month":   int(pioneer_calls_this_month),
+        "pioneer_calls_made":                    int(pioneer_calls_made),         # backward compat
+        "pioneer_calls_this_month":              int(pioneer_calls_this_month),   # backward compat
+        # How many providers currently have an active boost window. When 0, the
+        # 60% routing bucket is empty and pioneer_routing degrades gracefully to
+        # normal WayforthRank order (signal_weight stays 1.0).
+        "active_boosted_providers":              int(active_boosted_providers),
     }
 
 

@@ -452,12 +452,16 @@ async def search_services(
             response["signup_url"] = "https://wayforth.io/signup"
             response["message"] = f"{remaining} free {'search' if remaining == 1 else 'searches'} remaining. Sign up free for 100/month."
 
-    # Pioneer routing metadata — always present for pioneer users
-    if _pioneer_routing:
-        response["pioneer_routing"] = True
+    # Pioneer routing metadata — included on every authenticated response so
+    # developers can see their pioneer status and whether a boost was applied.
+    # pioneer_routing=False means the user is not opted in (not a problem).
+    # pioneer_routing=True + pioneer_routed_to_boosted=False means opted in
+    # but this search fell on the 40% normal path (expected 40% of the time).
+    if auth["authenticated"]:
+        response["pioneer_routing"] = _pioneer_routing
         response["pioneer_routed_to_boosted"] = _pioneer_routed_to_boosted
-        response["signal_weight"] = _pioneer_signal_weight
-        response["boost_active"] = len(_pioneer_boosted_slugs) > 0
+        response["signal_weight"] = _pioneer_signal_weight if _pioneer_routing else None
+        response["boost_active"] = len(_pioneer_boosted_slugs) > 0 if _pioneer_routing else False
 
         # Record pioneer routing outcome in search_outcomes (background)
         if pool:
