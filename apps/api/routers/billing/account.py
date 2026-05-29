@@ -1350,7 +1350,11 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
         "tier":                       tier,
         "last_drip_date":             user["pioneer_last_drip_date"].isoformat() if user["pioneer_last_drip_date"] else None,
         "cooldown_until":             cooldown_until.isoformat() if cooldown_active else None,
-        "days_remaining":             _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,
+        # days until the rejoin cooldown expires (only non-null when cooldown_active).
+        # Pioneer enrollment is INDEFINITE — there is no 30-day cap. This field
+        # does NOT count down from 30; it only counts down after opting out.
+        "cooldown_days_remaining":    _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,
+        "days_remaining":             _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,  # backward compat
         "credits_earned_this_month":  int(credits_earned_this_month),
         "pioneer_calls_made":         int(pioneer_calls_made),
         "pioneer_calls_this_month":   int(pioneer_calls_this_month),
@@ -1358,9 +1362,14 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
 
 
 async def run_pioneer_drip(db) -> int:
-    """Award one UTC day's Pioneer drip to every opted-in user not yet dripped
-    today. Idempotent per day via a conditional claim UPDATE (so overlapping runs
-    or a mid-day restart never double-drip). Returns the number of users dripped.
+    """Award one calendar-day Pioneer drip to every opted-in user not yet dripped
+    today. Uses Pacific time (UTC-7) as the calendar-day boundary so users in the
+    western US don't get skipped when the job runs just after UTC midnight.
+
+    TODO: swap CURRENT_DATE_PACIFIC to per-user tz once users.timezone is stored.
+
+    Idempotent per day via a conditional claim UPDATE — a concurrent run sees
+    last_drip_date == today and gets no row.
     """
     from core.audit import log_admin_action
 
@@ -1369,7 +1378,10 @@ async def run_pioneer_drip(db) -> int:
                COALESCE((SELECT tier FROM api_keys WHERE user_id = u.id AND active = TRUE LIMIT 1), 'free') AS tier
           FROM users u
          WHERE u.pioneer_opt_in = TRUE
-           AND (u.pioneer_last_drip_date IS NULL OR u.pioneer_last_drip_date < CURRENT_DATE)
+           AND (
+               u.pioneer_last_drip_date IS NULL
+               OR u.pioneer_last_drip_date < (NOW() AT TIME ZONE 'America/Los_Angeles')::date
+           )
     """)
 
     dripped = 0
@@ -1378,16 +1390,19 @@ async def run_pioneer_drip(db) -> int:
         tier = r["tier"] or "free"
         daily = _PIONEER_DAILY_CREDITS.get(tier, 0)
         async with db.transaction():
-            # Claim today's drip atomically. Only the runner whose UPDATE returns
-            # a row proceeds; a concurrent run sees last_drip_date == today and
-            # gets no row.
+            # Claim today's drip atomically using Pacific calendar date as the
+            # idempotency key. last_drip_date is DATE (no tz), so we store the
+            # Pacific date to match the boundary used in the eligibility check.
+            pacific_today = await db.fetchval(
+                "SELECT (NOW() AT TIME ZONE 'America/Los_Angeles')::date"
+            )
             claimed = await db.fetchval("""
-                UPDATE users SET pioneer_last_drip_date = CURRENT_DATE
+                UPDATE users SET pioneer_last_drip_date = $2
                  WHERE id = $1
                    AND pioneer_opt_in = TRUE
-                   AND (pioneer_last_drip_date IS NULL OR pioneer_last_drip_date < CURRENT_DATE)
+                   AND (pioneer_last_drip_date IS NULL OR pioneer_last_drip_date < $2)
                  RETURNING id
-            """, uid)
+            """, uid, pacific_today)
             if not claimed:
                 continue
             if daily > 0:
