@@ -315,8 +315,10 @@ async def get_balance(request: Request, db=Depends(get_db)):
 
     return {
         "plan": tier,
-        "calls_remaining": calls_remaining,
-        "calls_included": base_calls + bonus_calls,
+        "credits_remaining": calls_remaining,
+        "credits_included": base_calls + bonus_calls,
+        "calls_remaining": calls_remaining,   # backward compat
+        "calls_included": base_calls + bonus_calls,  # backward compat
         "base_calls": base_calls,
         "bonus_calls": bonus_calls,
         "payment_method": payment_method,
@@ -349,8 +351,10 @@ async def account_credits(request: Request, db=Depends(get_db)):
 
     return {
         "plan": tier,
-        "calls_remaining": calls_remaining,
-        "calls_included": PLANS.get(tier, PLANS["free"])["calls_included"],
+        "credits_remaining": calls_remaining,
+        "credits_included": PLANS.get(tier, PLANS["free"])["calls_included"],
+        "calls_remaining": calls_remaining,   # backward compat
+        "calls_included": PLANS.get(tier, PLANS["free"])["calls_included"],  # backward compat
         # Dashboard-only credit detail (not shown in public docs)
         "credits_remaining": balance,
         "credits_total": lifetime,
@@ -1010,8 +1014,10 @@ async def get_invoice(year: int, month: int, request: Request, db=Depends(get_db
         "period": f"{month_name} {year}",
         "issued_to": key_record["email"],
         "plan": tier.capitalize(),
-        "calls_included": plan_def["calls_included"],
-        "calls_used": calls_used,
+        "credits_included": plan_def["calls_included"],
+        "credits_used": calls_used,
+        "calls_included": plan_def["calls_included"],  # backward compat
+        "calls_used": calls_used,  # backward compat
         "amount_usd": plan_def.get("price_usd", 0),
         "payment_method": payment_method,
         "status": "paid" if plan_def.get("price_usd", 0) > 0 else "unpaid",
@@ -1068,8 +1074,10 @@ async def account_alerts(request: Request, db=Depends(get_db)):
         "days_remaining": days_remaining,
         "threshold_80_pct": threshold_80,
         "threshold_95_pct": threshold_95,
-        "calls_remaining": calls_remaining,
-        "calls_included": calls_included,
+        "credits_remaining": calls_remaining,
+        "credits_included": calls_included,
+        "calls_remaining": calls_remaining,   # backward compat
+        "calls_included": calls_included,     # backward compat
     }
 
 

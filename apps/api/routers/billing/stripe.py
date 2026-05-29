@@ -227,7 +227,8 @@ async def get_packages(request: Request):
                 "plan": key,
                 "label": pkg['label'],
                 "price": "custom",
-                "calls_included": plan.get("calls_included", 0),
+                "credits_included": plan.get("calls_included", 0),
+                "calls_included": plan.get("calls_included", 0),  # backward compat
                 "description": "Custom pricing, priority support, SLA",
             })
         else:
@@ -235,7 +236,8 @@ async def get_packages(request: Request):
                 "plan": key,
                 "label": pkg['label'],
                 "price_usd": pkg['price_usd'],
-                "calls_included": plan.get("calls_included", pkg['credits']),
+                "credits_included": plan.get("calls_included", pkg['credits']),
+                "calls_included": plan.get("calls_included", pkg['credits']),  # backward compat
                 "price_per_credit": round(pkg['price_usd'] / pkg['credits'], 8),
             })
 

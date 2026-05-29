@@ -267,7 +267,7 @@ async def _run_sse_stream(slug, params, svc_key, user_id, credit_cost, pool, ser
             except Exception:
                 pass
             return
-        yield f"data: {_json.dumps({'token': '', 'done': True, 'service_used': service_used, 'calls_remaining': calls_remaining})}\n\n"
+        yield f"data: {_json.dumps({'token': '', 'done': True, 'service_used': service_used, 'credits_remaining': calls_remaining, 'calls_remaining': calls_remaining})}\n\n"
     finally:
         _active_streams[stream_owner_key] = max(0, _active_streams.get(stream_owner_key, 1) - 1)
 
@@ -1052,7 +1052,8 @@ async def execute_service(request: Request, db=Depends(get_db)):
                     "error": "Service unavailable",
                     "refunded": True,
                     "credits_restored": 1,
-                    "calls_remaining": new_bal,
+                    "credits_remaining": new_bal,
+                    "calls_remaining": new_bal,  # backward compat
                 })
             else:
                 raise HTTPException(status_code=400, detail={
@@ -1210,7 +1211,8 @@ async def execute_service(request: Request, db=Depends(get_db)):
                 "error": "Service unavailable",
                 "refunded": True,
                 "credits_restored": credit_cost,
-                "calls_remaining": new_bal,
+                "credits_remaining": new_bal,
+                "calls_remaining": new_bal,  # backward compat
             })
     elif error_msg:
         raise HTTPException(status_code=400, detail={
@@ -1398,7 +1400,8 @@ async def execute_batch(request: Request, db=Depends(get_db)):
     return {
         "results": list(results),
         "total_execution_ms": total_ms,
-        "calls_remaining": calls_remaining,
+        "credits_remaining": calls_remaining,
+        "calls_remaining": calls_remaining,  # backward compat
     }
 
 
@@ -1773,7 +1776,8 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
                 "error": "Service unavailable",
                 "refunded": True,
                 "credits_restored": credit_cost,
-                "calls_remaining": _all_failed_bal,
+                "credits_remaining": _all_failed_bal,
+                "calls_remaining": _all_failed_bal,  # backward compat
                 "service": _fallback_from,
             })
     elif error_msg:
@@ -1821,7 +1825,8 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
             "results_considered": len(top5),
             "selected_rank": selected_rank,
         },
-        "calls_remaining": _calls_remaining,
+        "credits_remaining": _calls_remaining,
+        "calls_remaining": _calls_remaining,  # backward compat
         "execution_ms": execution_ms,
         "priority": _tier in ("pro", "growth"),
     }

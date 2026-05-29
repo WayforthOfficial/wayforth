@@ -312,7 +312,8 @@ async def subscribe_usdc(request: Request, db=Depends(get_db)):
         "payment_address": wayforth_wallet,
         "amount_usdc": amount_usdc,
         "plan": plan,
-        "calls_included": calls_included,
+        "credits_included": calls_included,
+        "calls_included": calls_included,  # backward compat
         "bonus_calls": bonus_calls,
         "reference_id": reference_id,
         "memo": "Include this in USDC transfer memo",
@@ -538,7 +539,8 @@ async def get_billing_settings(request: Request, db=Depends(get_db)):
         "monthly_topup_spent_usd": round(spent, 2),
         "monthly_topup_remaining_usd": round(limit - spent, 2),
         "monthly_topup_reset_at": reset_at.date().isoformat() if reset_at else None,
-        "calls_remaining": await compute_calls_remaining(db, str(key_record["id"])),
+        "credits_remaining": await compute_calls_remaining(db, str(key_record["id"])),
+        "calls_remaining": await compute_calls_remaining(db, str(key_record["id"])),  # backward compat
         "plan": tier,
         "payment_rail": payment_rail,
         "usdc_bonus_rate": 0.05,

@@ -277,7 +277,8 @@ async def _increment_calls(pool, api_key_id: str) -> int:
                 if 0 < remaining < t80 and (remaining + 1) >= t80:
                     _asyncio.create_task(_dispatch_webhooks(
                         str(row["user_id"]), "wayf.balance_warning_80", {
-                            "calls_remaining": remaining,
+                            "credits_remaining": remaining,
+                            "calls_remaining": remaining,  # backward compat
                             "monthly_limit": monthly_limit,
                             "threshold_percent": 80,
                             "tier": row["tier"],
@@ -291,7 +292,8 @@ async def _increment_calls(pool, api_key_id: str) -> int:
                 if 0 < remaining < t10 and (remaining + 1) >= t10:
                     _asyncio.create_task(_dispatch_webhooks(
                         str(row["user_id"]), "wayf.balance_low", {
-                            "calls_remaining": remaining,
+                            "credits_remaining": remaining,
+                            "calls_remaining": remaining,  # backward compat
                             "monthly_limit": monthly_limit,
                             "threshold_percent": 10,
                             "tier": row["tier"],
@@ -302,7 +304,8 @@ async def _increment_calls(pool, api_key_id: str) -> int:
                 if 0 < remaining < t5 and (remaining + 1) >= t5:
                     _asyncio.create_task(_dispatch_webhooks(
                         str(row["user_id"]), "wayf.balance_warning_95", {
-                            "calls_remaining": remaining,
+                            "credits_remaining": remaining,
+                            "calls_remaining": remaining,  # backward compat
                             "monthly_limit": monthly_limit,
                             "threshold_percent": 95,
                             "tier": row["tier"],
@@ -315,7 +318,8 @@ async def _increment_calls(pool, api_key_id: str) -> int:
                 if remaining == 0:
                     _asyncio.create_task(_dispatch_webhooks(
                         str(row["user_id"]), "credits.exhausted", {
-                            "calls_remaining": 0,
+                            "credits_remaining": 0,
+                            "calls_remaining": 0,  # backward compat
                             "monthly_limit": monthly_limit,
                             "tier": row["tier"],
                         }
@@ -732,7 +736,8 @@ async def _maybe_dispatch_credits_low(pool, user_id: str, api_key_str: str, bala
 
         payload: dict = {
             "event": "credits.low",
-            "calls_remaining": calls_remaining,
+            "credits_remaining": calls_remaining,
+            "calls_remaining": calls_remaining,  # backward compat
             "billing_permission": billing_perm,
             "auto_topup_available": auto_topup_available,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -845,7 +850,8 @@ async def _monthly_topup_reset():
                     asyncio.create_task(_dispatch_webhooks(
                         str(_rk["user_id"]), "wayf.calls_reset", {
                             "tier": _rk["tier"],
-                            "calls_included": p["calls_included"],
+                            "credits_included": p["calls_included"],
+                            "calls_included": p["calls_included"],  # backward compat
                             "reset_at": reset_at,
                         }
                     ))

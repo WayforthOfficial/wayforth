@@ -1783,7 +1783,7 @@ async def system_status(db=Depends(get_db)):
         },
         "pricing": {
             "routing_fee": "1.5%",
-            "usdc_bonus": "5% extra calls",
+            "usdc_bonus": "5% extra credits",
         },
         "contracts": {
             "network": "base-sepolia",
