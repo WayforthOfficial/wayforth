@@ -893,6 +893,28 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS x402_settlements_user_idx
                   ON x402_settlements(user_id, settled_at DESC)
             """)
+            # v0.8.1 Pioneer Program + Provider Boost — migrations 046-048
+            await _mconn.execute("""
+                ALTER TABLE providers
+                    ADD COLUMN IF NOT EXISTS boost_used         BOOLEAN      DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS boost_activated_at TIMESTAMPTZ  NULL,
+                    ADD COLUMN IF NOT EXISTS boost_expires_at   TIMESTAMPTZ  NULL,
+                    ADD COLUMN IF NOT EXISTS boost_tier         VARCHAR(20)  NULL,
+                    ADD COLUMN IF NOT EXISTS boost_wri_bonus    INTEGER      DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS boost_paused       BOOLEAN      DEFAULT FALSE
+            """)
+            await _mconn.execute("""
+                ALTER TABLE users
+                    ADD COLUMN IF NOT EXISTS pioneer_opt_in          BOOLEAN      DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS pioneer_opted_in_at     TIMESTAMPTZ  NULL,
+                    ADD COLUMN IF NOT EXISTS pioneer_credits_awarded BOOLEAN      DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS pioneer_opt_out_at      TIMESTAMPTZ  NULL
+            """)
+            await _mconn.execute("""
+                ALTER TABLE search_outcomes
+                    ADD COLUMN IF NOT EXISTS signal_weight  FLOAT   DEFAULT 1.0,
+                    ADD COLUMN IF NOT EXISTS pioneer_routed BOOLEAN DEFAULT FALSE
+            """)
     except Exception as e:
         logger.error("STARTUP ERROR: %s: %s", type(e).__name__, e, exc_info=True)
         logger.critical("DB pool creation or migrations failed: %s — exiting so the orchestrator can restart cleanly", e)
