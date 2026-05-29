@@ -841,6 +841,49 @@ async def admin_get_user_service_keys(request: Request, user_id: str, db=Depends
 
 # ── Provider Management ────────────────────────────────────────────────────────
 
+# ── Pioneer Boost Management ──────────────────────────────────────────────────
+
+@router.get("/admin-api/providers/boosts")
+async def admin_boosts_list(request: Request, db=Depends(get_db)):
+    """List all providers with active or historical Pioneer Boosts."""
+    session = await get_admin_session(request, db)
+    rows = await db.fetch("""
+        SELECT p.id, p.company_name, p.email, p.boost_tier,
+               p.boost_used, p.boost_paused, p.boost_wri_bonus,
+               p.boost_activated_at, p.boost_expires_at,
+               ps.service_slug
+          FROM providers p
+          LEFT JOIN provider_services ps ON ps.provider_id = p.id
+         WHERE p.boost_used = TRUE
+         ORDER BY p.boost_activated_at DESC NULLS LAST
+    """)
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    result = []
+    for r in rows:
+        expires = r["boost_expires_at"]
+        active = (
+            not bool(r["boost_paused"])
+            and expires is not None
+            and expires > now
+        )
+        days_remaining = max(0, (expires - now).days) if expires else 0
+        result.append({
+            "provider_id":    str(r["id"]),
+            "company_name":   r["company_name"],
+            "email":          r["email"],
+            "service_slug":   r["service_slug"],
+            "boost_tier":     r["boost_tier"],
+            "boost_active":   active,
+            "boost_paused":   bool(r["boost_paused"]),
+            "days_remaining": days_remaining,
+            "wri_bonus":      r["boost_wri_bonus"],
+            "activated_at":   r["boost_activated_at"].isoformat() if r["boost_activated_at"] else None,
+            "expires_at":     expires.isoformat() if expires else None,
+        })
+    return {"boosts": result, "total": len(result)}
+
+
 @router.get("/admin-api/providers")
 async def admin_providers_list(
     request: Request,
@@ -970,49 +1013,6 @@ async def admin_reinstate_provider(
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="Provider not found")
     return {"status": "reinstated", "changed_by": session["email"]}
-
-
-# ── Pioneer Boost Management ──────────────────────────────────────────────────
-
-@router.get("/admin-api/providers/boosts")
-async def admin_boosts_list(request: Request, db=Depends(get_db)):
-    """List all providers with active or historical Pioneer Boosts."""
-    session = await get_admin_session(request, db)
-    rows = await db.fetch("""
-        SELECT p.id, p.company_name, p.email, p.boost_tier,
-               p.boost_used, p.boost_paused, p.boost_wri_bonus,
-               p.boost_activated_at, p.boost_expires_at,
-               ps.service_slug
-          FROM providers p
-          LEFT JOIN provider_services ps ON ps.provider_id = p.id
-         WHERE p.boost_used = TRUE
-         ORDER BY p.boost_activated_at DESC NULLS LAST
-    """)
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    result = []
-    for r in rows:
-        expires = r["boost_expires_at"]
-        active = (
-            not bool(r["boost_paused"])
-            and expires is not None
-            and expires > now
-        )
-        days_remaining = max(0, (expires - now).days) if expires else 0
-        result.append({
-            "provider_id":    str(r["id"]),
-            "company_name":   r["company_name"],
-            "email":          r["email"],
-            "service_slug":   r["service_slug"],
-            "boost_tier":     r["boost_tier"],
-            "boost_active":   active,
-            "boost_paused":   bool(r["boost_paused"]),
-            "days_remaining": days_remaining,
-            "wri_bonus":      r["boost_wri_bonus"],
-            "activated_at":   r["boost_activated_at"].isoformat() if r["boost_activated_at"] else None,
-            "expires_at":     expires.isoformat() if expires else None,
-        })
-    return {"boosts": result, "total": len(result)}
 
 
 @router.post("/admin-api/providers/{provider_id}/boost/pause")
