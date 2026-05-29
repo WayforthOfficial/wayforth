@@ -214,6 +214,53 @@ async def search_services(
                     _s["score"] = (_s.get("score") or 0) - 20
             ranked.sort(key=lambda _s: (_s.get("score") or 0), reverse=True)
 
+    # ── Pioneer routing (60/40 split) ────────────────────────────────────────
+    # For users with pioneer_opt_in=TRUE: if boosted providers exist in the
+    # result category, promote them to the front on 60% of calls.
+    # Deterministic per-search via MD5 of query_id — not purely random,
+    # consistent within a request.
+    _pioneer_routing = False
+    _pioneer_routed_to_boosted = False
+    _pioneer_signal_weight = 1.0
+    _pioneer_boosted_slugs: set = set()
+
+    if auth.get("authenticated") and auth.get("user_id"):
+        try:
+            _pioneer_row = await db.fetchrow(
+                "SELECT pioneer_opt_in FROM users WHERE id = $1::uuid",
+                auth["user_id"],
+            )
+            if _pioneer_row and _pioneer_row["pioneer_opt_in"]:
+                _pioneer_routing = True
+                # Use explicit category or fall back to no filter
+                _cat_param = category  # None means any category
+                _proto_query_id = str(uuid_lib.uuid4())  # temporary — final set below
+                _boosted = await db.fetch("""
+                    SELECT ps.service_slug
+                      FROM provider_services ps
+                      JOIN providers p ON p.id = ps.provider_id
+                      JOIN services s ON s.slug = ps.service_slug
+                     WHERE p.boost_used    = TRUE
+                       AND p.boost_paused  = FALSE
+                       AND p.boost_expires_at > NOW()
+                       AND ($1::text IS NULL OR s.category = $1)
+                """, _cat_param)
+                _pioneer_boosted_slugs = {r["service_slug"] for r in _boosted}
+
+                if _pioneer_boosted_slugs:
+                    # query_id not yet generated; use hash of q+auth for determinism
+                    import hashlib as _hl
+                    _seed = int(_hl.md5(f"{q}{auth['user_id']}".encode()).hexdigest()[:8], 16)
+                    if _seed % 10 < 6:  # 60% path — route to boosted first
+                        _pioneer_routed_to_boosted = True
+                        _pioneer_signal_weight = 0.75
+                        _boosted_first = [s for s in ranked if s.get("slug") in _pioneer_boosted_slugs]
+                        _others = [s for s in ranked if s.get("slug") not in _pioneer_boosted_slugs]
+                        ranked = _boosted_first + _others
+        except Exception:
+            pass
+    # ── end pioneer routing ───────────────────────────────────────────────────
+
     top = ranked[:limit]
 
     fallback_used = False
@@ -290,17 +337,59 @@ async def search_services(
     except Exception:
         pass
 
+    # Load Pioneer Boost metadata for each result slug.
+    # Joins provider_services → providers to find active (non-paused, non-expired) boosts.
+    _boost_map: dict = {}  # slug → {wri_bonus, expires_at, new_provider}
+    try:
+        _top_slugs = [s.get("slug") for s in top if s.get("slug")]
+        if _top_slugs:
+            from datetime import datetime, timezone as _tz
+            _boost_rows = await db.fetch("""
+                SELECT ps.service_slug,
+                       p.boost_wri_bonus,
+                       p.boost_expires_at,
+                       p.created_at AS provider_created_at
+                  FROM provider_services ps
+                  JOIN providers p ON p.id = ps.provider_id
+                 WHERE ps.service_slug = ANY($1::text[])
+                   AND p.boost_used    = TRUE
+                   AND p.boost_paused  = FALSE
+                   AND p.boost_expires_at > NOW()
+            """, _top_slugs)
+            _now = datetime.now(_tz.utc)
+            for br in _boost_rows:
+                expires = br["boost_expires_at"]
+                days_left = max(0, (expires - _now).days) if expires else 0
+                _provider_created = br["provider_created_at"]
+                is_new = (
+                    _provider_created is not None
+                    and (_now - (_provider_created if _provider_created.tzinfo else _provider_created.replace(tzinfo=_tz.utc))).days <= 30
+                )
+                _boost_map[br["service_slug"]] = {
+                    "wri_bonus": int(br["boost_wri_bonus"] or 0),
+                    "expires_in_days": days_left,
+                    "new_provider": is_new,
+                }
+    except Exception:
+        pass
+
     logger.info(f"search q={q!r} results={len(top)} fallback={fallback_used}")
-    results = [
-        {
+    results = []
+    for s in top:
+        slug = s.get("slug")
+        _boost = _boost_map.get(slug, {})
+        _boost_bonus = _boost.get("wri_bonus", 0)
+        _base_wri = _apply_health_wri(
+            s["wri_score"] if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
+            _health_map.get(slug),
+        )
+        _boosted_wri = min(round((_base_wri or 0) + _boost_bonus, 1), 100.0)
+        result = {
             "name": s.get("name"),
-            "slug": s.get("slug"),
+            "slug": slug,
             "description": s.get("description"),
             "score": s.get("score", 0),
-            "wri": _apply_health_wri(
-                s["wri_score"] if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
-                _health_map.get(s.get("slug")),
-            ),
+            "wri": _boosted_wri,
             "ranking_version": "v2" if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else "v1",
             "reason": s.get("reason", ""),
             "coverage_tier": s.get("coverage_tier"),
@@ -310,7 +399,7 @@ async def search_services(
                 "per_call_usd": s.get("pricing_usdc"),
             },
             "service_id": "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest(),
-            "wayforth_id": f"wayforth://{s.get('slug') or s.get('name','').lower().replace(' ','_').replace('/','_')[:30]}/{hashlib.sha256(s.get('endpoint_url','').encode()).hexdigest()[:8]}",
+            "wayforth_id": f"wayforth://{slug or s.get('name','').lower().replace(' ','_').replace('/','_')[:30]}/{hashlib.sha256(s.get('endpoint_url','').encode()).hexdigest()[:8]}",
             "payment_options": {
                 "track_a": {
                     "method": "card",
@@ -326,8 +415,13 @@ async def search_services(
                 "x402_supported": bool(s.get("x402_supported", False)),
             },
         }
-        for s in top
-    ]
+        if _boost:
+            result["boosted"] = True
+            result["boost_expires_in_days"] = _boost["expires_in_days"]
+            result["new_provider"] = _boost["new_provider"]
+        else:
+            result["boosted"] = False
+        results.append(result)
     response: dict = {
         "query_id": query_id,
         "query": q,
@@ -350,6 +444,42 @@ async def search_services(
         if remaining > 0:
             response["signup_url"] = "https://wayforth.io/signup"
             response["message"] = f"{remaining} free {'search' if remaining == 1 else 'searches'} remaining. Sign up free for 100/month."
+
+    # Pioneer routing metadata — always present for pioneer users
+    if _pioneer_routing:
+        response["pioneer_routing"] = True
+        response["pioneer_routed_to_boosted"] = _pioneer_routed_to_boosted
+        response["signal_weight"] = _pioneer_signal_weight
+        response["boost_active"] = len(_pioneer_boosted_slugs) > 0
+
+        # Record pioneer routing outcome in search_outcomes (background)
+        if pool:
+            async def _record_pioneer_outcome(
+                _qid=query_id, _q=q, _top=top, _sid=session_id,
+                _routed=_pioneer_routed_to_boosted, _sw=_pioneer_signal_weight,
+            ):
+                try:
+                    async with pool.acquire() as conn:
+                        _service_id = None
+                        if _top:
+                            _slug = _top[0].get("slug")
+                            if _slug:
+                                _srow = await conn.fetchrow(
+                                    "SELECT id FROM services WHERE slug = $1", _slug
+                                )
+                                if _srow:
+                                    _service_id = str(_srow["id"])
+                        await conn.execute("""
+                            INSERT INTO search_outcomes
+                              (query_id, query_text, service_id, outcome_type,
+                               session_id, signal_weight, pioneer_routed)
+                            VALUES ($1::uuid, $2, $3::uuid, 'result_viewed',
+                                    $4, $5, $6)
+                        """, _qid, _q, _service_id, _sid or None, _sw, _routed)
+                except Exception:
+                    pass
+            asyncio.create_task(_record_pioneer_outcome())
+
     return response
 
 
