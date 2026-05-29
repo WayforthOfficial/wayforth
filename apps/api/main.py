@@ -282,33 +282,52 @@ async def _boost_auto_pause_loop():
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 def _check_required_config() -> None:
-    """Fail fast in production when critical config is missing; warn otherwise.
+    """Log config readiness at startup. Hard-fail in production for vars that
+    must be present for the service to function safely. Warn-only for vars that
+    degrade a feature but don't break the service.
 
-    Logs the status of every required var so Railway deploy logs confirm
-    configuration on each boot. In non-production environments (tests, local
-    dev) a missing var only warns, so the suite/app still starts.
+    REDIS_URL — hard-fail: without it rate limiting and login lockout are
+    per-process/per-replica and effectively disabled under any multi-replica
+    or restart scenario.
+
+    STRIPE_WEBHOOK_SECRET — warn-only: the service was previously deployed
+    without this var; when absent Stripe webhooks 400 (fail-closed). Set it
+    in Railway to enable verified webhook processing.
     """
     is_prod = ENVIRONMENT.lower() in ("production", "prod")
-    required = {
+
+    # Hard-fail in production when absent.
+    hard_required = {
         "REDIS_URL": "rate limiting + login lockout run per-process / fail-open without it",
-        "STRIPE_WEBHOOK_SECRET": "Stripe webhook signature verification is disabled without it",
     }
-    missing = []
-    for var, why in required.items():
+    # Log a warning but do not prevent startup.
+    soft_required = {
+        "STRIPE_WEBHOOK_SECRET": "Stripe webhook signature verification is disabled without it — webhooks will 400",
+    }
+
+    hard_missing = []
+    for var, why in hard_required.items():
         if os.environ.get(var):
-            logger.info("STARTUP CONFIG ✓ %s is set", var)
+            logger.info("STARTUP CONFIG ok %s is set", var)
         else:
-            missing.append((var, why))
-            logger.error("STARTUP CONFIG ✗ %s is MISSING — %s", var, why)
-    if missing and is_prod:
+            hard_missing.append((var, why))
+            logger.error("STARTUP CONFIG MISSING %s — %s", var, why)
+
+    for var, why in soft_required.items():
+        if os.environ.get(var):
+            logger.info("STARTUP CONFIG ok %s is set", var)
+        else:
+            logger.warning("STARTUP CONFIG unset %s — %s", var, why)
+
+    if hard_missing and is_prod:
         raise RuntimeError(
             "Missing required production config: "
-            + "; ".join(f"{v} ({why})" for v, why in missing)
+            + "; ".join(f"{v} ({why})" for v, why in hard_missing)
         )
-    if missing:
+    if hard_missing:
         logger.warning(
-            "STARTUP CONFIG: %d var(s) missing — allowed because environment=%s (would fail in production)",
-            len(missing), ENVIRONMENT,
+            "STARTUP CONFIG: %d hard-required var(s) missing — allowed because environment=%s",
+            len(hard_missing), ENVIRONMENT,
         )
 
 
