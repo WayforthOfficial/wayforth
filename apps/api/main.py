@@ -964,6 +964,16 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS pioneer_last_drip_date  DATE         NULL,
                     DROP COLUMN IF EXISTS pioneer_credits_awarded
             """)
+            # 047: backfill pioneer_opted_in_at for users who were enrolled before
+            # the column was reliably populated. NOW() is a conservative approximation;
+            # these users are confirmed opted-in so "since now" avoids a null on
+            # the dashboard "Enrolled since" field.
+            await _mconn.execute("""
+                UPDATE users
+                   SET pioneer_opted_in_at = NOW()
+                 WHERE pioneer_opt_in = TRUE
+                   AND pioneer_opted_in_at IS NULL
+            """)
             await _mconn.execute("""
                 ALTER TABLE search_outcomes
                     ADD COLUMN IF NOT EXISTS signal_weight  FLOAT   DEFAULT 1.0,
