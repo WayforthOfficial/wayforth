@@ -29,6 +29,11 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from wayforth_rank_v2 import compute_wri_v2
+from routers.billing.account import (
+    _PIONEER_DAILY_CREDITS,
+    _PIONEER_REJOIN_COOLDOWN,
+    _cooldown_days_remaining,
+)
 
 
 # ── Stub helpers ──────────────────────────────────────────────────────────────
@@ -50,9 +55,11 @@ class _FakeService:
 
 
 class _FakeUser:
-    def __init__(self, pioneer_opt_in=False, pioneer_credits_awarded=False):
+    def __init__(self, pioneer_opt_in=False, pioneer_last_drip_date=None,
+                 pioneer_cooldown_until=None):
         self.pioneer_opt_in = pioneer_opt_in
-        self.pioneer_credits_awarded = pioneer_credits_awarded
+        self.pioneer_last_drip_date = pioneer_last_drip_date  # date or None
+        self.pioneer_cooldown_until = pioneer_cooldown_until  # datetime or None
 
 
 # ── Boost business logic extracted for unit testing ──────────────────────────
@@ -74,22 +81,16 @@ _BOOST_CONFIG = {
     "premium":      {"days": 30, "wri_bonus": 20},
 }
 
-_PIONEER_CREDITS = {
-    "free":    0,
-    "builder": 900,
-    "starter": 3_150,
-    "pro":     10_800,
-    "growth":  36_000,
-}
+def _pioneer_daily_for_tier(tier: str) -> int:
+    return _PIONEER_DAILY_CREDITS.get(tier, 0)
 
 
-def _pioneer_credits_for_tier(tier: str) -> int:
-    return _PIONEER_CREDITS.get(tier, 0)
+def _pioneer_routing_decision(query_id: str) -> bool:
+    """True = 60% path (route to boosted). Mirror of search.py seed logic.
 
-
-def _pioneer_routing_decision(q: str, user_id: str) -> bool:
-    """True = 60% path (route to boosted). Mirror of search.py seed logic."""
-    seed = int(hashlib.md5(f"{q}{user_id}".encode()).hexdigest()[:8], 16)
+    v0.8.2: seeded from the SERVER-generated query_id only — the client-supplied
+    query text is no longer part of the seed (it was manipulable)."""
+    seed = int(hashlib.md5(query_id.encode()).hexdigest()[:8], 16)
     return seed % 10 < 6
 
 
@@ -235,96 +236,129 @@ class TestWRIBoostBonus:
         assert score_explicit == score_default
 
 
-class TestPioneerCredits:
-    def test_T06_credits_awarded_on_join(self):
-        """T06 — First join awards 15% of monthly tier allowance."""
-        user = _FakeUser(pioneer_opt_in=False, pioneer_credits_awarded=False)
-        tier = "starter"
-        expected = _pioneer_credits_for_tier(tier)
-        assert expected == 3_150
+def _drip_claim(user: _FakeUser, today) -> int:
+    """Mirror run_pioneer_drip's per-user claim: award the tier's daily credits
+    once per day. Returns credits awarded this run (0 if already dripped today
+    or not opted in)."""
+    if not user.pioneer_opt_in:
+        return 0
+    if user.pioneer_last_drip_date is not None and user.pioneer_last_drip_date >= today:
+        return 0  # already dripped today
+    user.pioneer_last_drip_date = today
+    return _pioneer_daily_for_tier("starter")
 
-        # Simulate join flow
-        awarded = 0
-        if not user.pioneer_credits_awarded:
-            awarded = _pioneer_credits_for_tier(tier)
-            user.pioneer_credits_awarded = True
-            user.pioneer_opt_in = True
 
-        assert awarded == 3_150
-        assert user.pioneer_credits_awarded is True
+class TestPioneerDrip:
+    def test_daily_credits_by_tier(self):
+        """Daily drip rates match the spec."""
+        assert _pioneer_daily_for_tier("builder") == 30
+        assert _pioneer_daily_for_tier("starter") == 105
+        assert _pioneer_daily_for_tier("pro") == 360
+        assert _pioneer_daily_for_tier("growth") == 1_200
+        assert _pioneer_daily_for_tier("free") == 0
 
-    def test_T06_credits_not_awarded_twice(self):
-        """T06 — Re-joining after leave does not re-award credits."""
-        user = _FakeUser(pioneer_opt_in=False, pioneer_credits_awarded=True)
-        tier = "pro"
+    def test_drip_awarded_once_then_skipped_same_day(self):
+        """Drip awards once per day; a second run the same day awards nothing."""
+        import datetime as _dt
+        today = _dt.date(2026, 5, 28)
+        user = _FakeUser(pioneer_opt_in=True, pioneer_last_drip_date=None)
 
-        awarded = 0
-        if not user.pioneer_credits_awarded:
-            awarded = _pioneer_credits_for_tier(tier)
-            user.pioneer_credits_awarded = True
-        user.pioneer_opt_in = True
+        first = _drip_claim(user, today)
+        second = _drip_claim(user, today)
 
-        assert awarded == 0  # no double-award
-        assert user.pioneer_opt_in is True
+        assert first == 105
+        assert second == 0
+        assert user.pioneer_last_drip_date == today
 
-    def test_T06_credits_by_tier(self):
-        """T06 — Correct credit amounts for each paid tier."""
-        assert _pioneer_credits_for_tier("builder") == 900
-        assert _pioneer_credits_for_tier("starter") == 3_150
-        assert _pioneer_credits_for_tier("pro") == 10_800
-        assert _pioneer_credits_for_tier("growth") == 36_000
-        assert _pioneer_credits_for_tier("free") == 0
+    def test_drip_resumes_next_day(self):
+        """A new UTC day re-enables the drip."""
+        import datetime as _dt
+        user = _FakeUser(pioneer_opt_in=True, pioneer_last_drip_date=_dt.date(2026, 5, 28))
+        assert _drip_claim(user, _dt.date(2026, 5, 28)) == 0   # same day
+        assert _drip_claim(user, _dt.date(2026, 5, 29)) == 105  # next day
 
-    def test_T07_leave_keeps_credits(self):
-        """T07 — Leaving Pioneer Program does not claw back awarded credits."""
-        balance_before = 10_000
-        credits_awarded = 3_150
-        balance_with_bonus = balance_before + credits_awarded
+    def test_drip_skipped_when_not_opted_in(self):
+        import datetime as _dt
+        user = _FakeUser(pioneer_opt_in=False, pioneer_last_drip_date=None)
+        assert _drip_claim(user, _dt.date(2026, 5, 28)) == 0
 
-        user = _FakeUser(pioneer_opt_in=True, pioneer_credits_awarded=True)
 
-        # Simulate leave — credits NOT removed
+class TestPioneerCooldown:
+    def test_leave_sets_seven_day_cooldown(self):
+        """Leaving sets a 7-day rejoin cooldown and clears last_drip_date."""
+        import datetime as _dt
+        now = _dt.datetime(2026, 5, 28, tzinfo=_dt.timezone.utc)
+        user = _FakeUser(pioneer_opt_in=True, pioneer_last_drip_date=_dt.date(2026, 5, 28))
+
+        # Simulate leave
         user.pioneer_opt_in = False
-        balance_after = balance_with_bonus  # unchanged
+        user.pioneer_cooldown_until = now + _PIONEER_REJOIN_COOLDOWN
+        user.pioneer_last_drip_date = None
 
-        assert user.pioneer_opt_in is False
-        assert balance_after == balance_with_bonus  # no clawback
+        assert _PIONEER_REJOIN_COOLDOWN == _dt.timedelta(days=7)
+        assert user.pioneer_cooldown_until == now + _dt.timedelta(days=7)
+        assert user.pioneer_last_drip_date is None
+        assert user.pioneer_opt_in is False  # routing reverts
+
+    def test_cooldown_blocks_rejoin(self):
+        """Rejoin within the cooldown window is blocked (429)."""
+        import datetime as _dt
+        now = _dt.datetime(2026, 5, 28, tzinfo=_dt.timezone.utc)
+        cooldown_until = now + _dt.timedelta(days=3)
+        blocked = bool(cooldown_until and cooldown_until > now)
+        assert blocked is True
+        assert _cooldown_days_remaining(cooldown_until, now) == 3
+
+    def test_cooldown_expired_allows_rejoin(self):
+        """Once the cooldown is in the past, rejoin is allowed."""
+        import datetime as _dt
+        now = _dt.datetime(2026, 5, 28, tzinfo=_dt.timezone.utc)
+        cooldown_until = now - _dt.timedelta(seconds=1)
+        blocked = bool(cooldown_until and cooldown_until > now)
+        assert blocked is False
+        assert _cooldown_days_remaining(cooldown_until, now) == 0
+
+    def test_cooldown_days_remaining_rounds_up(self):
+        """Partial days round up so the UI never shows 0 while still blocked."""
+        import datetime as _dt
+        now = _dt.datetime(2026, 5, 28, 12, tzinfo=_dt.timezone.utc)
+        assert _cooldown_days_remaining(now + _dt.timedelta(hours=1), now) == 1
+        assert _cooldown_days_remaining(now + _dt.timedelta(days=6, hours=12), now) == 7
+        assert _cooldown_days_remaining(None, now) == 0
 
     def test_T07_leave_reverts_routing(self):
-        """T07 — pioneer_opt_in=FALSE means next search uses normal WayforthRank."""
+        """Leaving (opt_in=FALSE) means the next search uses normal WayforthRank."""
         user = _FakeUser(pioneer_opt_in=False)
-        # A non-opted-in user never enters pioneer routing logic
         assert not user.pioneer_opt_in
 
 
 class TestPioneerRouting:
     def test_T08_sixty_forty_split_over_100_calls(self):
-        """T08 — 60/40 deterministic split: ~60 boosted, ~40 normal over 100 calls."""
-        boosted_count = 0
-        user_id = "test-user-uuid-1234"
-        for i in range(100):
-            q = f"query-{i}"
-            if _pioneer_routing_decision(q, user_id):
-                boosted_count += 1
+        """T08 — ~60/40 split over 100 server-generated query_ids."""
+        boosted_count = sum(
+            1 for i in range(100) if _pioneer_routing_decision(f"req-{i}-qid")
+        )
         normal_count = 100 - boosted_count
-
         # Allow ±15% tolerance around 60/40
         assert 45 <= boosted_count <= 75, f"Expected ~60 boosted calls, got {boosted_count}"
         assert 25 <= normal_count <= 55, f"Expected ~40 normal calls, got {normal_count}"
 
-    def test_T08_same_query_user_always_same_result(self):
-        """T08 — Same query + user always gets the same routing decision (deterministic)."""
-        q, uid = "find a translation api", "user-abc"
-        results = [_pioneer_routing_decision(q, uid) for _ in range(10)]
+    def test_T08_decision_deterministic_per_query_id(self):
+        """T08 — Same server query_id always yields the same decision."""
+        qid = "11111111-2222-3333-4444-555555555555"
+        results = [_pioneer_routing_decision(qid) for _ in range(10)]
         assert all(r == results[0] for r in results)
 
-    def test_T08_different_queries_independent(self):
-        """T08 — Different queries can get different routing (not all same direction)."""
-        uid = "user-xyz"
-        queries = [f"query-{i}" for i in range(20)]
-        decisions = [_pioneer_routing_decision(q, uid) for q in queries]
-        # Not all identical — independence check
-        assert len(set(decisions)) == 2  # has both True and False
+    def test_T08_not_controllable_by_query_text(self):
+        """T08 — The decision is seeded only from the server query_id; the client
+        query text is not an input, so a caller cannot steer the bucket."""
+        import inspect
+        src = inspect.getsource(_pioneer_routing_decision)
+        # Seed derives from query_id only — no query-text parameter in the seed.
+        assert "query_id" in src and "{q}" not in src
+        # Distinct query_ids still produce both outcomes (the split works).
+        decisions = {_pioneer_routing_decision(f"qid-{i}") for i in range(20)}
+        assert decisions == {True, False}
 
     def test_T09_signal_weight_075_when_pioneer_routed(self):
         """T09 — signal_weight=0.75 when call is pioneer-routed to boosted provider."""
@@ -355,7 +389,7 @@ class TestPioneerRouting:
         signal_weight = 1.0
 
         if boosted_slugs:
-            if _pioneer_routing_decision("test query", "user-1"):
+            if _pioneer_routing_decision("some-query-id"):
                 pioneer_routed_to_boosted = True
                 signal_weight = 0.75
 

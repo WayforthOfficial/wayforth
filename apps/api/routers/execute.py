@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import time as _time_mod
+import uuid as _uuid
 from datetime import datetime, timezone
 
 import httpx
@@ -81,6 +82,23 @@ def _run_cache_set(key: tuple, value: dict) -> None:
 
 # ── Refund helpers ────────────────────────────────────────────────────────────
 
+# Fixed namespace for deterministic refund idempotency keys.
+_REFUND_NS = _uuid.UUID("a6f2e1b4-9c3d-4e5f-8a7b-1c2d3e4f5a6b")
+
+
+def _mk_refund_key(base: str, *parts) -> str:
+    """Build a deterministic refund idempotency UUID.
+
+    Seeded from the per-request id (request.state.request_id / trace id) plus
+    the service slug, endpoint, and attempt discriminator. The same logical
+    refund — including a client retry that reuses X-Wayforth-Trace-ID, or a
+    mid-stream SSE error — maps to the same UUID, so the partial unique index
+    on credit_transactions(refund_uuid) rejects the duplicate insert and
+    _do_refund returns the prior balance instead of refunding twice.
+    """
+    return str(_uuid.uuid5(_REFUND_NS, ":".join(str(p) for p in (base, *parts))))
+
+
 def _classify_error(error_msg: str) -> str:
     """Classify a service error as 'service_failure' (refund) or 'client_error' (no refund).
 
@@ -142,6 +160,30 @@ async def _do_refund(
             f"service_failure: {service_slug} — {error_msg[:100]}",
             endpoint, service_slug, refund_idempotency_key,
         )
+    # Per-user refund-rate alarm (does NOT block). If a user exceeds 20 refunds
+    # in the trailing hour, flag the account for review in the admin audit log.
+    # We log only as the count crosses the threshold (==21) to avoid spamming.
+    try:
+        refunds_last_hour = await db.fetchval(
+            "SELECT COUNT(*) FROM credit_transactions "
+            "WHERE user_id = $1::uuid AND type = 'refund' "
+            "AND created_at > NOW() - INTERVAL '1 hour'",
+            user_id,
+        )
+        if refunds_last_hour and int(refunds_last_hour) == 21:
+            from core.audit import log_admin_action
+            await log_admin_action(db, "system", "refund_rate_alarm", str(user_id), {
+                "refunds_last_hour": int(refunds_last_hour),
+                "threshold": 20,
+                "latest_service": service_slug,
+                "note": "flagged for review; account NOT blocked",
+            })
+            logger.warning(
+                "refund_rate_alarm user=%s refunds_last_hour=%s", user_id, refunds_last_hour
+            )
+    except Exception:
+        pass
+
     from core.credits import _dispatch_webhooks
     from main import app as _app
     asyncio.create_task(_dispatch_webhooks(
@@ -202,7 +244,7 @@ _MAX_CONCURRENT_STREAMS_PER_KEY = 5
 _active_streams: dict[str, int] = {}
 
 
-async def _run_sse_stream(slug, params, svc_key, user_id, credit_cost, pool, service_used, calls_remaining, stream_owner_key):
+async def _run_sse_stream(slug, params, svc_key, user_id, credit_cost, pool, service_used, calls_remaining, stream_owner_key, refund_key=None):
     """Async generator producing SSE events for a streaming LLM /run call."""
     from services.managed import stream_groq, stream_together
     stream_fn = stream_groq if slug == "groq" else stream_together
@@ -212,12 +254,15 @@ async def _run_sse_stream(slug, params, svc_key, user_id, credit_cost, pool, ser
                 yield f"data: {_json.dumps({'token': token, 'done': False})}\n\n"
         except Exception as exc:
             yield f"data: {_json.dumps({'error': str(exc)[:200], 'done': True})}\n\n"
+            # Route the refund through _do_refund (not a raw UPDATE) so it is
+            # idempotent (refund_key + unique index → no double-refund if the
+            # stream errors after a retry) and produces a credit_transactions
+            # audit row + wayf.call_refunded webhook like every other path.
             try:
                 async with pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
-                        "WHERE user_id = $2::uuid",
-                        credit_cost, user_id,
+                    await _do_refund(
+                        conn, user_id, credit_cost, slug, str(exc)[:300],
+                        "/run", calls_remaining, refund_key,
                     )
             except Exception:
                 pass
@@ -1001,7 +1046,8 @@ async def execute_service(request: Request, db=Depends(get_db)):
         if error_msg:
             is_service_failure = upstream_status is None or upstream_status >= 500
             if is_service_failure:
-                new_bal = await _do_refund(db, user_id, 1, service_slug, error_msg, "/execute", balance_after)
+                new_bal = await _do_refund(db, user_id, 1, service_slug, error_msg, "/execute", balance_after,
+                                           _mk_refund_key(getattr(request.state, "request_id", ""), service_slug, "execute_byok"))
                 raise HTTPException(status_code=503, detail={
                     "error": "Service unavailable",
                     "refunded": True,
@@ -1130,7 +1176,8 @@ async def execute_service(request: Request, db=Depends(get_db)):
 
     _execute_fallback_from: str | None = None
     if error_msg and _classify_error(error_msg) == "service_failure":
-        new_bal = await _do_refund(db, user_id, credit_cost, service_slug, error_msg, "/execute", balance_after)
+        new_bal = await _do_refund(db, user_id, credit_cost, service_slug, error_msg, "/execute", balance_after,
+                                   _mk_refund_key(getattr(request.state, "request_id", ""), service_slug, "execute_managed"))
         # Try one automatic fallback for managed-key calls
         _fb_slug = SERVICE_ALTERNATIVES.get(service_slug)
         if key_source == "managed" and _fb_slug and _fb_slug in SERVICE_CONFIGS:
@@ -1148,7 +1195,8 @@ async def execute_service(request: Request, db=Depends(get_db)):
                     if _fb_ok:
                         result, _fb_err, execution_ms = await _try_execute_managed(_fb_slug, _fb_mapped, _fb_api_key)
                         if _fb_err and _classify_error(_fb_err) == "service_failure":
-                            await _do_refund(db, user_id, _fb_cost, _fb_slug, _fb_err, "/execute", _fb_bal)
+                            await _do_refund(db, user_id, _fb_cost, _fb_slug, _fb_err, "/execute", _fb_bal,
+                                             _mk_refund_key(getattr(request.state, "request_id", ""), _fb_slug, "execute_managed_fb"))
                             result = None
                         elif _fb_err:
                             raise HTTPException(status_code=400, detail={"error": _fb_err, "refunded": False, "credits_restored": 0})
@@ -1206,7 +1254,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
 
 # ── /execute/batch — parallel multi-service execution ────────────────────────
 
-async def _execute_one(call: dict, pool, user_id: str, api_key_id: str) -> dict:
+async def _execute_one(call: dict, pool, user_id: str, api_key_id: str, request_id: str = "", idx: int = 0) -> dict:
     """Execute a single managed service call; used by /execute/batch via asyncio.gather."""
     slug = (call.get("slug") or "").strip().lower()
     params = call.get("params") or {}
@@ -1252,7 +1300,8 @@ async def _execute_one(call: dict, pool, user_id: str, api_key_id: str) -> dict:
     if error_msg:
         if _classify_error(error_msg) == "service_failure":
             async with pool.acquire() as refund_db:
-                new_bal = await _do_refund(refund_db, user_id, credit_cost, slug, error_msg, "/execute/batch", balance_after)
+                new_bal = await _do_refund(refund_db, user_id, credit_cost, slug, error_msg, "/execute/batch", balance_after,
+                                           _mk_refund_key(request_id, slug, "batch", idx))
             return {"slug": slug, "status": "error", "error": error_msg,
                     "refunded": True, "credits_restored": credit_cost,
                     "result": None, "execution_ms": execution_ms}
@@ -1337,8 +1386,10 @@ async def execute_batch(request: Request, db=Depends(get_db)):
     pool = app.state.pool
     batch_start = _time_mod.time()
 
+    _batch_req_id = getattr(request.state, "request_id", "")
     results = await asyncio.gather(
-        *[_execute_one(c, pool, str(user_id), str(_api_key_id)) for c in calls]
+        *[_execute_one(c, pool, str(user_id), str(_api_key_id), _batch_req_id, _idx)
+          for _idx, c in enumerate(calls)]
     )
 
     total_ms = round((_time_mod.time() - batch_start) * 1000)
@@ -1680,6 +1731,7 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
             selected_slug, mapped_params, svc_key, str(user_id),
             credit_cost, app.state.pool, _service_used_sse, _calls_remaining,
             stream_owner_key,
+            _mk_refund_key(getattr(request.state, "request_id", ""), selected_slug, "run_sse"),
         )
         return StreamingResponse(gen, media_type="text/event-stream", headers={
             "Cache-Control": "no-cache",
@@ -1692,7 +1744,8 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
 
     if error_msg and _classify_error(error_msg) == "service_failure":
         _fallback_from = selected_slug
-        _all_failed_bal = await _do_refund(db, user_id, credit_cost, selected_slug, error_msg, "/run", balance_after)
+        _all_failed_bal = await _do_refund(db, user_id, credit_cost, selected_slug, error_msg, "/run", balance_after,
+                                           _mk_refund_key(getattr(request.state, "request_id", ""), selected_slug, "run"))
         for _fc_slug, _fc_svc, _fc_params, _fc_cost, _fc_key in _run_fallback_candidates:
             _fc_ok, _fc_bal = await check_and_deduct_credits(
                 db, str(user_id), _fc_cost, "/run",
@@ -1703,7 +1756,8 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
                 continue
             result, error_msg, execution_ms = await _try_execute_managed(_fc_slug, _fc_params, _fc_key)
             if error_msg and _classify_error(error_msg) == "service_failure":
-                _all_failed_bal = await _do_refund(db, user_id, _fc_cost, _fc_slug, error_msg, "/run", _fc_bal)
+                _all_failed_bal = await _do_refund(db, user_id, _fc_cost, _fc_slug, error_msg, "/run", _fc_bal,
+                                                   _mk_refund_key(getattr(request.state, "request_id", ""), _fc_slug, "run_fb"))
                 continue
             if error_msg:
                 raise HTTPException(status_code=400, detail={"error": error_msg, "refunded": False, "credits_restored": 0})

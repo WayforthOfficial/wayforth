@@ -184,6 +184,7 @@ async def search_services(
             WHERE ($1::text IS NULL OR category = $1)
               AND ($2::int IS NULL OR coverage_tier = $2)
               AND source != 'demo'
+              AND active IS NOT FALSE
             ORDER BY created_at DESC
             """,
             category,
@@ -281,6 +282,7 @@ async def search_services(
                 FROM services
                 WHERE coverage_tier >= 0
                   AND source != 'demo'
+                  AND active IS NOT FALSE
                   AND (name ILIKE $1 OR description ILIKE $1 OR category ILIKE $1)
                 ORDER BY coverage_tier DESC LIMIT 50
                 """,
