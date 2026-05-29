@@ -37,6 +37,23 @@ _PROVIDER_TIER_PRICES = {
     "premium":      "STRIPE_PRICE_PROVIDER_PREMIUM",
 }
 
+# Annual prices: 17% discount (10 months pricing = 2 months free).
+# Intelligence: $99/mo × 10 = $990/yr → $984 billed annually
+# Premium:      $299/mo × 10 = $2,990/yr → $2,988 billed annually
+_PROVIDER_TIER_PRICES_ANNUAL = {
+    "intelligence": "STRIPE_PRICE_PROVIDER_INTELLIGENCE_ANNUAL",
+    "premium":      "STRIPE_PRICE_PROVIDER_PREMIUM_ANNUAL",
+}
+
+_PROVIDER_TIER_MONTHLY_USD = {
+    "intelligence": 99,
+    "premium":      299,
+}
+_PROVIDER_TIER_ANNUAL_USD = {
+    "intelligence": 984,    # $82/mo × 12
+    "premium":      2_988,  # $249/mo × 12
+}
+
 
 async def _get_provider(request: Request, db):
     """Resolve X-Provider-Token → provider row. Raises 401 if invalid/expired.
@@ -52,7 +69,8 @@ async def _get_provider(request: Request, db):
     token_hash = _hashlib.sha256(token.encode()).hexdigest()
     row = await db.fetchrow("""
         SELECT ps.provider_id, p.company_name, p.email, p.tier, p.verified,
-               p.email_verified, p.stripe_customer_id, p.stripe_subscription_id
+               p.email_verified, p.stripe_customer_id, p.stripe_subscription_id,
+               COALESCE(p.billing_interval, 'month') AS billing_interval
         FROM provider_sessions ps
         JOIN providers p ON p.id = ps.provider_id
         WHERE ps.token_hash = $1 AND ps.expires_at > NOW()
@@ -448,6 +466,9 @@ async def provider_me(request: Request, db=Depends(get_db)):
         "company_name": provider["company_name"],
         "email": provider["email"],
         "tier": provider["tier"],
+        "billing_interval": provider["billing_interval"],
+        "monthly_price_usd": _PROVIDER_TIER_MONTHLY_USD.get(provider["tier"]),
+        "annual_price_usd":  _PROVIDER_TIER_ANNUAL_USD.get(provider["tier"]),
         "verified": provider["verified"],
         "verification_status": "verified" if provider["verified"] else "pending",
         "services_count": int(services_count),
@@ -1350,18 +1371,36 @@ async def provider_delete_service(slug: str, request: Request, db=Depends(get_db
 async def provider_billing_upgrade(request: Request, db=Depends(get_db)):
     """Create a Stripe checkout session to upgrade the provider's tier.
 
-    v0.8.0 Item 2: gated behind email verification — payment flows must not
-    be initiated by an account whose email control has not been proven.
+    Accepts:
+      tier: "intelligence" | "premium"
+      billing_interval: "month" | "year"  (default: "month")
+
+    Annual billing: 17% discount (10 months pricing).
+      Intelligence: $984/yr ($82/mo)
+      Premium:      $2,988/yr ($249/mo)
+
+    The Launch Boost (15-day / 30-day) is tied to tier, not billing interval —
+    annual subscribers get the same boost as monthly subscribers of the same tier.
+
+    Provider plans grant dashboard access (analytics, WRI, competitor data).
+    There is no monthly credit pool to reset — billing_interval only affects
+    Stripe charge cadence, not any in-app credit counter.
     """
     import stripe
     provider = await _require_email_verified(request, db)
     body = await request.json()
     target_tier = (body.get("tier") or "").strip().lower()
+    billing_interval = (body.get("billing_interval") or "month").strip().lower()
 
     if target_tier not in ("intelligence", "premium"):
         raise HTTPException(status_code=422, detail={
             "error": "invalid_tier",
             "valid": ["intelligence", "premium"],
+        })
+    if billing_interval not in ("month", "year"):
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_billing_interval",
+            "valid": ["month", "year"],
         })
 
     STRIPE_MOCK = (
@@ -1370,19 +1409,31 @@ async def provider_billing_upgrade(request: Request, db=Depends(get_db)):
         or not os.environ.get("STRIPE_SECRET_KEY", "")
     )
 
-    price_env = _PROVIDER_TIER_PRICES[target_tier]
+    price_map = _PROVIDER_TIER_PRICES_ANNUAL if billing_interval == "year" else _PROVIDER_TIER_PRICES
+    price_env = price_map[target_tier]
     price_id = os.environ.get(price_env, "")
+
+    amount_display = (
+        _PROVIDER_TIER_ANNUAL_USD[target_tier] if billing_interval == "year"
+        else _PROVIDER_TIER_MONTHLY_USD[target_tier]
+    )
+
     if not price_id or STRIPE_MOCK:
-        # Mock mode: just upgrade directly
+        # Mock mode: upgrade directly and record billing_interval
         await db.execute(
-            "UPDATE providers SET tier = $1 WHERE id = $2",
-            target_tier, provider["provider_id"],
+            "UPDATE providers SET tier = $1, billing_interval = $2 WHERE id = $3",
+            target_tier, billing_interval, provider["provider_id"],
         )
         return {
             "checkout_url": None,
             "mock": True,
             "tier": target_tier,
-            "message": f"Stripe not configured. Tier set to {target_tier} in mock mode.",
+            "billing_interval": billing_interval,
+            "amount_usd": amount_display,
+            "message": (
+                f"Stripe not configured. Tier set to {target_tier} "
+                f"({billing_interval}ly, ${amount_display}) in mock mode."
+            ),
         }
 
     try:
@@ -1395,21 +1446,27 @@ async def provider_billing_upgrade(request: Request, db=Depends(get_db)):
             customer_email=provider["email"],
             subscription_data={
                 "metadata": {
-                    "provider_id": str(provider["provider_id"]),
-                    "provider_tier": target_tier,
+                    "provider_id":        str(provider["provider_id"]),
+                    "provider_tier":      target_tier,
+                    "billing_interval":   billing_interval,
                 }
             },
             metadata={
-                "provider_id": str(provider["provider_id"]),
-                "provider_tier": target_tier,
+                "provider_id":      str(provider["provider_id"]),
+                "provider_tier":    target_tier,
+                "billing_interval": billing_interval,
             },
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Stripe error: {exc}")
 
     await db.execute(
-        "UPDATE providers SET stripe_customer_id = $1 WHERE id = $2",
-        session.get("customer"), provider["provider_id"],
+        "UPDATE providers SET stripe_customer_id = $1, billing_interval = $2 WHERE id = $3",
+        session.get("customer"), billing_interval, provider["provider_id"],
     )
 
-    return {"checkout_url": session["url"]}
+    return {
+        "checkout_url": session["url"],
+        "billing_interval": billing_interval,
+        "amount_usd": amount_display,
+    }

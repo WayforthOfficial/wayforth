@@ -508,9 +508,13 @@ async def account_analytics(request: Request, db=Depends(get_db)):
 
     plan_tier = credits["package_tier"] if credits else "free"
     plan_def = PLANS.get(plan_tier, PLANS["free"])
-    calls_included = plan_def["calls_included"]
-    calls_used = caller["monthly_calls_count"] or 0
-    calls_remaining = max(0, calls_included - calls_used)
+    credits_included = plan_def["calls_included"]   # calls_included == monthly_credits after fix
+    credits_used = caller["monthly_calls_count"] or 0
+    credits_remaining = max(0, credits_included - credits_used)
+    reset_at_str = (
+        caller["monthly_calls_reset_at"].date().isoformat()
+        if caller["monthly_calls_reset_at"] else reset.isoformat()
+    )
 
     return {
         "searches": {
@@ -518,22 +522,44 @@ async def account_analytics(request: Request, db=Depends(get_db)):
             "today": searches_today,
             "last_7_days": searches_7d,
         },
+        # "api_calls" = actual HTTP executions (request count, legitimately "calls")
+        "api_calls": {
+            "this_month": exec_month,
+            "by_endpoint": by_endpoint,
+            "by_service": [{"service": r["service_id"], "request_count": r["count"]} for r in svc_rows],
+        },
+        # "executions" kept as a backward-compat alias
         "executions": {
             "this_month": exec_month,
             "by_endpoint": by_endpoint,
             "by_service": [{"service": r["service_id"], "count": r["count"]} for r in svc_rows],
         },
+        # "credits" = monthly credit pool status (NOT call count)
+        "credits": {
+            "used":       credits_used,
+            "included":   credits_included,
+            "remaining":  credits_remaining,
+            "resets_at":  reset_at_str,
+        },
+        # "calls" kept as a backward-compat alias (value identical to credits)
         "calls": {
-            "used": calls_used,
-            "included": calls_included,
-            "remaining": calls_remaining,
-            "resets_at": (
-                caller["monthly_calls_reset_at"].date().isoformat()
-                if caller["monthly_calls_reset_at"] else reset.isoformat()
-            ),
+            "used":       credits_used,
+            "included":   credits_included,
+            "remaining":  credits_remaining,
+            "resets_at":  reset_at_str,
         },
         "top_queries": [{"query": r["query"], "count": r["count"]} for r in top_query_rows],
-        "wri_scores": wri_score_entries,
+        "wri_scores": [
+            {
+                "service":          r["service"],
+                "wri_score":        r["wri_score"],
+                "ranking_version":  r["ranking_version"],
+                "request_count":    r["calls"],      # renamed: was "calls"
+                "calls":            r["calls"],      # backward compat
+                "last_called":      r["last_called"],
+            }
+            for r in wri_score_entries
+        ],
     }
 
 

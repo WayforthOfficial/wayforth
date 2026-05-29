@@ -563,6 +563,12 @@ async def lifespan(app: FastAPI):
                     last_login_at TIMESTAMPTZ
                 )
             """)
+            # v0.8.2: annual billing interval for provider subscriptions.
+            await _mconn.execute("""
+                ALTER TABLE providers
+                    ADD COLUMN IF NOT EXISTS billing_interval TEXT
+                        CHECK (billing_interval IN ('month', 'year')) DEFAULT 'month'
+            """)
             # v0.8.0 Item 2: tokenised email verification on registration. Without
             # this an attacker can register support@groq.com and impersonate a
             # known brand. Mirror columns in migrations/041_provider_email_verification.sql.
@@ -936,6 +942,14 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 ALTER TABLE services
                     ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE
+            """)
+            # v0.8.2: credits_per_call — how many credits a single execution of
+            # this service costs. Managed service costs come from SERVICE_CONFIGS;
+            # this column mirrors them in the DB so the balance-recalculation
+            # query can JOIN to services.credits_per_call instead of hard-coding.
+            await _mconn.execute("""
+                ALTER TABLE services
+                    ADD COLUMN IF NOT EXISTS credits_per_call INTEGER
             """)
             # x402 settlement dedup table — added in v0.7.8 Section 9, wired in
             # v0.8.0 Item 1. The INSERT happens in routers/x402.py (x402_execute

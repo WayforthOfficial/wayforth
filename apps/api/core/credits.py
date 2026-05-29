@@ -867,7 +867,7 @@ async def _monthly_topup_reset():
                 for _rk in reset_keys:
                     p = PLANS.get(_rk["tier"], PLANS["free"])
                     asyncio.create_task(_dispatch_webhooks(
-                        str(_rk["user_id"]), "wayf.calls_reset", {
+                        str(_rk["user_id"]), "wayf.credits_reset", {
                             "tier": _rk["tier"],
                             "credits_included": p["calls_included"],
                             "calls_included": p["calls_included"],  # backward compat
