@@ -1162,17 +1162,30 @@ async def pioneer_join(request: Request, db=Depends(get_db)):
     """, user_id, now)
 
     credits_awarded = 0
-    if not user["pioneer_credits_awarded"]:
-        # Determine tier from api_keys
-        key_row = await db.fetchrow(
-            "SELECT tier FROM api_keys WHERE user_id = $1::uuid AND active = TRUE LIMIT 1",
+    tier = None
+    # Atomically claim the one-time bonus inside a single transaction. The
+    # conditional UPDATE ... WHERE pioneer_credits_awarded = FALSE RETURNING id
+    # locks the users row and flips the flag in one statement, so two concurrent
+    # join requests cannot both observe the flag FALSE and double-award. Only the
+    # request whose UPDATE returns a row proceeds to grant credits; the loser
+    # gets claimed = None and awards nothing. The flag flip and the balance/ledger
+    # writes share one transaction, so a failure rolls back the claim too (the
+    # award is never lost or partially applied).
+    async with db.transaction():
+        claimed = await db.fetchval(
+            "UPDATE users SET pioneer_credits_awarded = TRUE "
+            "WHERE id = $1::uuid AND pioneer_credits_awarded = FALSE RETURNING id",
             user_id,
         )
-        tier = (key_row["tier"] if key_row else None) or "free"
-        credits_awarded = _PIONEER_CREDITS.get(tier, 0)
+        if claimed:
+            key_row = await db.fetchrow(
+                "SELECT tier FROM api_keys WHERE user_id = $1::uuid AND active = TRUE LIMIT 1",
+                user_id,
+            )
+            tier = (key_row["tier"] if key_row else None) or "free"
+            credits_awarded = _PIONEER_CREDITS.get(tier, 0)
 
-        if credits_awarded > 0:
-            async with db.transaction():
+            if credits_awarded > 0:
                 cred = await db.fetchrow(
                     "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
                     user_id,
@@ -1190,11 +1203,7 @@ async def pioneer_join(request: Request, db=Depends(get_db)):
                 """, user_id, credits_awarded, new_balance,
                     f"pioneer_bonus_awarded: {credits_awarded} credits")
 
-        await db.execute(
-            "UPDATE users SET pioneer_credits_awarded = TRUE WHERE id = $1::uuid",
-            user_id,
-        )
-
+    if claimed:
         try:
             await log_admin_action(db, str(user_id), "pioneer_bonus_awarded", str(user_id), {
                 "credits": credits_awarded, "tier": tier,
@@ -1206,7 +1215,7 @@ async def pioneer_join(request: Request, db=Depends(get_db)):
         "opted_in":          True,
         "opted_in_at":       now.isoformat(),
         "credits_awarded":   credits_awarded,
-        "credits_previously_awarded": bool(user["pioneer_credits_awarded"]),
+        "credits_previously_awarded": claimed is None,
         "message": (
             f"Welcome to the Pioneer Program! {credits_awarded} bonus credits awarded."
             if credits_awarded > 0

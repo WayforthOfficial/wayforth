@@ -20,6 +20,17 @@ router = APIRouter()
 
 _PROVIDER_TIERS = {"observer", "intelligence", "premium"}
 
+
+def _mask_agent_id(agent_id: str | None) -> str:
+    """Mask a caller agent/session ID so providers can distinguish agents
+    without seeing the full identifier (which is PII-adjacent / cross-tenant)."""
+    if not agent_id:
+        return "agent_unknown"
+    s = str(agent_id)
+    if len(s) <= 10:
+        return s[:4] + "…"
+    return f"{s[:6]}…{s[-4:]}"
+
 _PROVIDER_TIER_PRICES = {
     "intelligence": "STRIPE_PRICE_PROVIDER_INTELLIGENCE",
     "premium":      "STRIPE_PRICE_PROVIDER_PREMIUM",
@@ -328,10 +339,13 @@ async def provider_login(request: Request, db=Depends(get_db)):
     token_hash = _hashlib.sha256(token.encode()).hexdigest()
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
 
+    # Store only the hash — never the raw token — so a DB/backup/replica leak
+    # cannot yield usable session tokens. The raw token is returned to the
+    # caller below but not persisted. Lookup (line ~55) matches on token_hash.
     await db.execute("""
-        INSERT INTO provider_sessions (provider_id, token, token_hash, expires_at)
-        VALUES ($1, $2, $3, $4)
-    """, provider["id"], token, token_hash, expires_at)
+        INSERT INTO provider_sessions (provider_id, token_hash, expires_at)
+        VALUES ($1, $2, $3)
+    """, provider["id"], token_hash, expires_at)
 
     await db.execute(
         "UPDATE providers SET last_login_at = NOW() WHERE id = $1", provider["id"]
@@ -836,7 +850,10 @@ async def provider_agents(request: Request, db=Depends(get_db)):
     slug = svc["service_slug"]
     month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    # Per-agent call counts from agent_identities joined with search_analytics
+    # Per-agent call counts from agent_identities joined with search_analytics.
+    # Scoped to agents whose searches actually surfaced THIS provider's service
+    # (sa.clicked_slug = slug) — without this filter the EXISTS matched any agent
+    # that ran any search platform-wide, leaking other providers' caller IDs.
     agent_rows = await db.fetch("""
         SELECT ai.agent_id,
                ai.total_searches AS call_count,
@@ -845,14 +862,15 @@ async def provider_agents(request: Request, db=Depends(get_db)):
         WHERE EXISTS (
             SELECT 1 FROM search_analytics sa
             WHERE sa.session_id = ai.agent_id
+              AND sa.clicked_slug = $1
         )
         ORDER BY ai.last_active_at DESC NULLS LAST
         LIMIT 50
-    """)
+    """, slug)
 
     agents = [
         {
-            "agent_id": r["agent_id"],
+            "agent_id": _mask_agent_id(r["agent_id"]),
             "call_count": int(r["call_count"] or 0),
             "last_active": r["last_active_at"].isoformat() if r["last_active_at"] else None,
         }
@@ -1072,7 +1090,12 @@ async def provider_boost_activate(request: Request, db=Depends(get_db)):
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(days=cfg["days"])
 
-    await db.execute("""
+    # Atomically claim the one-time boost. The earlier SELECT-based check is a
+    # fast-path; this conditional UPDATE ... WHERE boost_used = FALSE is the
+    # authoritative guard — it locks the row and flips the flag in one statement,
+    # so two concurrent activations (within the 5/min budget) cannot both pass.
+    # Only the request whose UPDATE returns a row activated the boost.
+    activated = await db.fetchval("""
         UPDATE providers
            SET boost_used         = TRUE,
                boost_activated_at = $2,
@@ -1080,8 +1103,14 @@ async def provider_boost_activate(request: Request, db=Depends(get_db)):
                boost_tier         = $4,
                boost_wri_bonus    = $5,
                boost_paused       = FALSE
-         WHERE id = $1
+         WHERE id = $1 AND boost_used = FALSE
+         RETURNING id
     """, provider_id, now, expires_at, tier, cfg["wri_bonus"])
+    if activated is None:
+        raise HTTPException(status_code=409, detail={
+            "error": "boost_already_used",
+            "message": "Pioneer Boost is a one-time, lifetime benefit and has already been activated on this account.",
+        })
 
     try:
         await log_admin_action(db, "system", "pioneer_boost_activated", str(provider_id), {

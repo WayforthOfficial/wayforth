@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from core.auth import _resolve_user
+from core.tier_gates import require_tier
 from core.credits import _dispatch_webhooks, _maybe_grant_founding_bonus
 from core.db import get_db
 from core.rate_limit import limiter, get_real_ip
@@ -139,7 +140,9 @@ async def submit_service(request: Request, req: SubmitRequest, db=Depends(get_db
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:
         raise HTTPException(status_code=401, detail="API key required")
-    await _resolve_user(db, api_key)
+    _user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
+    # Submitting a custom service into the catalog is a Growth+ feature.
+    require_tier(_tier, "custom_services")
     # SSRF defense: _probe_new_service immediately fetches the submitted URL.
     # Reject internal hostnames, private/loopback IPs, and non-https schemes.
     from core.url_validation import validate_external_url
