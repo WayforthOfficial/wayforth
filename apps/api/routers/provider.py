@@ -1001,6 +1001,147 @@ async def provider_earnings_history(request: Request, db=Depends(get_db)):
     }
 
 
+# ── Provider Boost (Pioneer Program) ─────────────────────────────────────────
+
+_BOOST_CONFIG = {
+    "intelligence": {"days": 15, "wri_bonus": 10},
+    "premium":      {"days": 30, "wri_bonus": 20},
+}
+
+
+@router.post("/provider/boost/activate", tags=["Provider"])
+@limiter.limit("5/minute")
+async def provider_boost_activate(request: Request, db=Depends(get_db)):
+    """One-time Pioneer Boost activation for Intelligence or Premium providers.
+
+    Requirements:
+    - Provider tier must be 'intelligence' or 'premium'
+    - Provider's service must be Tier 2 verified (coverage_tier >= 2, consecutive_failures < 3)
+    - boost_used must be FALSE — this is a lifetime, one-time benefit
+
+    On success: sets boost_used=TRUE (permanent), boost_activated_at, boost_expires_at,
+    boost_tier, boost_wri_bonus; records to audit log.
+    """
+    from datetime import datetime, timezone, timedelta
+    from core.audit import log_admin_action
+
+    provider = await _require_email_verified(request, db)
+    provider_id = provider["provider_id"]
+    tier = provider["tier"]
+
+    if tier not in _BOOST_CONFIG:
+        raise HTTPException(status_code=403, detail={
+            "error": "ineligible_tier",
+            "message": "Pioneer Boost requires an Intelligence or Premium subscription.",
+            "current_tier": tier,
+        })
+
+    existing = await db.fetchrow(
+        "SELECT boost_used FROM providers WHERE id = $1", provider_id
+    )
+    if existing and existing["boost_used"]:
+        raise HTTPException(status_code=409, detail={
+            "error": "boost_already_used",
+            "message": "Pioneer Boost is a one-time, lifetime benefit and has already been activated on this account.",
+        })
+
+    svc = await _get_provider_service(db, provider_id)
+    if not svc:
+        raise HTTPException(status_code=404, detail={"error": "no_service_registered"})
+
+    service_row = await db.fetchrow(
+        "SELECT coverage_tier, consecutive_failures FROM services WHERE slug = $1",
+        svc["service_slug"],
+    )
+    if not service_row:
+        raise HTTPException(status_code=404, detail={"error": "service_not_found"})
+
+    tier2_ok = (
+        (service_row["coverage_tier"] or 0) >= 2
+        and (service_row["consecutive_failures"] or 0) < 3
+    )
+    if not tier2_ok:
+        raise HTTPException(status_code=403, detail={
+            "error": "tier2_required",
+            "message": "Your service must be Tier 2 verified (90%+ uptime, 7 days) to activate Pioneer Boost.",
+            "coverage_tier": service_row["coverage_tier"],
+            "consecutive_failures": service_row["consecutive_failures"],
+        })
+
+    cfg = _BOOST_CONFIG[tier]
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=cfg["days"])
+
+    await db.execute("""
+        UPDATE providers
+           SET boost_used         = TRUE,
+               boost_activated_at = $2,
+               boost_expires_at   = $3,
+               boost_tier         = $4,
+               boost_wri_bonus    = $5,
+               boost_paused       = FALSE
+         WHERE id = $1
+    """, provider_id, now, expires_at, tier, cfg["wri_bonus"])
+
+    try:
+        await log_admin_action(db, "system", "pioneer_boost_activated", str(provider_id), {
+            "tier": tier, "wri_bonus": cfg["wri_bonus"],
+            "expires_at": expires_at.isoformat(),
+            "service_slug": svc["service_slug"],
+        })
+    except Exception:
+        pass
+
+    return {
+        "boost_activated": True,
+        "boost_tier":      tier,
+        "boost_wri_bonus": cfg["wri_bonus"],
+        "boost_activated_at": now.isoformat(),
+        "boost_expires_at":   expires_at.isoformat(),
+        "days":               cfg["days"],
+        "service_slug":       svc["service_slug"],
+    }
+
+
+@router.get("/provider/boost/status", tags=["Provider"])
+@limiter.limit("30/minute")
+async def provider_boost_status(request: Request, db=Depends(get_db)):
+    """Return current Pioneer Boost state for the authenticated provider."""
+    from datetime import datetime, timezone
+
+    provider = await _get_provider(request, db)
+    row = await db.fetchrow("""
+        SELECT boost_used, boost_activated_at, boost_expires_at,
+               boost_tier, boost_wri_bonus, boost_paused
+          FROM providers WHERE id = $1
+    """, provider["provider_id"])
+    if not row:
+        raise HTTPException(status_code=404, detail={"error": "provider_not_found"})
+
+    now = datetime.now(timezone.utc)
+    expires_at = row["boost_expires_at"]
+    boost_active = (
+        bool(row["boost_used"])
+        and not bool(row["boost_paused"])
+        and expires_at is not None
+        and expires_at > now
+    )
+    days_remaining: int | None = None
+    if expires_at:
+        days_remaining = max(0, (expires_at - now).days)
+
+    return {
+        "boost_used":         bool(row["boost_used"]),
+        "boost_active":       boost_active,
+        "boost_paused":       bool(row["boost_paused"]),
+        "boost_tier":         row["boost_tier"],
+        "boost_wri_bonus":    row["boost_wri_bonus"] if boost_active else 0,
+        "boost_activated_at": row["boost_activated_at"].isoformat() if row["boost_activated_at"] else None,
+        "boost_expires_at":   expires_at.isoformat() if expires_at else None,
+        "days_remaining":     days_remaining,
+    }
+
+
 # ── Provider billing ──────────────────────────────────────────────────────────
 
 @router.post("/provider/billing/upgrade", tags=["Provider"])
