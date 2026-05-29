@@ -290,17 +290,59 @@ async def search_services(
     except Exception:
         pass
 
+    # Load Pioneer Boost metadata for each result slug.
+    # Joins provider_services → providers to find active (non-paused, non-expired) boosts.
+    _boost_map: dict = {}  # slug → {wri_bonus, expires_at, new_provider}
+    try:
+        _top_slugs = [s.get("slug") for s in top if s.get("slug")]
+        if _top_slugs:
+            from datetime import datetime, timezone as _tz
+            _boost_rows = await db.fetch("""
+                SELECT ps.service_slug,
+                       p.boost_wri_bonus,
+                       p.boost_expires_at,
+                       p.created_at AS provider_created_at
+                  FROM provider_services ps
+                  JOIN providers p ON p.id = ps.provider_id
+                 WHERE ps.service_slug = ANY($1::text[])
+                   AND p.boost_used    = TRUE
+                   AND p.boost_paused  = FALSE
+                   AND p.boost_expires_at > NOW()
+            """, _top_slugs)
+            _now = datetime.now(_tz.utc)
+            for br in _boost_rows:
+                expires = br["boost_expires_at"]
+                days_left = max(0, (expires - _now).days) if expires else 0
+                _provider_created = br["provider_created_at"]
+                is_new = (
+                    _provider_created is not None
+                    and (_now - (_provider_created if _provider_created.tzinfo else _provider_created.replace(tzinfo=_tz.utc))).days <= 30
+                )
+                _boost_map[br["service_slug"]] = {
+                    "wri_bonus": int(br["boost_wri_bonus"] or 0),
+                    "expires_in_days": days_left,
+                    "new_provider": is_new,
+                }
+    except Exception:
+        pass
+
     logger.info(f"search q={q!r} results={len(top)} fallback={fallback_used}")
-    results = [
-        {
+    results = []
+    for s in top:
+        slug = s.get("slug")
+        _boost = _boost_map.get(slug, {})
+        _boost_bonus = _boost.get("wri_bonus", 0)
+        _base_wri = _apply_health_wri(
+            s["wri_score"] if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
+            _health_map.get(slug),
+        )
+        _boosted_wri = min(round((_base_wri or 0) + _boost_bonus, 1), 100.0)
+        result = {
             "name": s.get("name"),
-            "slug": s.get("slug"),
+            "slug": slug,
             "description": s.get("description"),
             "score": s.get("score", 0),
-            "wri": _apply_health_wri(
-                s["wri_score"] if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
-                _health_map.get(s.get("slug")),
-            ),
+            "wri": _boosted_wri,
             "ranking_version": "v2" if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else "v1",
             "reason": s.get("reason", ""),
             "coverage_tier": s.get("coverage_tier"),
@@ -310,7 +352,7 @@ async def search_services(
                 "per_call_usd": s.get("pricing_usdc"),
             },
             "service_id": "0x" + hashlib.sha256(s.get("endpoint_url", "").encode()).hexdigest(),
-            "wayforth_id": f"wayforth://{s.get('slug') or s.get('name','').lower().replace(' ','_').replace('/','_')[:30]}/{hashlib.sha256(s.get('endpoint_url','').encode()).hexdigest()[:8]}",
+            "wayforth_id": f"wayforth://{slug or s.get('name','').lower().replace(' ','_').replace('/','_')[:30]}/{hashlib.sha256(s.get('endpoint_url','').encode()).hexdigest()[:8]}",
             "payment_options": {
                 "track_a": {
                     "method": "card",
@@ -326,8 +368,13 @@ async def search_services(
                 "x402_supported": bool(s.get("x402_supported", False)),
             },
         }
-        for s in top
-    ]
+        if _boost:
+            result["boosted"] = True
+            result["boost_expires_in_days"] = _boost["expires_in_days"]
+            result["new_provider"] = _boost["new_provider"]
+        else:
+            result["boosted"] = False
+        results.append(result)
     response: dict = {
         "query_id": query_id,
         "query": q,
