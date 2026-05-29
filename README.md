@@ -2,7 +2,7 @@
 
 **One tool call. Any API. No setup.**
 
-[![Version](https://img.shields.io/badge/version-0.8.0_Gravity-4F46E5)](https://gateway.wayforth.io/docs)
+[![Version](https://img.shields.io/badge/version-0.8.2_Gravity-4F46E5)](https://gateway.wayforth.io/docs)
 [![License](https://img.shields.io/badge/license-BSL_1.1-64748B)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-190%2B_passing-10B981)](https://github.com/WayforthOfficial/wayforth)
 
@@ -192,11 +192,12 @@ Full spec: [gateway.wayforth.io/wayforthql-spec](https://gateway.wayforth.io/way
 
 ## Development Status
 
-**v0.8.0 "Gravity" — current release**
+**v0.8.2 "Gravity" — current release**
 
 - 190+ tests passing, zero failures
 - 99.97% uptime
-- **LLM gateway** — `POST /v1/chat/completions` OpenAI-compatible endpoint with Groq → Together AI → Mistral failover and streaming (new in v0.8.0)
+- **Pioneer Program** — developers earn daily bonus credits by helping new verified services build signal
+- **LLM gateway** — `POST /v1/chat/completions` OpenAI-compatible endpoint with Groq → Together AI → Mistral failover and streaming
 - **Tier 1 input caps** — DeepL 2,000 chars, AssemblyAI ~10 min, Stability AI 1 image per call
 - **API key encryption versioning** — versioned Fernet keys, zero-downtime rotation
 - **Provider email verification** — required before service submission
