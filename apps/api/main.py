@@ -210,6 +210,75 @@ async def _probe_managed_services_loop():
         await asyncio.sleep(1800)  # 30 minutes
 
 
+async def _boost_auto_pause_loop():
+    """Every 30 minutes: pause/unpause provider boosts based on Tier 2 health.
+
+    Pause rule:  boost active AND provider's service drops below Tier 2
+                 (coverage_tier < 2 OR consecutive_failures >= 3)
+                 → boost_paused = TRUE, boost_wri_bonus = 0
+
+    Resume rule: boost paused AND service recovers to Tier 2
+                 (coverage_tier >= 2 AND consecutive_failures < 3)
+                 → boost_paused = FALSE, bonus restored from boost_tier config
+                 Note: boost_expires_at is never changed — paused days are lost.
+    """
+    from routers.provider import _BOOST_CONFIG
+    await asyncio.sleep(120)  # startup delay — let probe loop run first
+    while True:
+        pool = getattr(app.state, "pool", None)
+        if pool:
+            try:
+                async with pool.acquire() as conn:
+                    # Find all providers with an active (non-expired) boost
+                    boost_rows = await conn.fetch("""
+                        SELECT p.id AS provider_id, p.boost_tier, p.boost_paused,
+                               p.boost_wri_bonus
+                          FROM providers p
+                         WHERE p.boost_used = TRUE
+                           AND p.boost_expires_at > NOW()
+                    """)
+                    for row in boost_rows:
+                        # Get provider's service health from provider_services → services
+                        svc = await conn.fetchrow("""
+                            SELECT s.coverage_tier, s.consecutive_failures
+                              FROM provider_services ps
+                              JOIN services s ON s.slug = ps.service_slug
+                             WHERE ps.provider_id = $1
+                             LIMIT 1
+                        """, row["provider_id"])
+                        if not svc:
+                            continue
+
+                        tier2_ok = (
+                            (svc["coverage_tier"] or 0) >= 2
+                            and (svc["consecutive_failures"] or 0) < 3
+                        )
+                        cfg = _BOOST_CONFIG.get(row["boost_tier"] or "", {})
+                        correct_bonus = cfg.get("wri_bonus", 0)
+
+                        if not tier2_ok and not row["boost_paused"]:
+                            # Service degraded → pause boost
+                            await conn.execute("""
+                                UPDATE providers
+                                   SET boost_paused = TRUE, boost_wri_bonus = 0
+                                 WHERE id = $1
+                            """, row["provider_id"])
+                            logger.info("boost auto-paused provider=%s", row["provider_id"])
+
+                        elif tier2_ok and row["boost_paused"]:
+                            # Service recovered → restore boost
+                            await conn.execute("""
+                                UPDATE providers
+                                   SET boost_paused = FALSE, boost_wri_bonus = $2
+                                 WHERE id = $1
+                            """, row["provider_id"], correct_bonus)
+                            logger.info("boost auto-resumed provider=%s bonus=%d",
+                                        row["provider_id"], correct_bonus)
+            except Exception as exc:
+                logger.warning("boost_auto_pause_loop error: %s", exc)
+        await asyncio.sleep(1800)  # 30 minutes
+
+
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -855,6 +924,7 @@ async def lifespan(app: FastAPI):
     renewal_task = asyncio.create_task(_usdc_renewal_reminder())
     reset_task = asyncio.create_task(_monthly_topup_reset())
     probe_task = asyncio.create_task(_probe_managed_services_loop())
+    boost_pause_task = asyncio.create_task(_boost_auto_pause_loop())
     webhook_retry_task = asyncio.create_task(_webhook_retry_loop())
     _get_redis()  # eagerly init so the rate-limiter log line appears at startup
     yield
@@ -863,6 +933,7 @@ async def lifespan(app: FastAPI):
     renewal_task.cancel()
     reset_task.cancel()
     probe_task.cancel()
+    boost_pause_task.cancel()
     webhook_retry_task.cancel()
     if app.state.pool:
         await app.state.pool.close()
