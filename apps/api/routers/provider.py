@@ -329,9 +329,9 @@ async def provider_login(request: Request, db=Depends(get_db)):
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
 
     await db.execute("""
-        INSERT INTO provider_sessions (provider_id, token_hash, expires_at)
-        VALUES ($1, $2, $3)
-    """, provider["id"], token_hash, expires_at)
+        INSERT INTO provider_sessions (provider_id, token, token_hash, expires_at)
+        VALUES ($1, $2, $3, $4)
+    """, provider["id"], token, token_hash, expires_at)
 
     await db.execute(
         "UPDATE providers SET last_login_at = NOW() WHERE id = $1", provider["id"]
