@@ -612,6 +612,13 @@ async def lifespan(app: FastAPI):
                 SET token_hash = encode(sha256(token::bytea), 'hex')
                 WHERE token_hash IS NULL AND token IS NOT NULL
             """)
+            # Now that token_hash is the authoritative lookup column and is
+            # backfilled, stop requiring the raw token. This lets both the login
+            # and MFA paths insert only the hash (mfa.py already omits `token`,
+            # which would violate the old NOT NULL on a fresh DB). Idempotent.
+            await _mconn.execute("""
+                ALTER TABLE provider_sessions ALTER COLUMN token DROP NOT NULL
+            """)
             await _mconn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS provider_sessions_token_hash_uniq
                 ON provider_sessions(token_hash)
