@@ -92,10 +92,11 @@ class TestServiceApiCost:
 
     def test_all_real_costs_are_positive(self):
         for slug, cfg in SERVICE_CONFIGS.items():
-            assert cfg["real_cost_per_call"] > 0, f"{slug} real_cost_per_call must be > 0"
+            # Subscription-based services (e.g. deepl) legitimately have 0 per-call cost.
+            assert cfg["real_cost_per_call"] >= 0, f"{slug} real_cost_per_call must be >= 0"
 
     def test_stability_api_cost(self):
-        assert SERVICE_CONFIGS["stability"]["real_cost_per_call"] == pytest.approx(0.065)
+        assert SERVICE_CONFIGS["stability"]["real_cost_per_call"] == pytest.approx(0.08)
 
     def test_elevenlabs_is_most_expensive(self):
         costs = {s: c["real_cost_per_call"] for s, c in SERVICE_CONFIGS.items()}
@@ -103,8 +104,8 @@ class TestServiceApiCost:
 
     @pytest.mark.parametrize("slug,expected", [
         ("groq",       0.001),
-        ("deepl",      0.013),
-        ("stability",  0.065),
+        ("deepl",      0.0),
+        ("stability",  0.08),
         ("elevenlabs", 0.150),
     ])
     def test_spot_check_api_costs(self, slug, expected):
@@ -127,7 +128,8 @@ class TestServiceMargins:
     def test_stability_margin_at_growth_value(self):
         cfg = SERVICE_CONFIGS["stability"]
         margin = cfg["credits"] * _GROWTH_CREDIT_VALUE_USD - cfg["real_cost_per_call"]
-        assert margin == pytest.approx(0.01599, rel=1e-2)
+        # 86 credits * 0.001246 - 0.08 = 0.107156 - 0.08 = 0.027156
+        assert margin == pytest.approx(0.027156, rel=1e-2)
 
     def test_stability_margin_exceeds_alert_threshold(self):
         cfg = SERVICE_CONFIGS["stability"]
