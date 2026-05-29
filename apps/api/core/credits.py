@@ -146,7 +146,7 @@ def check_service_margins() -> None:
 
 
 async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
-                                   service_id: str = None, tx_type: str = "usage",
+                                   service_id: str = None, tx_type: str = "execution",
                                    agent_id: str = None, api_key_id: str = None):
     """Atomically check and deduct credits. Returns (success, balance_after)."""
     async with db.transaction():

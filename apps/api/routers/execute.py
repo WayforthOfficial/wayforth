@@ -665,7 +665,8 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
                 if settlement["settled"]:
                     credits_needed = max(1, round(amount_usd * 1000))
                     ok, bal_after = await check_and_deduct_credits(
-                        db, str(key_record["user_id"]), credits_needed, "/pay", service_id
+                        db, str(key_record["user_id"]), credits_needed, "/pay", service_id,
+                        tx_type="cross_rail",
                     )
                     if query_id and service:
                         try:
@@ -751,6 +752,7 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
         credits_needed,
         "/pay",
         service_id,
+        tx_type="cross_rail",
     )
 
     if not success:
