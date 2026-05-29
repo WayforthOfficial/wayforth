@@ -21,10 +21,11 @@ router = APIRouter()
 
 @router.get("/admin/stats")
 @limiter.limit("20/minute")
-async def admin_stats(request: Request, key: str = ""):
+async def admin_stats(request: Request):
     from main import app, ADMIN_KEY
-    admin_key_header = request.headers.get("X-Admin-Key", "")
-    provided_key = admin_key_header or key
+    # Header only — the legacy ?key= query param is no longer honored (keys in
+    # query strings leak into proxy/server access logs).
+    provided_key = request.headers.get("X-Admin-Key", "")
     authed = ADMIN_KEY and provided_key and secrets.compare_digest(provided_key, ADMIN_KEY)
     if not authed:
         token = request.headers.get("X-Admin-Token", "")
@@ -272,10 +273,11 @@ async def platform_stats(request: Request):
 
 
 @router.get("/admin")
-async def admin_page(key: str = ""):
-    from main import ADMIN_KEY
-    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+async def admin_page():
+    # Serve the admin SPA shell unconditionally. It contains no secrets or data;
+    # every data endpoint it calls is protected by X-Admin-Key / X-Admin-Token.
+    # Previously this required ?key=, which placed the admin key in the page-load
+    # URL (and thus server/proxy access logs) on every visit.
     return FileResponse("static/admin.html")
 
 

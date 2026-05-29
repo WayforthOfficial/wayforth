@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.requests import Request
+from fastapi.responses import JSONResponse
 
 from core.db import get_db
 from core.login_security import check_login_lockout, record_login_failure, clear_login_failures
@@ -1169,6 +1170,177 @@ async def provider_boost_status(request: Request, db=Depends(get_db)):
         "boost_expires_at":   expires_at.isoformat() if expires_at else None,
         "days_remaining":     days_remaining,
     }
+
+
+# ── Provider service management ───────────────────────────────────────────────
+
+_VALID_CATEGORIES = {"inference", "data", "translation"}
+
+
+def _valid_slug(slug: str) -> bool:
+    return bool(slug) and len(slug) <= 64 and all(c.isalnum() or c in "-_" for c in slug)
+
+
+async def _owned_service_or_404(db, provider_id, slug: str):
+    """Return the provider_services row for (provider_id, slug) or raise 404.
+    Enforces that the authenticated provider owns the slug."""
+    row = await db.fetchrow(
+        "SELECT id, service_slug FROM provider_services WHERE provider_id = $1 AND service_slug = $2",
+        provider_id, slug,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "error": "service_not_found",
+            "message": "No service with that slug is registered under your account.",
+        })
+    return row
+
+
+@router.post("/provider/services", tags=["Provider"])
+@limiter.limit("10/minute")
+async def provider_add_service(request: Request, db=Depends(get_db)):
+    """Add a new service to the catalog under the authenticated provider."""
+    from core.url_validation import validate_external_url
+
+    provider = await _require_email_verified(request, db)
+    provider_id = provider["provider_id"]
+    body = await request.json()
+
+    name = (body.get("name") or "").strip()
+    slug = (body.get("slug") or "").strip().lower()
+    description = (body.get("description") or "").strip()
+    category = (body.get("category") or "").strip().lower()
+    endpoint_url = (body.get("endpoint_url") or "").strip()
+    try:
+        price_per_call = float(body.get("price_per_call") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail={"error": "price_per_call must be a number"})
+
+    if not all([name, slug, category, endpoint_url]):
+        raise HTTPException(status_code=422, detail={"error": "name, slug, category, endpoint_url are required"})
+    if not _valid_slug(slug):
+        raise HTTPException(status_code=422, detail={"error": "slug must be <=64 chars, alphanumeric/hyphen/underscore only"})
+    if category not in _VALID_CATEGORIES:
+        raise HTTPException(status_code=422, detail={"error": f"category must be one of: {', '.join(sorted(_VALID_CATEGORIES))}"})
+    if len(name) > 100:
+        raise HTTPException(status_code=422, detail={"error": "name must be 100 characters or fewer"})
+    if len(description) > 500:
+        raise HTTPException(status_code=422, detail={"error": "description must be 500 characters or fewer"})
+    if price_per_call < 0:
+        raise HTTPException(status_code=422, detail={"error": "price_per_call must be >= 0"})
+    # SSRF defense — reject internal/loopback/non-https endpoints.
+    validate_external_url(endpoint_url, field_name="endpoint_url")
+
+    # Slug uniqueness is global (provider_services_slug_unique); reject early.
+    if await db.fetchval("SELECT 1 FROM provider_services WHERE service_slug = $1", slug) \
+       or await db.fetchval("SELECT 1 FROM services WHERE slug = $1", slug):
+        raise HTTPException(status_code=409, detail={"error": "slug_taken", "slug": slug})
+
+    try:
+        async with db.transaction():
+            service_id = await db.fetchval(
+                """INSERT INTO services (name, slug, description, endpoint_url, category,
+                                         pricing_usdc, source, coverage_tier, active)
+                   VALUES ($1, $2, $3, $4, $5, $6, 'provider', 0, TRUE) RETURNING id""",
+                name, slug, description, endpoint_url, category, price_per_call,
+            )
+            await db.execute(
+                """INSERT INTO provider_services (provider_id, service_slug, service_name)
+                   VALUES ($1, $2, $3)""",
+                provider_id, slug, name,
+            )
+    except Exception as exc:
+        # Unique violations (slug raced, or endpoint_url already in catalog).
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            raise HTTPException(status_code=409, detail={"error": "slug_or_endpoint_taken"})
+        raise
+
+    return JSONResponse(status_code=201, content={
+        "status": "created",
+        "service_id": str(service_id),
+        "slug": slug,
+        "name": name,
+        "category": category,
+        "coverage_tier": 0,
+        "message": "Service added. Coverage tier is computed asynchronously by the health monitor.",
+    })
+
+
+@router.patch("/provider/services/{slug}", tags=["Provider"])
+@limiter.limit("20/minute")
+async def provider_edit_service(slug: str, request: Request, db=Depends(get_db)):
+    """Edit an existing service owned by the authenticated provider.
+    Editable: name, description, price_per_call, endpoint_url. Slug and category
+    are immutable (a slug change is a new service)."""
+    from core.url_validation import validate_external_url
+
+    provider = await _require_email_verified(request, db)
+    provider_id = provider["provider_id"]
+    slug = slug.strip().lower()
+    await _owned_service_or_404(db, provider_id, slug)
+
+    body = await request.json()
+    sets, args = [], []
+    if "name" in body:
+        name = (body.get("name") or "").strip()
+        if not name or len(name) > 100:
+            raise HTTPException(status_code=422, detail={"error": "name must be 1-100 characters"})
+        args.append(name); sets.append(f"name = ${len(args)}")
+    if "description" in body:
+        description = (body.get("description") or "").strip()
+        if len(description) > 500:
+            raise HTTPException(status_code=422, detail={"error": "description must be 500 characters or fewer"})
+        args.append(description); sets.append(f"description = ${len(args)}")
+    if "price_per_call" in body:
+        try:
+            price = float(body.get("price_per_call"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail={"error": "price_per_call must be a number"})
+        if price < 0:
+            raise HTTPException(status_code=422, detail={"error": "price_per_call must be >= 0"})
+        args.append(price); sets.append(f"pricing_usdc = ${len(args)}")
+    if "endpoint_url" in body:
+        endpoint_url = (body.get("endpoint_url") or "").strip()
+        validate_external_url(endpoint_url, field_name="endpoint_url")
+        args.append(endpoint_url); sets.append(f"endpoint_url = ${len(args)}")
+
+    if not sets:
+        raise HTTPException(status_code=422, detail={"error": "no editable fields provided",
+                            "editable": ["name", "description", "price_per_call", "endpoint_url"]})
+
+    args.append(slug)
+    try:
+        await db.execute(
+            f"UPDATE services SET {', '.join(sets)}, updated_at = NOW() WHERE slug = ${len(args)}",
+            *args,
+        )
+    except Exception as exc:
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            raise HTTPException(status_code=409, detail={"error": "endpoint_url_taken"})
+        raise
+    # Keep provider_services.service_name in sync if the name changed.
+    if "name" in body:
+        await db.execute(
+            "UPDATE provider_services SET service_name = $1 WHERE provider_id = $2 AND service_slug = $3",
+            (body.get("name") or "").strip(), provider_id, slug,
+        )
+    return {"status": "updated", "slug": slug, "updated_fields": [s.split(" = ")[0] for s in sets]}
+
+
+@router.delete("/provider/services/{slug}", tags=["Provider"])
+@limiter.limit("20/minute")
+async def provider_delete_service(slug: str, request: Request, db=Depends(get_db)):
+    """Soft-delete a service owned by the authenticated provider. The catalog row
+    and WayforthRank signal history are preserved; the service stops surfacing in
+    search/fallback (active=FALSE)."""
+    provider = await _require_email_verified(request, db)
+    provider_id = provider["provider_id"]
+    slug = slug.strip().lower()
+    await _owned_service_or_404(db, provider_id, slug)
+
+    await db.execute("UPDATE services SET active = FALSE, updated_at = NOW() WHERE slug = $1", slug)
+    return {"status": "deleted", "slug": slug, "soft_delete": True,
+            "message": "Service deactivated. It no longer appears in search; its history is retained."}
 
 
 # ── Provider billing ──────────────────────────────────────────────────────────

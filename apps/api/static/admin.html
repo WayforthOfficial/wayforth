@@ -264,6 +264,10 @@ async function api(path, opts = {}) {
   const keyParam = params.get('key');
   if (keyParam) {
     _adminKey = keyParam;
+    // Scrub the key from the visible URL immediately so it isn't left in the
+    // address bar, browser history, or any subsequent referer/log line. The
+    // key is held in memory and sent only via the X-Admin-Key header.
+    try { history.replaceState(null, '', location.pathname); } catch (_) {}
     // verify key is valid
     const r = await fetch('/admin-api/auth/me', { headers: authHeaders() });
     if (r.ok) {
