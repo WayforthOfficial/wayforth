@@ -1274,6 +1274,7 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
               JOIN search_outcomes so ON so.query_id = sa.id
              WHERE sa.user_id = $1::uuid
                AND so.pioneer_routed = TRUE
+               AND so.signal_weight < 1.0
         """, user_id) or 0
 
         pioneer_calls_this_month = await db.fetchval("""
@@ -1282,6 +1283,7 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
               JOIN search_outcomes so ON so.query_id = sa.id
              WHERE sa.user_id = $1::uuid
                AND so.pioneer_routed = TRUE
+               AND so.signal_weight < 1.0
                AND sa.created_at >= date_trunc('month', NOW())
         """, user_id) or 0
 
