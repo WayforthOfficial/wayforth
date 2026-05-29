@@ -37,7 +37,11 @@ Content-Type: application/json
 | Event | Fires when |
 |-------|-----------|
 | `execution.completed` | A `/execute` call succeeds |
-| `credits.low` | Credit balance drops below 20 |
+| `credits.low` | Credit balance drops to ≤10% of monthly quota |
+| `wayf.balance_warning_80` | 80% of monthly credits consumed |
+| `wayf.balance_warning_95` | 95% of monthly credits consumed |
+| `credits.exhausted` | Credit balance reaches 0 |
+| `wayf.credits_reset` | Monthly credit quota resets (1st of month) |
 | `payment.confirmed` | A credit purchase settles |
 
 ### `execution.completed` payload
@@ -65,6 +69,39 @@ Content-Type: application/json
   "data": {
     "credits_remaining": 15,
     "threshold": 20
+  }
+}
+```
+
+### `wayf.balance_warning_80` / `wayf.balance_warning_95` payload
+
+```json
+{
+  "event": "wayf.balance_warning_80",
+  "timestamp": "2026-05-06T10:01:23Z",
+  "data": {
+    "credits_remaining": 48000,
+    "calls_remaining": 48000,
+    "monthly_limit": 240000,
+    "threshold_percent": 80,
+    "tier": "growth"
+  }
+}
+```
+
+`calls_remaining` is a backward-compatible alias for `credits_remaining`.
+
+### `wayf.credits_reset` payload
+
+```json
+{
+  "event": "wayf.credits_reset",
+  "timestamp": "2026-06-01T00:00:00Z",
+  "data": {
+    "tier": "growth",
+    "credits_included": 240000,
+    "calls_included": 240000,
+    "reset_at": "2026-06-01T00:00:00Z"
   }
 }
 ```
