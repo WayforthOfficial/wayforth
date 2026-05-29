@@ -799,7 +799,7 @@ async def _downgrade_expired_usdc(api_key_id: str):
                 str(row["user_id"]), "subscription.expired", {
                     "plan": old_plan,
                     "downgraded_to": "free",
-                    "message": "Your subscription expired. You're on the free tier (100 calls/month). Renew at wayforth.io/billing",
+                    "message": "Your subscription expired. You're on the free tier (100 credits/month). Renew at wayforth.io/billing",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             ))

@@ -1554,7 +1554,7 @@ def _custom_openapi():
             "**Rate-limit headers** returned on every authenticated response:\n"
             "- `X-RateLimit-Tier` — your tier (free / builder / starter / pro / growth / enterprise)\n"
             "- `X-RateLimit-Limit` — calls per minute allowed for your tier\n"
-            "- `X-RateLimit-Remaining` — calls remaining this month\n"
+            "- `X-RateLimit-Remaining` — credits remaining this month\n"
             "- `X-RateLimit-Reset` — Unix timestamp when your monthly quota resets\n"
             "- `X-Request-ID` — unique UUID for every request, traceable in logs"
         ),

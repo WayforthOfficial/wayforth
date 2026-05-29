@@ -115,14 +115,14 @@ def send_credits_low_email(to_email: str, calls_remaining: int, percent: int, pl
         resend.Emails.send({
             "from": FROM_EMAIL,
             "to": to_email,
-            "subject": "Your Wayforth calls are running low",
+            "subject": "Your Wayforth credits are running low",
             "html": f"""
             <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0F172A;color:#E2E8F0;padding:40px;border-radius:12px;">
                 <h1 style="color:#4F46E5;margin:0 0 8px">Wayforth</h1>
                 <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0;border-left:4px solid #F59E0B;">
-                    <p style="color:#F59E0B;font-weight:bold;margin:0 0 8px">⚠ Calls running low</p>
+                    <p style="color:#F59E0B;font-weight:bold;margin:0 0 8px">⚠ Credits running low</p>
                     <p style="color:#E2E8F0;font-size:18px;font-weight:bold;margin:0">
-                        {calls_remaining} calls left this month
+                        {calls_remaining} credits left this month
                     </p>
                     <p style="color:#94A3B8;font-size:13px;margin:8px 0 0">
                         {percent}% of your {plan.title()} plan · Resets {reset_date}
@@ -135,7 +135,7 @@ def send_credits_low_email(to_email: str, calls_remaining: int, percent: int, pl
             </div>
             """,
         })
-        logger.info("credits_low email sent to %s (%d calls remaining)", to_email, calls_remaining)
+        logger.info("credits_low email sent to %s (%d credits remaining)", to_email, calls_remaining)
         return True
     except Exception as e:
         logger.warning("credits_low email failed: %s", e)
@@ -214,13 +214,13 @@ def send_usage_warning_email(to_email: str, calls_remaining: int, percent_used: 
         resend.Emails.send({
             "from": FROM_EMAIL,
             "to": to_email,
-            "subject": f"You've used {percent_used}% of your Wayforth monthly calls",
+            "subject": f"You've used {percent_used}% of your Wayforth monthly credits",
             "html": f"""
             <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0F172A;color:#E2E8F0;padding:40px;border-radius:12px;">
                 <h1 style="color:#4F46E5;margin:0 0 8px">Wayforth</h1>
                 <div style="background:#1E293B;border-radius:8px;padding:20px;margin:24px 0;border-left:4px solid {color};">
-                    <p style="color:{color};font-weight:bold;margin:0 0 8px">{icon} {percent_used}% of monthly calls used</p>
-                    <p style="color:#E2E8F0;font-size:18px;font-weight:bold;margin:0">{calls_remaining:,} calls remaining</p>
+                    <p style="color:{color};font-weight:bold;margin:0 0 8px">{icon} {percent_used}% of monthly credits used</p>
+                    <p style="color:#E2E8F0;font-size:18px;font-weight:bold;margin:0">{calls_remaining:,} credits remaining</p>
                     <p style="color:#94A3B8;font-size:13px;margin:8px 0 0">
                         {plan.title()} plan · Resets {reset_date}{extra}
                     </p>
