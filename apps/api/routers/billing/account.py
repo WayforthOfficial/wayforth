@@ -1263,9 +1263,10 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Count pioneer-routed searches via search_analytics ↔ search_outcomes join
+    # Count pioneer-routed searches and sum monthly drip credits.
     pioneer_calls_made = 0
     pioneer_calls_this_month = 0
+    credits_earned_this_month = 0
     try:
         pioneer_calls_made = await db.fetchval("""
             SELECT COUNT(DISTINCT sa.id)
@@ -1283,6 +1284,17 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
                AND so.pioneer_routed = TRUE
                AND sa.created_at >= date_trunc('month', NOW())
         """, user_id) or 0
+
+        # Sum of actual credits dripped this calendar month — this is what the
+        # dashboard should display as "Credits earned this month", not the call
+        # count above which was incorrectly used for that label.
+        credits_earned_this_month = await db.fetchval("""
+            SELECT COALESCE(SUM(amount), 0)
+              FROM credit_transactions
+             WHERE user_id = $1::uuid
+               AND type = 'pioneer_drip'
+               AND created_at >= date_trunc('month', NOW())
+        """, user_id) or 0
     except Exception:
         pass
 
@@ -1291,16 +1303,17 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
     cooldown_until = user["pioneer_cooldown_until"]
     cooldown_active = bool(cooldown_until and cooldown_until > now)
     return {
-        "opted_in":                  bool(user["pioneer_opt_in"]),
-        "opted_in_at":               user["pioneer_opted_in_at"].isoformat() if user["pioneer_opted_in_at"] else None,
-        "opted_out_at":              user["pioneer_opt_out_at"].isoformat() if user["pioneer_opt_out_at"] else None,
-        "daily_credits":             _PIONEER_DAILY_CREDITS.get(tier, 0),
-        "tier":                      tier,
-        "last_drip_date":            user["pioneer_last_drip_date"].isoformat() if user["pioneer_last_drip_date"] else None,
-        "cooldown_until":            cooldown_until.isoformat() if cooldown_active else None,
-        "days_remaining":            _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,
-        "pioneer_calls_made":        int(pioneer_calls_made),
-        "pioneer_calls_this_month":  int(pioneer_calls_this_month),
+        "opted_in":                   bool(user["pioneer_opt_in"]),
+        "opted_in_at":                user["pioneer_opted_in_at"].isoformat() if user["pioneer_opted_in_at"] else None,
+        "opted_out_at":               user["pioneer_opt_out_at"].isoformat() if user["pioneer_opt_out_at"] else None,
+        "daily_credits":              _PIONEER_DAILY_CREDITS.get(tier, 0),
+        "tier":                       tier,
+        "last_drip_date":             user["pioneer_last_drip_date"].isoformat() if user["pioneer_last_drip_date"] else None,
+        "cooldown_until":             cooldown_until.isoformat() if cooldown_active else None,
+        "days_remaining":             _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,
+        "credits_earned_this_month":  int(credits_earned_this_month),
+        "pioneer_calls_made":         int(pioneer_calls_made),
+        "pioneer_calls_this_month":   int(pioneer_calls_this_month),
     }
 
 
