@@ -433,12 +433,14 @@ async def tier3_status(request: Request, email: str):
 
 @router.get("/tier3/admin", include_in_schema=False)
 @limiter.limit("10/minute")
-async def tier3_admin(request: Request, key: str = ""):
+async def tier3_admin(request: Request):
     """Admin view of Tier 3 applications filtered by KYB status."""
     import secrets as _secrets
     from main import app, ADMIN_KEY
 
-    if not ADMIN_KEY or not _secrets.compare_digest(key, ADMIN_KEY):
+    # Header only — ?key= is no longer accepted (leaks into access logs).
+    provided_key = request.headers.get("X-Admin-Key", "")
+    if not ADMIN_KEY or not _secrets.compare_digest(provided_key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
     async with app.state.pool.acquire() as db:
         apps = await db.fetch("""

@@ -16,9 +16,11 @@ from services.managed import SERVICE_CONFIGS
 
 
 async def _admin_ok(request: Request, db, key: str = "") -> bool:
-    """Accept either static ADMIN_KEY or a valid X-Admin-Token session."""
+    """Accept either static ADMIN_KEY (X-Admin-Key header only) or a valid
+    X-Admin-Token session. The legacy ?key= query param is no longer honored —
+    keys in query strings leak into proxy/server access logs."""
     from main import ADMIN_KEY
-    provided = request.headers.get("X-Admin-Key", "") or key
+    provided = request.headers.get("X-Admin-Key", "")
     if ADMIN_KEY and provided and secrets.compare_digest(provided, ADMIN_KEY):
         return True
     token = request.headers.get("X-Admin-Token", "")
@@ -129,7 +131,7 @@ async def admin_services(request: Request, key: str = "", db=Depends(get_db)):
 @limiter.limit("10/minute")
 async def catalog_misses(request: Request, key: str = "", db=Depends(get_db)):
     from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "") or key
+    provided_key = request.headers.get("X-Admin-Key", "")
     if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
@@ -202,7 +204,7 @@ async def catalog_misses(request: Request, key: str = "", db=Depends(get_db)):
 @limiter.limit("10/minute")
 async def catalog_gaps(request: Request, key: str = "", db=Depends(get_db)):
     from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "") or key
+    provided_key = request.headers.get("X-Admin-Key", "")
     if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
@@ -248,7 +250,7 @@ async def catalog_gaps(request: Request, key: str = "", db=Depends(get_db)):
 async def admin_subscriptions_debug(request: Request, db=Depends(get_db)):
     """Show all api_keys rows where subscription_status='active', with stripe_subscription_id."""
     from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "") or request.query_params.get("key", "")
+    provided_key = request.headers.get("X-Admin-Key", "")
     if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     rows = await db.fetch("""
@@ -268,7 +270,7 @@ async def admin_subscriptions_debug(request: Request, db=Depends(get_db)):
 async def admin_revenue(request: Request, db=Depends(get_db)):
     """Revenue summary: credits sold, MRR, top users by spend."""
     from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "") or request.query_params.get("key", "")
+    provided_key = request.headers.get("X-Admin-Key", "")
     if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
@@ -344,7 +346,7 @@ async def admin_revenue(request: Request, db=Depends(get_db)):
 async def admin_signals(request: Request, db=Depends(get_db)):
     """Search signal analytics: per-service conversion rates and WRI v2 scores."""
     from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "") or request.query_params.get("key", "")
+    provided_key = request.headers.get("X-Admin-Key", "")
     if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
@@ -408,7 +410,7 @@ async def admin_signals(request: Request, db=Depends(get_db)):
 async def admin_api_health(request: Request, db=Depends(get_db)):
     """Managed service health: last tested, success rate, avg response time."""
     from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "") or request.query_params.get("key", "")
+    provided_key = request.headers.get("X-Admin-Key", "")
     if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 

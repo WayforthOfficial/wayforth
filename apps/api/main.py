@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -281,11 +281,43 @@ async def _boost_auto_pause_loop():
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
+def _check_required_config() -> None:
+    """Fail fast in production when critical config is missing; warn otherwise.
+
+    Logs the status of every required var so Railway deploy logs confirm
+    configuration on each boot. In non-production environments (tests, local
+    dev) a missing var only warns, so the suite/app still starts.
+    """
+    is_prod = ENVIRONMENT.lower() in ("production", "prod")
+    required = {
+        "REDIS_URL": "rate limiting + login lockout run per-process / fail-open without it",
+        "STRIPE_WEBHOOK_SECRET": "Stripe webhook signature verification is disabled without it",
+    }
+    missing = []
+    for var, why in required.items():
+        if os.environ.get(var):
+            logger.info("STARTUP CONFIG ✓ %s is set", var)
+        else:
+            missing.append((var, why))
+            logger.error("STARTUP CONFIG ✗ %s is MISSING — %s", var, why)
+    if missing and is_prod:
+        raise RuntimeError(
+            "Missing required production config: "
+            + "; ".join(f"{v} ({why})" for v, why in missing)
+        )
+    if missing:
+        logger.warning(
+            "STARTUP CONFIG: %d var(s) missing — allowed because environment=%s (would fail in production)",
+            len(missing), ENVIRONMENT,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from core.auth import get_jwks, _jwks_cache
     from routers.billing import _usdc_payment_watcher, _usdc_renewal_reminder
 
+    _check_required_config()
     check_service_margins()
     logger.info(f"Wayforth API starting, environment={ENVIRONMENT}")
     try:
@@ -612,6 +644,13 @@ async def lifespan(app: FastAPI):
                 SET token_hash = encode(sha256(token::bytea), 'hex')
                 WHERE token_hash IS NULL AND token IS NOT NULL
             """)
+            # Now that token_hash is the authoritative lookup column and is
+            # backfilled, stop requiring the raw token. This lets both the login
+            # and MFA paths insert only the hash (mfa.py already omits `token`,
+            # which would violate the old NOT NULL on a fresh DB). Idempotent.
+            await _mconn.execute("""
+                ALTER TABLE provider_sessions ALTER COLUMN token DROP NOT NULL
+            """)
             await _mconn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS provider_sessions_token_hash_uniq
                 ON provider_sessions(token_hash)
@@ -871,6 +910,14 @@ async def lifespan(app: FastAPI):
                   ON credit_transactions(refund_uuid)
                   WHERE refund_uuid IS NOT NULL
             """)
+            # Provider service management (v0.8.2): soft-delete flag. DELETE
+            # /provider/services/{slug} sets active=FALSE so the service drops
+            # out of search/fallback while its catalog row + WayforthRank signal
+            # history are preserved. Defaults TRUE so all existing rows stay live.
+            await _mconn.execute("""
+                ALTER TABLE services
+                    ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE
+            """)
             # x402 settlement dedup table — added in v0.7.8 Section 9, wired in
             # v0.8.0 Item 1. The INSERT happens in routers/x402.py (x402_execute
             # and x402_search), AFTER payment verification and AFTER tier/flag
@@ -903,12 +950,29 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS boost_wri_bonus    INTEGER      DEFAULT 0,
                     ADD COLUMN IF NOT EXISTS boost_paused       BOOLEAN      DEFAULT FALSE
             """)
+            # v0.8.2: Pioneer Program moved from a one-time credit award to a
+            # monthly recurring daily drip with a 7-day rejoin cooldown. The old
+            # one-time guard (pioneer_credits_awarded) is dropped; drip cadence is
+            # tracked by pioneer_last_drip_date and rejoin gating by
+            # pioneer_cooldown_until. Mirrored in 046_pioneer_drip.sql.
             await _mconn.execute("""
                 ALTER TABLE users
                     ADD COLUMN IF NOT EXISTS pioneer_opt_in          BOOLEAN      DEFAULT FALSE,
                     ADD COLUMN IF NOT EXISTS pioneer_opted_in_at     TIMESTAMPTZ  NULL,
-                    ADD COLUMN IF NOT EXISTS pioneer_credits_awarded BOOLEAN      DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS pioneer_opt_out_at      TIMESTAMPTZ  NULL
+                    ADD COLUMN IF NOT EXISTS pioneer_opt_out_at      TIMESTAMPTZ  NULL,
+                    ADD COLUMN IF NOT EXISTS pioneer_cooldown_until  TIMESTAMPTZ  NULL,
+                    ADD COLUMN IF NOT EXISTS pioneer_last_drip_date  DATE         NULL,
+                    DROP COLUMN IF EXISTS pioneer_credits_awarded
+            """)
+            # 047: backfill pioneer_opted_in_at for users who were enrolled before
+            # the column was reliably populated. NOW() is a conservative approximation;
+            # these users are confirmed opted-in so "since now" avoids a null on
+            # the dashboard "Enrolled since" field.
+            await _mconn.execute("""
+                UPDATE users
+                   SET pioneer_opted_in_at = NOW()
+                 WHERE pioneer_opt_in = TRUE
+                   AND pioneer_opted_in_at IS NULL
             """)
             await _mconn.execute("""
                 ALTER TABLE search_outcomes
@@ -948,6 +1012,8 @@ async def lifespan(app: FastAPI):
     probe_task = asyncio.create_task(_probe_managed_services_loop())
     boost_pause_task = asyncio.create_task(_boost_auto_pause_loop())
     webhook_retry_task = asyncio.create_task(_webhook_retry_loop())
+    from routers.billing.account import pioneer_drip_loop
+    pioneer_drip_task = asyncio.create_task(pioneer_drip_loop())
     _get_redis()  # eagerly init so the rate-limiter log line appears at startup
     yield
     cleanup_task.cancel()
@@ -957,6 +1023,7 @@ async def lifespan(app: FastAPI):
     probe_task.cancel()
     boost_pause_task.cancel()
     webhook_retry_task.cancel()
+    pioneer_drip_task.cancel()
     if app.state.pool:
         await app.state.pool.close()
 

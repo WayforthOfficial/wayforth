@@ -184,6 +184,7 @@ async def search_services(
             WHERE ($1::text IS NULL OR category = $1)
               AND ($2::int IS NULL OR coverage_tier = $2)
               AND source != 'demo'
+              AND active IS NOT FALSE
             ORDER BY created_at DESC
             """,
             category,
@@ -248,9 +249,14 @@ async def search_services(
                 _pioneer_boosted_slugs = {r["service_slug"] for r in _boosted}
 
                 if _pioneer_boosted_slugs:
-                    # query_id not yet generated; use hash of q+auth for determinism
+                    # Seed the 60/40 split from the SERVER-generated query id only.
+                    # The previous seed mixed in the client-controlled query text
+                    # (`q`), letting a caller enumerate phrasings offline (MD5 is
+                    # local) to deterministically land in (or avoid) the boosted
+                    # bucket. A server-generated UUID is uniform and not
+                    # client-influenceable.
                     import hashlib as _hl
-                    _seed = int(_hl.md5(f"{q}{auth['user_id']}".encode()).hexdigest()[:8], 16)
+                    _seed = int(_hl.md5(_proto_query_id.encode()).hexdigest()[:8], 16)
                     if _seed % 10 < 6:  # 60% path — route to boosted first
                         _pioneer_routed_to_boosted = True
                         _pioneer_signal_weight = 0.75
@@ -276,6 +282,7 @@ async def search_services(
                 FROM services
                 WHERE coverage_tier >= 0
                   AND source != 'demo'
+                  AND active IS NOT FALSE
                   AND (name ILIKE $1 OR description ILIKE $1 OR category ILIKE $1)
                 ORDER BY coverage_tier DESC LIMIT 50
                 """,

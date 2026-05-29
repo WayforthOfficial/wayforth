@@ -1113,14 +1113,34 @@ FOUNDING_MEMBER_CUTOFF = "2026-08-31"
 
 # ── Pioneer Developer Program ─────────────────────────────────────────────────
 
-# 15% of each tier's monthly credit allowance, awarded once on join.
-_PIONEER_CREDITS: dict[str, int] = {
-    "builder":    900,
-    "starter":    3_150,
-    "pro":        10_800,
-    "growth":     36_000,
-    "enterprise": 150_000,  # 15% of 1M
+# Pioneer drip: tier-based credits awarded once per UTC day while enrolled
+# (≈ each tier's monthly Pioneer allowance spread across ~30 days). Free tier is
+# not eligible (0). Enterprise = 150k/mo ÷ 30.
+_PIONEER_DAILY_CREDITS: dict[str, int] = {
+    "builder":    30,
+    "starter":    105,
+    "pro":        360,
+    "growth":     1_200,
+    "enterprise": 5_000,
 }
+
+# Cooldown a developer must wait after leaving before they can rejoin.
+_PIONEER_REJOIN_COOLDOWN = timedelta(days=7)
+
+
+def _cooldown_days_remaining(cooldown_until, now) -> int:
+    """Whole days (rounded up) until the cooldown expires; 0 if already past."""
+    if not cooldown_until or cooldown_until <= now:
+        return 0
+    return max(1, math.ceil((cooldown_until - now).total_seconds() / 86400))
+
+
+async def _resolve_pioneer_tier(db, user_id) -> str:
+    key_row = await db.fetchrow(
+        "SELECT tier FROM api_keys WHERE user_id = $1::uuid AND active = TRUE LIMIT 1",
+        user_id,
+    )
+    return (key_row["tier"] if key_row else None) or "free"
 
 
 @router.post("/account/pioneer/join", tags=["Account"])
@@ -1128,31 +1148,34 @@ _PIONEER_CREDITS: dict[str, int] = {
 async def pioneer_join(request: Request, db=Depends(get_db)):
     """Opt the authenticated developer into the Pioneer Program.
 
-    On first join:
-    - Sets pioneer_opt_in = TRUE and pioneer_opted_in_at = NOW()
-    - If pioneer_credits_awarded = FALSE, awards 15% of the monthly tier
-      allowance as a one-time bonus (guaranteed once, never clawed back on leave)
-    - Logs the credit grant to credit_transactions as type 'pioneer_bonus'
-
-    Subsequent calls (re-join after leaving) restore opt-in but never
-    re-award credits — the one-time guard (pioneer_credits_awarded) prevents it.
+    Enrollment grants a tier-based daily credit drip (awarded by the drip job,
+    not on this call). Re-joining is blocked until any rejoin cooldown — set when
+    the developer last left — has elapsed.
     """
-    from datetime import datetime, timezone
-    from core.audit import log_admin_action
-
     caller = await resolve_dashboard_caller(request, db)
     user_id = caller["user_id"]
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
 
     user = await db.fetchrow(
-        "SELECT pioneer_opt_in, pioneer_credits_awarded FROM users WHERE id = $1::uuid",
+        "SELECT pioneer_opt_in, pioneer_cooldown_until FROM users WHERE id = $1::uuid",
         user_id,
     )
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     now = datetime.now(timezone.utc)
+    cooldown_until = user["pioneer_cooldown_until"]
+    if cooldown_until and cooldown_until > now:
+        raise HTTPException(status_code=429, detail={
+            "error": "cooldown_active",
+            "cooldown_until": cooldown_until.isoformat(),
+            "days_remaining": _cooldown_days_remaining(cooldown_until, now),
+            "message": "You recently left the Pioneer Program. You can rejoin after the cooldown ends.",
+        })
+
+    # Enroll. last_drip_date is left NULL so the next drip run awards the first
+    # day's credits; no lump sum is granted on join.
     await db.execute("""
         UPDATE users
            SET pioneer_opt_in      = TRUE,
@@ -1161,56 +1184,18 @@ async def pioneer_join(request: Request, db=Depends(get_db)):
          WHERE id = $1::uuid
     """, user_id, now)
 
-    credits_awarded = 0
-    if not user["pioneer_credits_awarded"]:
-        # Determine tier from api_keys
-        key_row = await db.fetchrow(
-            "SELECT tier FROM api_keys WHERE user_id = $1::uuid AND active = TRUE LIMIT 1",
-            user_id,
-        )
-        tier = (key_row["tier"] if key_row else None) or "free"
-        credits_awarded = _PIONEER_CREDITS.get(tier, 0)
-
-        if credits_awarded > 0:
-            async with db.transaction():
-                cred = await db.fetchrow(
-                    "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
-                    user_id,
-                )
-                current = cred["credits_balance"] if cred else 0
-                new_balance = current + credits_awarded
-                await db.execute(
-                    "UPDATE user_credits SET credits_balance = $1, lifetime_credits = lifetime_credits + $2, updated_at = NOW() WHERE user_id = $3::uuid",
-                    new_balance, credits_awarded, user_id,
-                )
-                await db.execute("""
-                    INSERT INTO credit_transactions
-                      (user_id, amount, balance_after, type, description, api_endpoint)
-                    VALUES ($1::uuid, $2, $3, 'pioneer_bonus', $4, '/account/pioneer/join')
-                """, user_id, credits_awarded, new_balance,
-                    f"pioneer_bonus_awarded: {credits_awarded} credits")
-
-        await db.execute(
-            "UPDATE users SET pioneer_credits_awarded = TRUE WHERE id = $1::uuid",
-            user_id,
-        )
-
-        try:
-            await log_admin_action(db, str(user_id), "pioneer_bonus_awarded", str(user_id), {
-                "credits": credits_awarded, "tier": tier,
-            })
-        except Exception:
-            pass
-
+    tier = await _resolve_pioneer_tier(db, user_id)
+    daily = _PIONEER_DAILY_CREDITS.get(tier, 0)
     return {
-        "opted_in":          True,
-        "opted_in_at":       now.isoformat(),
-        "credits_awarded":   credits_awarded,
-        "credits_previously_awarded": bool(user["pioneer_credits_awarded"]),
+        "opted_in":      True,
+        "opted_in_at":   now.isoformat(),
+        "daily_credits": daily,
+        "tier":          tier,
+        "cooldown_until": None,
         "message": (
-            f"Welcome to the Pioneer Program! {credits_awarded} bonus credits awarded."
-            if credits_awarded > 0
-            else "Welcome back to the Pioneer Program. Credits were already awarded."
+            f"Welcome to the Pioneer Program! You'll receive {daily} bonus credits per day while enrolled."
+            if daily > 0
+            else "Welcome to the Pioneer Program! Your current tier is not eligible for daily credits — upgrade to start earning."
         ),
     }
 
@@ -1220,11 +1205,10 @@ async def pioneer_join(request: Request, db=Depends(get_db)):
 async def pioneer_leave(request: Request, db=Depends(get_db)):
     """Opt the authenticated developer out of the Pioneer Program.
 
-    Credits already awarded are kept — no clawback.
-    Routing reverts to normal WayforthRank immediately on this call.
+    Credits already dripped are kept — no clawback. Routing reverts to normal
+    WayforthRank immediately, the daily drip stops, and a 7-day rejoin cooldown
+    is set (pioneer_last_drip_date is cleared so a future rejoin starts fresh).
     """
-    from datetime import datetime, timezone
-
     caller = await resolve_dashboard_caller(request, db)
     user_id = caller["user_id"]
     if not user_id:
@@ -1242,18 +1226,23 @@ async def pioneer_leave(request: Request, db=Depends(get_db)):
         })
 
     now = datetime.now(timezone.utc)
+    cooldown_until = now + _PIONEER_REJOIN_COOLDOWN
     await db.execute("""
         UPDATE users
-           SET pioneer_opt_in     = FALSE,
-               pioneer_opt_out_at = $2
+           SET pioneer_opt_in        = FALSE,
+               pioneer_opt_out_at    = $2,
+               pioneer_cooldown_until = $3,
+               pioneer_last_drip_date = NULL
          WHERE id = $1::uuid
-    """, user_id, now)
+    """, user_id, now, cooldown_until)
 
     return {
-        "opted_in":     False,
-        "opted_out_at": now.isoformat(),
-        "credits_kept": True,
-        "message": "You've left the Pioneer Program. Routing returns to normal WayforthRank. Your credits are kept.",
+        "opted_in":      False,
+        "opted_out_at":  now.isoformat(),
+        "cooldown_until": cooldown_until.isoformat(),
+        "days_remaining": _cooldown_days_remaining(cooldown_until, now),
+        "credits_kept":  True,
+        "message": "You've left the Pioneer Program. Daily credit drips stop now; rejoin after the 7-day cooldown. Credits already received are kept.",
     }
 
 
@@ -1267,15 +1256,17 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="Authentication required")
 
     user = await db.fetchrow(
-        "SELECT pioneer_opt_in, pioneer_opted_in_at, pioneer_credits_awarded, pioneer_opt_out_at FROM users WHERE id = $1::uuid",
+        "SELECT pioneer_opt_in, pioneer_opted_in_at, pioneer_opt_out_at, "
+        "pioneer_cooldown_until, pioneer_last_drip_date FROM users WHERE id = $1::uuid",
         user_id,
     )
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Count pioneer-routed searches via search_analytics ↔ search_outcomes join
+    # Count pioneer-routed searches and sum monthly drip credits.
     pioneer_calls_made = 0
     pioneer_calls_this_month = 0
+    credits_earned_this_month = 0
     try:
         pioneer_calls_made = await db.fetchval("""
             SELECT COUNT(DISTINCT sa.id)
@@ -1293,17 +1284,116 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
                AND so.pioneer_routed = TRUE
                AND sa.created_at >= date_trunc('month', NOW())
         """, user_id) or 0
+
+        # Sum of actual credits dripped this calendar month — this is what the
+        # dashboard should display as "Credits earned this month", not the call
+        # count above which was incorrectly used for that label.
+        credits_earned_this_month = await db.fetchval("""
+            SELECT COALESCE(SUM(amount), 0)
+              FROM credit_transactions
+             WHERE user_id = $1::uuid
+               AND type = 'pioneer_drip'
+               AND created_at >= date_trunc('month', NOW())
+        """, user_id) or 0
     except Exception:
         pass
 
+    now = datetime.now(timezone.utc)
+    tier = await _resolve_pioneer_tier(db, user_id)
+    cooldown_until = user["pioneer_cooldown_until"]
+    cooldown_active = bool(cooldown_until and cooldown_until > now)
     return {
-        "opted_in":                  bool(user["pioneer_opt_in"]),
-        "opted_in_at":               user["pioneer_opted_in_at"].isoformat() if user["pioneer_opted_in_at"] else None,
-        "opted_out_at":              user["pioneer_opt_out_at"].isoformat() if user["pioneer_opt_out_at"] else None,
-        "credits_awarded":           bool(user["pioneer_credits_awarded"]),
-        "pioneer_calls_made":        int(pioneer_calls_made),
-        "pioneer_calls_this_month":  int(pioneer_calls_this_month),
+        "opted_in":                   bool(user["pioneer_opt_in"]),
+        "opted_in_at":                user["pioneer_opted_in_at"].isoformat() if user["pioneer_opted_in_at"] else None,
+        "opted_out_at":               user["pioneer_opt_out_at"].isoformat() if user["pioneer_opt_out_at"] else None,
+        "daily_credits":              _PIONEER_DAILY_CREDITS.get(tier, 0),
+        "tier":                       tier,
+        "last_drip_date":             user["pioneer_last_drip_date"].isoformat() if user["pioneer_last_drip_date"] else None,
+        "cooldown_until":             cooldown_until.isoformat() if cooldown_active else None,
+        "days_remaining":             _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,
+        "credits_earned_this_month":  int(credits_earned_this_month),
+        "pioneer_calls_made":         int(pioneer_calls_made),
+        "pioneer_calls_this_month":   int(pioneer_calls_this_month),
     }
+
+
+async def run_pioneer_drip(db) -> int:
+    """Award one UTC day's Pioneer drip to every opted-in user not yet dripped
+    today. Idempotent per day via a conditional claim UPDATE (so overlapping runs
+    or a mid-day restart never double-drip). Returns the number of users dripped.
+    """
+    from core.audit import log_admin_action
+
+    rows = await db.fetch("""
+        SELECT u.id,
+               COALESCE((SELECT tier FROM api_keys WHERE user_id = u.id AND active = TRUE LIMIT 1), 'free') AS tier
+          FROM users u
+         WHERE u.pioneer_opt_in = TRUE
+           AND (u.pioneer_last_drip_date IS NULL OR u.pioneer_last_drip_date < CURRENT_DATE)
+    """)
+
+    dripped = 0
+    for r in rows:
+        uid = r["id"]
+        tier = r["tier"] or "free"
+        daily = _PIONEER_DAILY_CREDITS.get(tier, 0)
+        async with db.transaction():
+            # Claim today's drip atomically. Only the runner whose UPDATE returns
+            # a row proceeds; a concurrent run sees last_drip_date == today and
+            # gets no row.
+            claimed = await db.fetchval("""
+                UPDATE users SET pioneer_last_drip_date = CURRENT_DATE
+                 WHERE id = $1
+                   AND pioneer_opt_in = TRUE
+                   AND (pioneer_last_drip_date IS NULL OR pioneer_last_drip_date < CURRENT_DATE)
+                 RETURNING id
+            """, uid)
+            if not claimed:
+                continue
+            if daily > 0:
+                cred = await db.fetchrow(
+                    "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE", uid
+                )
+                current = cred["credits_balance"] if cred else 0
+                new_balance = current + daily
+                await db.execute(
+                    "UPDATE user_credits SET credits_balance = $1, lifetime_credits = lifetime_credits + $2, updated_at = NOW() WHERE user_id = $3::uuid",
+                    new_balance, daily, uid,
+                )
+                await db.execute("""
+                    INSERT INTO credit_transactions
+                      (user_id, amount, balance_after, type, description, api_endpoint)
+                    VALUES ($1::uuid, $2, $3, 'pioneer_drip', $4, '/account/pioneer/drip')
+                """, uid, daily, new_balance, f"pioneer_drip: {daily} credits ({tier})")
+        dripped += 1
+        try:
+            await log_admin_action(db, "system", "pioneer_drip_awarded", str(uid),
+                                   {"credits": daily, "tier": tier})
+        except Exception:
+            pass
+
+    return dripped
+
+
+async def pioneer_drip_loop():
+    """Background loop: run the Pioneer drip at startup (catch-up) and then once
+    per day shortly after UTC midnight. Drip is idempotent per day, so the
+    catch-up run on every boot is safe."""
+    import asyncio
+    from main import app
+    while True:
+        try:
+            pool = getattr(app.state, "pool", None)
+            if pool is not None:
+                async with pool.acquire() as conn:
+                    n = await run_pioneer_drip(conn)
+                    if n:
+                        logger.info("pioneer drip: %d user(s) dripped", n)
+        except Exception as exc:
+            logger.warning("pioneer drip loop error: %s", exc)
+        now = datetime.now(timezone.utc)
+        nxt = (now + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
+        await asyncio.sleep(max(60.0, (nxt - now).total_seconds()))
 
 
 @router.get("/account/founding-status", tags=["Account"])
