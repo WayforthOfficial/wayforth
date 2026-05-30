@@ -1083,8 +1083,11 @@ async def lifespan(app: FastAPI):
 
 # ── App creation ──────────────────────────────────────────────────────────────
 
+_is_production = os.environ.get("ENVIRONMENT") == "production"
 app = FastAPI(
     title="Wayforth API",
+    docs_url=None if _is_production else "/docs",
+    redoc_url=None if _is_production else "/redoc",
     description="""
 ## Wayforth — The search engine and API execution layer for AI agents
 
