@@ -937,7 +937,7 @@ async def system_health(request: Request, db=Depends(get_db)):
     try:
         x402_count = await db.fetchval("SELECT COUNT(*) FROM services WHERE x402_supported=true")
     except Exception:
-        x402_count = 0
+        x402_count = 0  # non-critical: x402 service count for health dashboard display
     health["subsystems"]["x402"] = {
         "status": "configured" if cdp_configured else "not_configured",
         "facilitator": "Coinbase CDP",
@@ -1336,7 +1336,7 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
                AND created_at >= date_trunc('month', NOW())
         """, user_id) or 0
     except Exception:
-        pass
+        pass  # non-critical: credits_earned_this_month display falls back to 0
 
     now = datetime.now(timezone.utc)
     tier = await _resolve_pioneer_tier(db, user_id)
@@ -1354,7 +1354,7 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
                AND p.boost_expires_at > NOW()
         """) or 0
     except Exception:
-        pass
+        pass  # non-critical: active_boosted_providers display falls back to 0
 
     return {
         "opted_in":                              bool(user["pioneer_opt_in"]),
@@ -1394,8 +1394,6 @@ async def run_pioneer_drip(db) -> int:
     Idempotent per day via a conditional claim UPDATE — a concurrent run sees
     last_drip_date == today and gets no row.
     """
-    from core.audit import log_admin_action
-
     rows = await db.fetch("""
         SELECT u.id,
                COALESCE((SELECT tier FROM api_keys WHERE user_id = u.id AND active = TRUE LIMIT 1), 'free') AS tier
@@ -1444,11 +1442,7 @@ async def run_pioneer_drip(db) -> int:
                     VALUES ($1::uuid, $2, $3, 'pioneer_drip', $4, '/account/pioneer/drip')
                 """, uid, daily, new_balance, f"pioneer_drip: {daily} credits ({tier})")
         dripped += 1
-        try:
-            await log_admin_action(db, "system", "pioneer_drip_awarded", str(uid),
-                                   {"credits": daily, "tier": tier})
-        except Exception:
-            pass
+        logger.info("pioneer_drip_awarded user=%s credits=%s tier=%s", uid, daily, tier)
 
     return dripped
 

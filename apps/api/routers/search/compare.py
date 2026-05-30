@@ -167,7 +167,7 @@ async def compare_services(
                 ms = svc.get("managed_slug") or _CATALOG_SLUG_TO_MANAGED.get(svc.get("slug", ""), svc.get("slug", ""))
                 relevance[ms] = float(svc.get("score", max(0, 80 - i * 10)))
         except Exception:
-            pass
+            pass  # non-critical: relevance ranking falls back to positional scores
 
     # Step 3 — Build service objects and rank
     services_out = []

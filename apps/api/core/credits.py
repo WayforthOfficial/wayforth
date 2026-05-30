@@ -465,7 +465,7 @@ async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
                             str(row["id"]),
                         )
                 except Exception:
-                    pass
+                    pass  # non-critical: last_fired_at timestamp update; webhook was still sent
 
 
 # Per-user cooldown for spend anomaly alerts — avoids repeated fires within 1 hour

@@ -145,13 +145,13 @@ async def _verify_header_check(endpoint_url: str, code: str) -> bool:
         from core.url_validation import validate_external_url
         validate_external_url(endpoint_url, field_name="endpoint_url")
     except Exception:
-        return False
+        return False  # non-critical: invalid URL fails verification cleanly
     try:
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
             resp = await client.get(endpoint_url)
             return resp.headers.get("X-Wayforth-Verify", "") == code
     except Exception:
-        return False
+        return False  # non-critical: network/timeout failure → verification not confirmed
 
 
 # ── Provider auth ─────────────────────────────────────────────────────────────
@@ -600,7 +600,7 @@ async def provider_overview(request: Request, db=Depends(get_db)):
         if hist_rows:
             wri_trend = [{"date": str(r["week"]), "score": round(float(r["avg_wri"]), 1)} for r in hist_rows]
     except Exception:
-        pass
+        pass  # non-critical: WRI trend history falls back to synthetic points below
     if not wri_trend and wri_score:
         today = datetime.now(timezone.utc).date()
         wri_trend = [
@@ -1063,7 +1063,7 @@ async def provider_boost_activate(request: Request, db=Depends(get_db)):
     boost_tier, boost_wri_bonus; records to audit log.
     """
     from datetime import datetime, timezone, timedelta
-    from core.audit import log_admin_action
+    from core.audit import log_provider_action
 
     provider = await _require_email_verified(request, db)
     provider_id = provider["provider_id"]
@@ -1134,14 +1134,19 @@ async def provider_boost_activate(request: Request, db=Depends(get_db)):
             "message": "Pioneer Boost is a one-time, lifetime benefit and has already been activated on this account.",
         })
 
-    try:
-        await log_admin_action(db, "system", "pioneer_boost_activated", str(provider_id), {
-            "tier": tier, "wri_bonus": cfg["wri_bonus"],
+    await log_provider_action(
+        db,
+        str(provider_id),
+        provider["email"],
+        "pioneer_boost_activated",
+        target_resource=svc["service_slug"],
+        payload={
+            "tier": tier,
+            "wri_bonus": cfg["wri_bonus"],
             "expires_at": expires_at.isoformat(),
-            "service_slug": svc["service_slug"],
-        })
-    except Exception:
-        pass
+        },
+        request=request,
+    )
 
     return {
         "boost_activated": True,

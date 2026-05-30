@@ -130,7 +130,7 @@ async def stream_groq(params: dict, api_key: str):
                     if content:
                         yield content
                 except Exception:
-                    pass
+                    pass  # non-critical: malformed SSE chunk from provider; skip and continue streaming
 
 
 async def stream_together(params: dict, api_key: str):
@@ -162,7 +162,7 @@ async def stream_together(params: dict, api_key: str):
                     if content:
                         yield content
                 except Exception:
-                    pass
+                    pass  # non-critical: malformed SSE chunk from provider; skip and continue streaming
 
 
 async def call_deepl(params: dict, api_key: str) -> dict:

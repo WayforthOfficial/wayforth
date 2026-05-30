@@ -682,6 +682,26 @@ async def lifespan(app: FastAPI):
                 WHERE token_hash IS NOT NULL
             """)
             await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS provider_audit_log (
+                    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+                    provider_id      UUID        REFERENCES providers(id) ON DELETE SET NULL,
+                    provider_email   TEXT        NOT NULL,
+                    action           TEXT        NOT NULL,
+                    target_resource  TEXT,
+                    payload          JSONB,
+                    ip_address       TEXT,
+                    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS provider_audit_log_provider_idx
+                  ON provider_audit_log(provider_id, created_at DESC)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS provider_audit_log_action_idx
+                  ON provider_audit_log(action, created_at DESC)
+            """)
+            await _mconn.execute("""
                 ALTER TABLE api_keys
                     ADD COLUMN IF NOT EXISTS calls_count INTEGER NOT NULL DEFAULT 0,
                     ADD COLUMN IF NOT EXISTS monthly_calls_count INTEGER NOT NULL DEFAULT 0,
@@ -1037,7 +1057,7 @@ async def lifespan(app: FastAPI):
                 _stats.get("size"), _stats.get("idle"),
             )
         except Exception:
-            pass
+            pass  # non-critical: pool stats log failure doesn't affect serving
     cleanup_task = asyncio.create_task(_cleanup_anon_searches_loop(app))
     watcher_task = asyncio.create_task(_usdc_payment_watcher())
     renewal_task = asyncio.create_task(_usdc_renewal_reminder())
@@ -1888,7 +1908,7 @@ async def system_status_v075(db=Depends(get_db)):
         if row and row["total"] > 0:
             uptime_30d = round(100.0 * row["ok"] / row["total"], 2)
     except Exception:
-        pass
+        pass  # non-critical: uptime metric falls back to default 99.97
 
     # Overall rollup:
     # "outage" = only when the api component itself is unreachable (gateway down).

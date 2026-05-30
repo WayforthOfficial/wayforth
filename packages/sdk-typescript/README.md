@@ -55,7 +55,7 @@ console.log(result);
 | `getIdentity(agentId)` | Look up a registered agent identity |
 | `registerIdentity(agentId, displayName?)` | Register an agent identity |
 
-Full API reference: [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
+Full API reference: [gateway.wayforth.io/guide/](https://gateway.wayforth.io/guide/)
 
 ## Build from source
 

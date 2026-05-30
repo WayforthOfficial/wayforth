@@ -54,7 +54,7 @@ def _log_safe_url(url: str) -> str:
         parsed = urlparse(url)
         return parsed._replace(query="", fragment="").geturl()
     except Exception:
-        return "<unparseable>"
+        return "<unparseable>"  # non-critical: URL log hygiene only
 
 
 async def _enqueue_wri_alert(

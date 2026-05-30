@@ -201,6 +201,7 @@ async def admin_invite(request: Request, db=Depends(get_db)):
         temp_password.encode(), bcrypt.gensalt()
     ).decode()
 
+    import asyncpg as _asyncpg
     try:
         member = await db.fetchrow("""
             INSERT INTO admin_users (email, password_hash, full_name, role, created_by)
@@ -208,23 +209,20 @@ async def admin_invite(request: Request, db=Depends(get_db)):
             RETURNING id, email, full_name, role, created_at
         """, email, password_hash, full_name, role,
             session.get('admin_user_id'))
-        # S12 (v0.7.8): never echo the temp password back in the response.
-        # The CEO supplied it in the request body and is responsible for
-        # transmitting it to the invitee out-of-band. The response is just
-        # a confirmation so no log capture exposes the credential.
-        logger.info(
-            "ADMIN_ACTION action=team_invite invited_by=%s invited_email=%s role=%s",
-            session.get('admin_user_id'), email, role,
-        )
-        await log_admin_action(
-            db, session, "invite_team_member",
-            target_resource=str(member["id"]),
-            payload={"invited_email": email, "role": role, "full_name": full_name},
-            request=request,
-        )
-        return {"status": "invited", "member": dict(member)}
-    except Exception:
+    except _asyncpg.UniqueViolationError:
         raise HTTPException(status_code=400, detail="Email already exists")
+    # S12 (v0.7.8): never echo the temp password back in the response.
+    logger.info(
+        "ADMIN_ACTION action=team_invite invited_by=%s invited_email=%s role=%s",
+        session.get('admin_user_id'), email, role,
+    )
+    await log_admin_action(
+        db, session, "invite_team_member",
+        target_resource=str(member["id"]),
+        payload={"invited_email": email, "role": role, "full_name": full_name},
+        request=request,
+    )
+    return {"status": "invited", "member": dict(member)}
 
 
 @router.patch("/admin-api/team/{member_id}")
@@ -1025,11 +1023,9 @@ async def admin_boost_pause(request: Request, provider_id: str, db=Depends(get_d
     )
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="Provider not found or boost not activated")
-    try:
-        from core.audit import log_admin_action
-        await log_admin_action(db, session["email"], "boost_manually_paused", provider_id, {})
-    except Exception:
-        pass
+    from core.audit import log_admin_action
+    await log_admin_action(db, session, "boost_manually_paused",
+                           target_resource=provider_id, request=request)
     return {"status": "paused", "provider_id": provider_id, "changed_by": session["email"]}
 
 
@@ -1053,12 +1049,11 @@ async def admin_boost_unpause(request: Request, provider_id: str, db=Depends(get
         "UPDATE providers SET boost_paused = FALSE, boost_wri_bonus = $2 WHERE id = $1::uuid",
         provider_id, correct_bonus,
     )
-    try:
-        from core.audit import log_admin_action
-        await log_admin_action(db, session["email"], "boost_manually_unpaused", provider_id,
-                               {"wri_bonus_restored": correct_bonus})
-    except Exception:
-        pass
+    from core.audit import log_admin_action
+    await log_admin_action(db, session, "boost_manually_unpaused",
+                           target_resource=provider_id,
+                           payload={"wri_bonus_restored": correct_bonus},
+                           request=request)
     return {"status": "unpaused", "wri_bonus_restored": correct_bonus,
             "provider_id": provider_id, "changed_by": session["email"]}
 

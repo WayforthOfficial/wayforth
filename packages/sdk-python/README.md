@@ -74,4 +74,4 @@ Async client. Same methods as `Wayforth`, all async.
 | `get_identity(agent_id)` | Look up a registered agent identity |
 | `register_identity(agent_id, display_name="")` | Register an agent identity |
 
-Full API reference: [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
+Full API reference: [gateway.wayforth.io/guide/](https://gateway.wayforth.io/guide/)

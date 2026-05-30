@@ -182,7 +182,7 @@ async def _do_refund(
                 "refund_rate_alarm user=%s refunds_last_hour=%s", user_id, refunds_last_hour
             )
     except Exception:
-        pass
+        pass  # non-critical: refund-rate alarm failure doesn't block the refund itself
 
     from core.credits import _dispatch_webhooks
     from main import app as _app
@@ -264,8 +264,9 @@ async def _run_sse_stream(slug, params, svc_key, user_id, credit_cost, pool, ser
                         conn, user_id, credit_cost, slug, str(exc)[:300],
                         "/run", calls_remaining, refund_key,
                     )
-            except Exception:
-                pass
+            except Exception as _refund_err:
+                logger.error("stream refund failed user=%s slug=%s cost=%s: %s",
+                             user_id, slug, credit_cost, _refund_err)
             return
         yield f"data: {_json.dumps({'token': '', 'done': True, 'service_used': service_used, 'credits_remaining': calls_remaining, 'calls_remaining': calls_remaining})}\n\n"
     finally:
@@ -324,7 +325,7 @@ async def _x402_settle_cdp(service_endpoint: str, amount_usd: float) -> dict:
         try:
             payment_info = r.json()
         except Exception:
-            payment_info = {}
+            payment_info = {}  # non-critical: non-JSON 402 body; caller still sees the error
 
         recipient = (
             payment_info.get("recipient")
@@ -681,8 +682,8 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
                                 str(service["id"]),
                                 amount_usd,
                             )
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            logger.warning("search_outcomes write failed track=x402 qid=%s: %s", query_id, _e)
                     return {
                         "payment_track": "x402",
                         "status": "ok",
@@ -719,8 +720,8 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
                     str(service["id"]),
                     amount_usdc,
                 )
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("search_outcomes write failed track=crypto qid=%s: %s", query_id, _e)
 
         return {
             "payment_track": "crypto",
@@ -782,8 +783,8 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
                 str(service["id"]),
                 amount_usd,
             )
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("search_outcomes write failed track=card qid=%s: %s", query_id, _e)
 
     tx_ref = f"wf_pay_{secrets.token_hex(12)}"
 
@@ -1031,7 +1032,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
                 try:
                     raw_result = resp.json()
                 except Exception:
-                    raw_result = _body_bytes.decode("utf-8", errors="replace")
+                    raw_result = _body_bytes.decode("utf-8", errors="replace")  # non-critical: non-JSON body despite content-type
             else:
                 raw_result = _body_bytes.decode("utf-8", errors="replace")
                 if _truncated:
@@ -1585,7 +1586,7 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
                 )
                 top = dict(_best) if _best else {}
             except Exception:
-                top = {}
+                top = {}  # non-critical: top-service hint in empty-search response
         # Build suggested_intents from categories that have configured managed keys
         _CATEGORY_EXAMPLES = {
             "inference":   "try: summarize this article",
@@ -1810,7 +1811,7 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
             if _adj:
                 wri = max(0.0, float(wri) + _adj)
     except Exception:
-        pass
+        pass  # non-critical: WRI health adjustment is best-effort
 
     response.headers["X-Wayforth-Cache"] = "miss"
     _run_result = {

@@ -670,7 +670,7 @@ async def auth_session_logout(request: Request):
             try:
                 await redis.delete(_me_cache_key(raw_token))
             except Exception:
-                pass
+                pass  # non-critical: stale /me cache key; expires on its own TTL
 
     response = JSONResponse(content={"ok": True})
     response.headers["Cache-Control"] = "no-store, no-cache"

@@ -78,7 +78,7 @@
       <a href="/demo">Demo</a>
       <a href="/roadmap">Roadmap</a>
       <a href="/changelog">Changelog</a>
-      <a href="/docs">API Docs</a>
+      <a href="/guide/">API Guide</a>
     </div>
   </nav>
 
@@ -93,7 +93,7 @@
       <div class="section-title"><span class="section-num">1</span>Quick Start</div>
       <div class="card">
         <div class="example-label">Request</div>
-        <pre>POST https://api.wayforth.io/query
+        <pre>POST https://gateway.wayforth.io/query
 Content-Type: application/json
 
 {
@@ -243,7 +243,7 @@ Content-Type: application/json
 
       <div class="card" style="margin-bottom:16px">
         <div class="example-label">Basic search — top 5 Tier 2+ services for coding inference</div>
-        <pre>curl -X POST https://api.wayforth.io/query \
+        <pre>curl -X POST https://gateway.wayforth.io/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "fast inference for coding",
@@ -254,7 +254,7 @@ Content-Type: application/json
 
       <div class="card" style="margin-bottom:16px">
         <div class="example-label">Cheapest web search APIs sorted by price</div>
-        <pre>curl -X POST https://api.wayforth.io/query \
+        <pre>curl -X POST https://gateway.wayforth.io/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "web search API",
@@ -265,7 +265,7 @@ Content-Type: application/json
 
       <div class="card" style="margin-bottom:16px">
         <div class="example-label">Translation services with co-used recommendations</div>
-        <pre>curl -X POST https://api.wayforth.io/query \
+        <pre>curl -X POST https://gateway.wayforth.io/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "translate English to Spanish",
@@ -277,7 +277,7 @@ Content-Type: application/json
 
       <div class="card">
         <div class="example-label">With similar services from the Service Graph</div>
-        <pre>curl -X POST https://api.wayforth.io/query \
+        <pre>curl -X POST https://gateway.wayforth.io/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "real-time financial data",
@@ -291,7 +291,7 @@ Content-Type: application/json
 
   <div class="footer">
     <a href="/demo">← Live Demo</a>
-    <a href="/docs">OpenAPI Spec</a>
+    <a href="/guide/">API Guide</a>
     <a href="/roadmap">Roadmap</a>
     <a href="/changelog">Changelog</a>
   </div>

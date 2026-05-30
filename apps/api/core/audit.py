@@ -81,3 +81,46 @@ async def log_admin_action(
             "audit row write failed action=%s admin=%s target_user=%s: %s",
             action, admin_email, target_user_id, e,
         )
+
+
+async def log_provider_action(
+    db,
+    provider_id: str,
+    provider_email: str,
+    action: str,
+    *,
+    target_resource: str | None = None,
+    payload: dict[str, Any] | None = None,
+    request=None,
+) -> None:
+    """Insert one row into provider_audit_log for provider-initiated events.
+
+    Distinct from log_admin_action: provider-initiated actions (e.g. boost
+    activation) have no admin_users actor, so they cannot go into
+    admin_audit_log without corrupting its FK invariant.
+    """
+    ip_address = None
+    if request is not None:
+        try:
+            ip_address = request.client.host if request.client else None
+        except Exception:
+            pass
+    try:
+        await db.execute(
+            """
+            INSERT INTO provider_audit_log
+                (provider_id, provider_email, action, target_resource, payload, ip_address)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6)
+            """,
+            provider_id,
+            provider_email,
+            action,
+            target_resource,
+            json.dumps(payload) if payload else None,
+            ip_address,
+        )
+    except Exception as e:
+        logger.error(
+            "provider audit row write failed action=%s provider=%s: %s",
+            action, provider_email, e,
+        )

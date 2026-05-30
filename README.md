@@ -2,7 +2,7 @@
 
 **One tool call. Any API. No setup.**
 
-[![Version](https://img.shields.io/badge/version-0.8.3_Calibration-4F46E5)](https://gateway.wayforth.io/docs)
+[![Version](https://img.shields.io/badge/version-0.8.3_Calibration-4F46E5)](https://gateway.wayforth.io/guide/)
 [![License](https://img.shields.io/badge/license-BSL_1.1-64748B)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-190%2B_passing-10B981)](https://github.com/WayforthOfficial/wayforth)
 
@@ -61,13 +61,13 @@ client = WayforthClient(api_key="wf_live_...")
 results = client.search("real-time stock data")
 ```
 
-Full API reference: [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
+Full API reference: [gateway.wayforth.io/guide/](https://gateway.wayforth.io/guide/)
 
 ---
 
 ## Managed Services
 
-17 managed services available with zero API key setup. Wayforth holds the credentials — you call the tool.
+15 live, 2 in queue — managed services with zero API key setup. Wayforth holds the credentials — you call the tool.
 
 | Service | Category | Credits/call |
 |---------|----------|-------------|
@@ -79,7 +79,7 @@ Full API reference: [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
 | Serper | Web search | 3 |
 | Tavily | Web search | 10 |
 | Brave | Web search | 6 |
-| Perplexity | Web search | 10 |
+| Perplexity *(in queue)* | Web search | 10 |
 | OpenWeather | Weather data | 2 |
 | NewsAPI | News search | 3 |
 | Alpha Vantage | Financial data | 4 |
@@ -87,7 +87,7 @@ Full API reference: [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
 | Firecrawl | Web scraping | 6 |
 | AssemblyAI | Speech-to-text | 25 |
 | Stability AI | Image generation | 86 (Core) · 150 (Ultra) |
-| ElevenLabs | Text-to-speech | 200 |
+| ElevenLabs *(in queue)* | Text-to-speech | 200 |
 | Resend | Email | 3 |
 
 ---
@@ -109,7 +109,7 @@ Wayforth routes agent traffic to providers at scale.
 | Intelligence | $99/mo | $82/mo · $984/yr |
 | Premium | $299/mo | $249/mo · $2,988/yr |
 
-Register your API: [wayforth.io/for-providers](https://wayforth.io/for-providers)
+Register your API: [wayforth.io/providers](https://wayforth.io/providers)
 
 ---
 
@@ -256,11 +256,11 @@ Pricing: [wayforth.io/pricing](https://wayforth.io/pricing)
 
 ## Links
 
-- **Quickstart:** [gateway.wayforth.io/quickstart](https://gateway.wayforth.io/quickstart)
-- **API Reference:** [gateway.wayforth.io/docs](https://gateway.wayforth.io/docs)
-- **Whitepaper:** [wayforth.io/Wayforth_Whitepaper_v6.8.pdf](https://wayforth.io/Wayforth_Whitepaper_v6.8.pdf)
+- **Quickstart:** [wayforth.io/quickstart](https://wayforth.io/quickstart)
+- **API Reference:** [gateway.wayforth.io/guide/](https://gateway.wayforth.io/guide/)
+- **Whitepaper:** [wayforth.io/Wayforth_Whitepaper_v6.9.pdf](https://wayforth.io/Wayforth_Whitepaper_v6.9.pdf)
 - **Dashboard:** [wayforth.io/dashboard](https://wayforth.io/dashboard)
-- **For Providers:** [wayforth.io/for-providers](https://wayforth.io/for-providers)
+- **For Providers:** [wayforth.io/providers](https://wayforth.io/providers)
 - **PyPI (MCP):** [pypi.org/project/wayforth-mcp](https://pypi.org/project/wayforth-mcp/)
 - **PyPI (SDK):** [pypi.org/project/wayforth-sdk](https://pypi.org/project/wayforth-sdk/)
 - **Contact:** [wayforth.io/contact](https://wayforth.io/contact)

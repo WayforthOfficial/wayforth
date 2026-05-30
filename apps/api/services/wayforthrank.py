@@ -21,7 +21,7 @@ def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0,
             if last_tested > datetime.now(timezone.utc) - timedelta(hours=24):
                 score += 10
         except Exception:
-            pass
+            pass  # non-critical: date parse failure skips the recency bonus
     if service.get("consecutive_failures", 1) == 0:
         score += 10
     score += min(popularity_boost, 5.0)

@@ -150,7 +150,7 @@ async def admin_stats(request: Request):
             if r.status_code == 200:
                 pypi_version = r.json()["info"]["version"]
     except Exception:
-        pass
+        pass  # non-critical: PyPI version check for dashboard display only
 
     return {
         "developers": {

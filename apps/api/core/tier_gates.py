@@ -118,7 +118,7 @@ async def _redis_rate_check(redis, key_id: str, limits: dict, tier: str) -> None
             await redis.zrem(minute_key, member)
             await redis.zrem(hour_key, member)
         except Exception:
-            pass
+            pass  # non-critical: rollback best-effort; 429 is still raised regardless
         raise HTTPException(status_code=429, detail={
             "error": "rate_limit_exceeded",
             "limit": limits["calls_per_minute"],
@@ -132,7 +132,7 @@ async def _redis_rate_check(redis, key_id: str, limits: dict, tier: str) -> None
             await redis.zrem(minute_key, member)
             await redis.zrem(hour_key, member)
         except Exception:
-            pass
+            pass  # non-critical: rollback best-effort; 429 is still raised regardless
         raise HTTPException(status_code=429, detail={
             "error": "rate_limit_exceeded",
             "limit": limits["calls_per_hour"],
@@ -237,7 +237,7 @@ async def check_anon_rate_limit(ip: str) -> None:
                 try:
                     await redis.zrem(anon_key, member)
                 except Exception:
-                    pass
+                    pass  # non-critical: rollback best-effort; 429 is still raised regardless
                 raise HTTPException(status_code=429, detail={
                     "error": "rate_limit_exceeded",
                     "limit": _ANON_RPM,

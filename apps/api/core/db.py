@@ -23,7 +23,7 @@ def get_pool_stats(pool) -> dict:
             "max_size":  pool.get_max_size(),
         }
     except Exception:
-        return {}
+        return {}  # non-critical: pool stats are informational only
 
 
 async def get_db(request: Request):

@@ -263,8 +263,9 @@ async def search_services(
                         _boosted_first = [s for s in ranked if s.get("slug") in _pioneer_boosted_slugs]
                         _others = [s for s in ranked if s.get("slug") not in _pioneer_boosted_slugs]
                         ranked = _boosted_first + _others
-        except Exception:
-            pass
+        except Exception as _pioneer_err:
+            logger.error("pioneer routing failed user=%s q=%r: %s",
+                         auth.get("user_id"), q, _pioneer_err)
     # ── end pioneer routing ───────────────────────────────────────────────────
 
     top = ranked[:limit]
@@ -294,7 +295,7 @@ async def search_services(
                 fallback_used = True
                 fallback_reason = "No Tier 2 results — showing all tiers"
         except Exception:
-            pass
+            pass  # non-critical: fallback search failure returns original (possibly empty) results
 
     query_id = str(uuid_lib.uuid4())
     pool = app.state.pool
@@ -329,7 +330,7 @@ async def search_services(
         max_pay = max((r["c"] for r in pay_rows), default=1)
         payment_ids = {str(r["service_id"]): (r["c"] / max_pay) * 8 for r in pay_rows}
     except Exception:
-        pass
+        pass  # non-critical: payment history boost skipped if table unavailable
 
     # Load service health for WRI adjustment
     _health_map: dict = {}
@@ -342,7 +343,7 @@ async def search_services(
             )
             _health_map = {r["slug"]: r for r in _health_rows}
     except Exception:
-        pass
+        pass  # non-critical: health map absent means no latency adjustment to WRI scores
 
     # Load Pioneer Boost metadata for each result slug.
     # Joins provider_services → providers to find active (non-paused, non-expired) boosts.
@@ -378,7 +379,7 @@ async def search_services(
                     "new_provider": is_new,
                 }
     except Exception:
-        pass
+        pass  # non-critical: boost metadata absent means boosted services appear without the bonus badge
 
     logger.info(f"search q={q!r} results={len(top)} fallback={fallback_used}")
     results = []
@@ -487,8 +488,9 @@ async def search_services(
                             VALUES ($1::uuid, $2, $3::uuid, 'result_viewed',
                                     $4, $5, $6)
                         """, _qid, _q, _service_id, _sid or None, _sw, _routed)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.error("search_outcomes insert failed qid=%s slug=%s: %s",
+                                 _qid, _slug, _e)
             asyncio.create_task(_record_pioneer_outcome())
 
     return response

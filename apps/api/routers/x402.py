@@ -332,7 +332,7 @@ async def x402_execute(request):
                                "Contact support@wayforth.io if you believe this is an error.",
                 })
         except Exception:
-            wallet_tier = "unknown"
+            wallet_tier = "unknown"  # non-critical: wallet tier lookup failure falls back to lowest rate limit
         allowed, retry_after = _check_x402_rate_limit(wallet_lower, wallet_tier)
         if not allowed:
             limit_val = _X402_RPM.get(wallet_tier, 10)

@@ -1,3 +1,3 @@
 # Wayforth Documentation
 
-Full API docs: https://gateway.wayforth.io/docs
+Full API docs: https://gateway.wayforth.io/guide/

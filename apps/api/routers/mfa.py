@@ -107,7 +107,7 @@ def _check_and_consume_backup_code(
             if bcrypt.checkpw(upper.encode(), hashed.encode()):
                 return True, hashed_codes[:i] + hashed_codes[i + 1 :]
         except Exception:
-            continue
+            continue  # non-critical: malformed hash in backup codes list; skip it
     return False, list(hashed_codes)
 
 

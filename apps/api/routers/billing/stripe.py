@@ -644,8 +644,9 @@ async def _dispatch_stripe_event(db, event):
                         provider_tier_meta, sub_id, provider_id_meta,
                     )
                     return {"status": "provider_upgraded", "tier": provider_tier_meta}
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.error("provider billing upgrade failed sub=%s provider=%s tier=%s: %s",
+                             sub_id, provider_id_meta, provider_tier_meta, _e)
 
         key_row = await db.fetchrow(
             "SELECT user_id FROM api_keys WHERE stripe_subscription_id = $1",
@@ -662,7 +663,7 @@ async def _dispatch_stripe_event(db, event):
             package = meta.get("package", "")
             credits = int(meta.get("credits", 0))
         except Exception:
-            package, credits = "", 0
+            package, credits = "", 0  # non-critical: falls back to inferring credits from invoice amount
 
         if not credits:
             # Infer from amount
