@@ -258,7 +258,7 @@ Pricing: [wayforth.io/pricing](https://wayforth.io/pricing)
 
 - **Quickstart:** [wayforth.io/quickstart](https://wayforth.io/quickstart)
 - **API Reference:** [gateway.wayforth.io/guide/](https://gateway.wayforth.io/guide/)
-- **Whitepaper:** [wayforth.io/Wayforth_Whitepaper_v6.9.pdf](https://wayforth.io/Wayforth_Whitepaper_v6.9.pdf)
+- **Whitepaper:** [wayforth.io/Wayforth_Whitepaper_v6.10.pdf](https://wayforth.io/Wayforth_Whitepaper_v6.10.pdf)
 - **Dashboard:** [wayforth.io/dashboard](https://wayforth.io/dashboard)
 - **For Providers:** [wayforth.io/providers](https://wayforth.io/providers)
 - **PyPI (MCP):** [pypi.org/project/wayforth-mcp](https://pypi.org/project/wayforth-mcp/)
