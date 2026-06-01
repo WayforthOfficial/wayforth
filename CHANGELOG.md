@@ -68,6 +68,31 @@ This is a feature + correctness release. It corrects the credit model (v0.8.2 qu
 - `services.active` column: soft-delete flag for `DELETE /provider/services/{slug}`.
 - `providers.billing_interval` column added.
 
+### Signal enrichment system
+
+Eight new columns added to `credit_transactions` — one outcome graph node per execution:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `failure_code` | TEXT | `timeout` · `rate_limit` · `auth` · `unavailable` · `parse_error` — NULL on success |
+| `task_query_text` | TEXT | Preceding search query (used for embedding, populated async) |
+| `output_length_chars` | INT | Character count of response body — completeness proxy |
+| `model_routing_attempted` | JSONB | Models tried in failover order (LLM paths only) |
+| `model_routing_selected` | TEXT | Model that served the request (LLM paths only) |
+| `substitution_from` | TEXT | Original slug when service substitution occurred |
+| `substitution_to` | TEXT | Replacement slug used |
+| `substitution_reason` | TEXT | Failure code that triggered substitution |
+
+New `task_embeddings` table stores float32 embedding vectors (`REAL[]`) keyed to `transaction_id`. Populated hourly by `workers/embed_queries.py` via Jina Embeddings API (`jina-embeddings-v2-base-en`). Zero hot-path latency — strictly background.
+
+New `GET /account/signal-summary` endpoint returns monthly aggregate: `executions_this_month`, `success_rate`, `credits_consumed`, `failure_breakdown` (all 5 codes), `top_services` (with per-service success rates), `substitution_events`, `top_substitution_pairs`, `avg_output_length_chars`.
+
+Signal fields are populated on all three execution paths:
+- **Managed `/execute`** — full instrumentation including substitution tracking
+- **`/run` streaming (SSE)** — token accumulation + model routing in generator `finally` block via `asyncio.ensure_future`
+- **`/run` non-streaming** — full instrumentation including fallback chain substitution
+- **BYOK `/execute`** — `failure_code`, `output_length_chars`, `task_query_text`, model routing
+
 ---
 
 ## v0.8.2 — Gravity — 2026-05-29
