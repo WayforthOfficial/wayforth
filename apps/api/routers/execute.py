@@ -300,16 +300,24 @@ _MAX_CONCURRENT_STREAMS_PER_KEY = 5
 _active_streams: dict[str, int] = {}
 
 
-async def _run_sse_stream(slug, params, svc_key, user_id, credit_cost, pool, service_used, calls_remaining, stream_owner_key, refund_key=None):
+async def _run_sse_stream(
+    slug, params, svc_key, user_id, credit_cost, pool,
+    service_used, calls_remaining, stream_owner_key,
+    refund_key=None, tx_id=None, task_query_text=None,
+):
     """Async generator producing SSE events for a streaming LLM /run call."""
     from services.managed import stream_groq, stream_together
     stream_fn = stream_groq if slug == "groq" else stream_together
+    _output_chars = 0
+    _stream_error: str | None = None
     try:
         try:
             async for token in stream_fn(params, svc_key):
+                _output_chars += len(token)
                 yield f"data: {_json.dumps({'token': token, 'done': False})}\n\n"
         except Exception as exc:
-            yield f"data: {_json.dumps({'error': str(exc)[:200], 'done': True})}\n\n"
+            _stream_error = str(exc)[:200]
+            yield f"data: {_json.dumps({'error': _stream_error, 'done': True})}\n\n"
             # Route the refund through _do_refund (not a raw UPDATE) so it is
             # idempotent (refund_key + unique index → no double-refund if the
             # stream errors after a retry) and produces a credit_transactions
@@ -327,6 +335,16 @@ async def _run_sse_stream(slug, params, svc_key, user_id, credit_cost, pool, ser
         yield f"data: {_json.dumps({'token': '', 'done': True, 'service_used': service_used, 'credits_remaining': calls_remaining, 'calls_remaining': calls_remaining})}\n\n"
     finally:
         _active_streams[stream_owner_key] = max(0, _active_streams.get(stream_owner_key, 1) - 1)
+        # Signal patch — scheduled as a future so it doesn't block generator teardown.
+        _model = params.get("model")
+        asyncio.ensure_future(_patch_tx_signals(
+            pool, tx_id,
+            failure_code=_classify_failure(None, _stream_error) if _stream_error else None,
+            output_length_chars=_output_chars,
+            task_query_text=task_query_text,
+            model_routing_attempted=_json.dumps([_model]) if _model else None,
+            model_routing_selected=_model if not _stream_error else None,
+        ))
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -1048,10 +1066,12 @@ async def execute_service(request: Request, db=Depends(get_db)):
                 continue
             extra_headers[str(k)] = str(v)
 
-        success, balance_after = await check_and_deduct_credits(
+        _byok_preceding_query = await _get_preceding_search_query(db, str(user_id))
+        success, balance_after, _byok_tx_id = await check_and_deduct_credits(
             db, str(user_id), 1, "/execute",
             service_id=service_slug, tx_type="execution",
             agent_id=agent_id, api_key_id=str(_api_key_id),
+            return_tx_id=True,
         )
         if not success:
             raise HTTPException(status_code=402, detail={
@@ -1102,11 +1122,19 @@ async def execute_service(request: Request, db=Depends(get_db)):
 
         execution_ms = round((_time.time() - start) * 1000)
 
+        _byok_model = params.get("model") if params else None
         if error_msg:
             is_service_failure = upstream_status is None or upstream_status >= 500
             if is_service_failure:
                 new_bal = await _do_refund(db, user_id, 1, service_slug, error_msg, "/execute", balance_after,
                                            _mk_refund_key(getattr(request.state, "request_id", ""), service_slug, "execute_byok"))
+                from main import app as _byok_app
+                asyncio.create_task(_patch_tx_signals(
+                    _byok_app.state.pool, _byok_tx_id,
+                    failure_code=_classify_failure(upstream_status, error_msg),
+                    task_query_text=_byok_preceding_query,
+                    model_routing_attempted=_json.dumps([_byok_model]) if _byok_model else None,
+                ))
                 raise HTTPException(status_code=503, detail={
                     "error": "Service unavailable",
                     "refunded": True,
@@ -1123,6 +1151,14 @@ async def execute_service(request: Request, db=Depends(get_db)):
 
         from main import app
         asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), service_slug))
+        asyncio.create_task(_patch_tx_signals(
+            app.state.pool, _byok_tx_id,
+            failure_code=None,
+            output_length_chars=len(str(raw_result)) if raw_result is not None else 0,
+            task_query_text=_byok_preceding_query,
+            model_routing_attempted=_json.dumps([_byok_model]) if _byok_model else None,
+            model_routing_selected=_byok_model,
+        ))
         if _api_key_id:
             await _increment_calls(app.state.pool, str(_api_key_id), cost=credit_cost)
         return {
@@ -1757,10 +1793,11 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
             _fc_cost = 100 if (_fc_ms == "stability" and _fc_mapped.get("quality") == "ultra") else _fc_cfg["credits"]
             _run_fallback_candidates.append((_fc_ms, _fc_svc, _fc_mapped, _fc_cost, _fc_key))
 
-    success, balance_after = await check_and_deduct_credits(
+    success, balance_after, _run_tx_id = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/run",
         service_id=selected_slug, tx_type="execution",
         agent_id=agent_id, api_key_id=str(_api_key_id),
+        return_tx_id=True,
     )
     if not success:
         raise HTTPException(status_code=402, detail={
@@ -1824,6 +1861,8 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
             credit_cost, app.state.pool, _service_used_sse, _calls_remaining,
             stream_owner_key,
             _mk_refund_key(getattr(request.state, "request_id", ""), selected_slug, "run_sse"),
+            tx_id=_run_tx_id,
+            task_query_text=intent,
         )
         return StreamingResponse(gen, media_type="text/event-stream", headers={
             "Cache-Control": "no-cache",
@@ -1923,4 +1962,18 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
         _run_result["fallback_from"] = _fallback_from
         _run_result["fallback_reason"] = "service_unavailable"
     _run_cache_set(_cache_key, _run_result)
+
+    _run_model = mapped_params.get("model") if selected_slug in _LLM_SLUGS else None
+    asyncio.create_task(_patch_tx_signals(
+        app.state.pool, _run_tx_id,
+        failure_code=None,
+        output_length_chars=len(str(result)) if result is not None else 0,
+        task_query_text=intent,
+        model_routing_attempted=_json.dumps([_run_model]) if _run_model else None,
+        model_routing_selected=_run_model,
+        substitution_from=_fallback_from,
+        substitution_to=selected_slug if _fallback_from else None,
+        substitution_reason="unavailable" if _fallback_from else None,
+    ))
+
     return _run_result
