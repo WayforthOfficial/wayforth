@@ -115,6 +115,62 @@ def _classify_error(error_msg: str) -> str:
     return "service_failure"  # unknown exception → treat as service failure
 
 
+def _classify_failure(status_code: int | None, error_msg: str) -> str:
+    """Map HTTP status or error text to a structured failure_code for signal storage."""
+    if status_code in (401, 403):
+        return "auth"
+    if status_code == 429:
+        return "rate_limit"
+    if status_code in (502, 503):
+        return "unavailable"
+    msg = (error_msg or "").lower()
+    if "timeout" in msg or "timed out" in msg:
+        return "timeout"
+    if "json" in msg or "decode" in msg or "parse" in msg:
+        return "parse_error"
+    return "unavailable"
+
+
+# Slugs that route to LLM inference — used to populate model_routing fields.
+_LLM_SLUGS = frozenset({"groq", "together", "mistral", "gemini", "deepseek"})
+
+
+async def _get_preceding_search_query(db, user_id: str) -> str | None:
+    """Return the most recent search query for this user within 30 minutes, or None."""
+    try:
+        row = await db.fetchrow(
+            "SELECT query FROM search_analytics "
+            "WHERE user_id = $1::uuid AND created_at > NOW() - INTERVAL '30 minutes' "
+            "ORDER BY created_at DESC LIMIT 1",
+            user_id,
+        )
+        return row["query"] if row else None
+    except Exception:
+        return None  # non-critical: signal enrichment only
+
+
+async def _patch_tx_signals(pool, tx_id, **fields) -> None:
+    """Fire-and-forget: UPDATE credit_transactions with post-call signal data."""
+    if tx_id is None:
+        return
+    sets, vals = [], []
+    for col, val in fields.items():
+        if val is not None:
+            sets.append(f"{col} = ${len(vals) + 1}")
+            vals.append(val)
+    if not sets:
+        return
+    vals.append(str(tx_id))
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f"UPDATE credit_transactions SET {', '.join(sets)} WHERE id = ${len(vals)}::uuid",
+                *vals,
+            )
+    except Exception as _e:
+        logger.warning("_patch_tx_signals failed tx=%s: %s", tx_id, _e)
+
+
 async def _do_refund(
     db,
     user_id,
@@ -1136,10 +1192,14 @@ async def execute_service(request: Request, db=Depends(get_db)):
             )
         })
 
-    success, balance_after = await check_and_deduct_credits(
+    # Capture preceding search query for task_query_text signal (non-blocking lookup).
+    _preceding_query = await _get_preceding_search_query(db, str(user_id))
+
+    success, balance_after, _tx_id = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/execute",
         service_id=service_slug, tx_type="execution",
         agent_id=agent_id, api_key_id=str(_api_key_id),
+        return_tx_id=True,
     )
     if not success:
         raise HTTPException(status_code=402, detail={
@@ -1179,7 +1239,9 @@ async def execute_service(request: Request, db=Depends(get_db)):
     execution_ms = round((_time.time() - start) * 1000)
 
     _execute_fallback_from: str | None = None
+    _original_failure_code: str | None = None
     if error_msg and _classify_error(error_msg) == "service_failure":
+        _original_failure_code = _classify_failure(None, error_msg)
         new_bal = await _do_refund(db, user_id, credit_cost, service_slug, error_msg, "/execute", balance_after,
                                    _mk_refund_key(getattr(request.state, "request_id", ""), service_slug, "execute_managed"))
         # Try one automatic fallback for managed-key calls
@@ -1191,10 +1253,11 @@ async def execute_service(request: Request, db=Depends(get_db)):
                 _fb_mapped, _fb_miss = map_params(_fb_slug, params)
                 if not _fb_miss:
                     _fb_cost = _fb_cfg["credits"]
-                    _fb_ok, _fb_bal = await check_and_deduct_credits(
+                    _fb_ok, _fb_bal, _fb_tx_id = await check_and_deduct_credits(
                         db, str(user_id), _fb_cost, "/execute",
                         service_id=_fb_slug, tx_type="execution",
                         agent_id=agent_id, api_key_id=str(_api_key_id),
+                        return_tx_id=True,
                     )
                     if _fb_ok:
                         result, _fb_err, execution_ms = await _try_execute_managed(_fb_slug, _fb_mapped, _fb_api_key)
@@ -1209,7 +1272,16 @@ async def execute_service(request: Request, db=Depends(get_db)):
                             service_slug = _fb_slug
                             credit_cost = _fb_cost
                             balance_after = _fb_bal
+                            # Point signal patch at the fallback tx row.
+                            _tx_id = _fb_tx_id
         if result is None:
+            # Patch the original tx with the failure code before raising.
+            from main import app as _app_ref
+            asyncio.create_task(_patch_tx_signals(
+                _app_ref.state.pool, _tx_id,
+                failure_code=_original_failure_code,
+                task_query_text=_preceding_query,
+            ))
             raise HTTPException(status_code=503, detail={
                 "error": "Service unavailable",
                 "refunded": True,
@@ -1241,6 +1313,20 @@ async def execute_service(request: Request, db=Depends(get_db)):
     asyncio.create_task(_check_spend_anomaly(app.state.pool, str(user_id)))
     if _api_key_id:
         await _increment_calls(app.state.pool, str(_api_key_id), cost=credit_cost)
+
+    # Post-call signal patch — fire and forget, zero hot-path latency impact.
+    _model_slug = params.get("model") if service_slug in _LLM_SLUGS else None
+    asyncio.create_task(_patch_tx_signals(
+        app.state.pool, _tx_id,
+        failure_code=None,
+        output_length_chars=len(str(result)) if result is not None else 0,
+        task_query_text=_preceding_query,
+        model_routing_attempted=_json.dumps([_model_slug]) if _model_slug else None,
+        model_routing_selected=_model_slug,
+        substitution_from=_execute_fallback_from,
+        substitution_to=service_slug if _execute_fallback_from else None,
+        substitution_reason=_original_failure_code if _execute_fallback_from else None,
+    ))
 
     resp = {
         "status": "ok",

@@ -147,8 +147,14 @@ def check_service_margins() -> None:
 
 async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
                                    service_id: str = None, tx_type: str = "execution",
-                                   agent_id: str = None, api_key_id: str = None):
-    """Atomically check and deduct credits. Returns (success, balance_after)."""
+                                   agent_id: str = None, api_key_id: str = None,
+                                   return_tx_id: bool = False):
+    """Atomically check and deduct credits.
+
+    Returns (success, balance_after) normally, or (success, balance_after, tx_id)
+    when return_tx_id=True. Callers that need the transaction ID for post-call
+    signal enrichment should pass return_tx_id=True.
+    """
     async with db.transaction():
         row = await db.fetchrow(
             "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
@@ -167,6 +173,8 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
 
         balance = row['credits_balance']
         if balance < cost:
+            if return_tx_id:
+                return False, balance, None
             return False, balance
 
         new_balance = balance - cost
@@ -174,13 +182,16 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
             "UPDATE user_credits SET credits_balance = $1, updated_at = NOW() WHERE user_id = $2::uuid",
             new_balance, user_id
         )
-        await db.execute("""
+        tx_id = await db.fetchval("""
             INSERT INTO credit_transactions
             (user_id, amount, balance_after, type, description, api_endpoint, service_id, agent_id, api_key_id)
             VALUES ($1::uuid, $2, $3, $7, $4, $5, $6, $8, $9::uuid)
+            RETURNING id
         """, user_id, -cost, new_balance, f"API call: {endpoint}", endpoint, service_id, tx_type,
             agent_id, api_key_id)
 
+        if return_tx_id:
+            return True, new_balance, tx_id
         return True, new_balance
 
 

@@ -823,6 +823,40 @@ async def lifespan(app: FastAPI):
                 ON credit_transactions(user_id, created_at)
                 WHERE type = 'execution' AND amount < 0
             """)
+            # Signal enrichment columns — high-density outcome graph per execution.
+            await _mconn.execute("""
+                ALTER TABLE credit_transactions
+                    ADD COLUMN IF NOT EXISTS failure_code             TEXT,
+                    ADD COLUMN IF NOT EXISTS task_query_text          TEXT,
+                    ADD COLUMN IF NOT EXISTS output_length_chars      INT,
+                    ADD COLUMN IF NOT EXISTS model_routing_attempted  JSONB,
+                    ADD COLUMN IF NOT EXISTS model_routing_selected   TEXT,
+                    ADD COLUMN IF NOT EXISTS substitution_from        TEXT,
+                    ADD COLUMN IF NOT EXISTS substitution_to          TEXT,
+                    ADD COLUMN IF NOT EXISTS substitution_reason      TEXT
+            """)
+            # Partial index for quick failure analysis queries.
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS credit_transactions_failure_idx
+                  ON credit_transactions(user_id, failure_code, created_at DESC)
+                  WHERE failure_code IS NOT NULL
+            """)
+            # Embedding storage for task_query_text (async, populated by embed_queries worker).
+            # REAL[] stores float32 vectors without requiring the pgvector extension.
+            # For similarity search, install pgvector and migrate to vector(768).
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS task_embeddings (
+                    id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+                    transaction_id UUID        REFERENCES credit_transactions(id) ON DELETE CASCADE,
+                    embedding      REAL[],
+                    model          TEXT        NOT NULL DEFAULT 'jina-embeddings-v2-base-en',
+                    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS task_embeddings_tx_idx
+                  ON task_embeddings(transaction_id)
+            """)
             # v0.6.10 — remove first-party labs summarizer from public catalog
             await _mconn.execute("""
                 DELETE FROM services
@@ -1067,6 +1101,8 @@ async def lifespan(app: FastAPI):
     webhook_retry_task = asyncio.create_task(_webhook_retry_loop())
     from routers.billing.account import pioneer_drip_loop
     pioneer_drip_task = asyncio.create_task(pioneer_drip_loop())
+    from workers.embed_queries import embed_queries_loop
+    embed_queries_task = asyncio.create_task(embed_queries_loop())
     _get_redis()  # eagerly init so the rate-limiter log line appears at startup
     yield
     cleanup_task.cancel()

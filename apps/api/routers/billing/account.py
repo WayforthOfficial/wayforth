@@ -1468,6 +1468,100 @@ async def pioneer_drip_loop():
         await asyncio.sleep(max(60.0, (nxt - now).total_seconds()))
 
 
+@router.get("/account/signal-summary", tags=["Account"])
+@limiter.limit("30/minute")
+async def account_signal_summary(request: Request, db=Depends(get_db)):
+    """Aggregate signal intelligence for the authenticated account.
+
+    Returns execution outcomes, failure breakdown, top services, substitution
+    events, and average output length — all scoped to the current calendar month.
+    """
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
+
+    # ── Core execution stats ──────────────────────────────────────────────────
+    stats = await db.fetchrow("""
+        SELECT
+            COUNT(*)                                                          AS total,
+            COUNT(*) FILTER (WHERE failure_code IS NULL)                     AS successes,
+            COALESCE(SUM(ABS(amount)), 0)                                    AS credits_consumed,
+            COUNT(*) FILTER (WHERE failure_code = 'timeout')                 AS fc_timeout,
+            COUNT(*) FILTER (WHERE failure_code = 'rate_limit')              AS fc_rate_limit,
+            COUNT(*) FILTER (WHERE failure_code = 'unavailable')             AS fc_unavailable,
+            COUNT(*) FILTER (WHERE failure_code = 'auth')                    AS fc_auth,
+            COUNT(*) FILTER (WHERE failure_code = 'parse_error')             AS fc_parse_error,
+            COUNT(*) FILTER (WHERE substitution_from IS NOT NULL)            AS substitution_events,
+            COALESCE(AVG(output_length_chars) FILTER (
+                WHERE output_length_chars IS NOT NULL), 0)                   AS avg_output_len
+        FROM credit_transactions
+        WHERE user_id      = $1::uuid
+          AND type         = 'execution'
+          AND created_at  >= date_trunc('month', NOW())
+    """, user_id)
+
+    total = int(stats["total"]) if stats else 0
+    successes = int(stats["successes"]) if stats else 0
+    success_rate = round(successes / total, 4) if total > 0 else 1.0
+
+    # ── Top services this month ───────────────────────────────────────────────
+    svc_rows = await db.fetch("""
+        SELECT
+            service_id                                  AS slug,
+            COUNT(*)                                    AS calls,
+            COUNT(*) FILTER (WHERE failure_code IS NULL) AS ok
+        FROM credit_transactions
+        WHERE user_id     = $1::uuid
+          AND type        = 'execution'
+          AND service_id  IS NOT NULL
+          AND created_at >= date_trunc('month', NOW())
+        GROUP BY service_id
+        ORDER BY calls DESC
+        LIMIT 10
+    """, user_id)
+
+    top_services = [
+        {
+            "slug": r["slug"],
+            "calls": int(r["calls"]),
+            "success_rate": round(int(r["ok"]) / int(r["calls"]), 4) if r["calls"] else 1.0,
+        }
+        for r in svc_rows
+    ]
+
+    # ── Top substitution pairs ────────────────────────────────────────────────
+    sub_rows = await db.fetch("""
+        SELECT substitution_from AS "from", substitution_to AS "to", COUNT(*) AS count
+        FROM credit_transactions
+        WHERE user_id           = $1::uuid
+          AND substitution_from IS NOT NULL
+          AND substitution_to   IS NOT NULL
+          AND created_at       >= date_trunc('month', NOW())
+        GROUP BY substitution_from, substitution_to
+        ORDER BY count DESC
+        LIMIT 5
+    """, user_id)
+
+    return {
+        "executions_this_month":    total,
+        "success_rate":             success_rate,
+        "credits_consumed":         int(stats["credits_consumed"]) if stats else 0,
+        "failure_breakdown": {
+            "timeout":     int(stats["fc_timeout"])    if stats else 0,
+            "rate_limit":  int(stats["fc_rate_limit"]) if stats else 0,
+            "unavailable": int(stats["fc_unavailable"])if stats else 0,
+            "auth":        int(stats["fc_auth"])        if stats else 0,
+            "parse_error": int(stats["fc_parse_error"])if stats else 0,
+        },
+        "top_services": top_services,
+        "substitution_events": int(stats["substitution_events"]) if stats else 0,
+        "top_substitution_pairs": [
+            {"from": r["from"], "to": r["to"], "count": int(r["count"])}
+            for r in sub_rows
+        ],
+        "avg_output_length_chars": int(stats["avg_output_len"]) if stats else 0,
+    }
+
+
 @router.get("/account/founding-status", tags=["Account"])
 @limiter.limit("30/minute")
 async def account_founding_status(request: Request, db=Depends(get_db)):
