@@ -706,13 +706,12 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
     # provider's accepted settlement rail. Credits are always the developer's
     # unit of account; the underlying rail (card, USDC, CCTP) is Wayforth's concern.
     #
-    # x402 fee model: providers receive 100% of their stated price.
-    # Developer charge = provider_price / (1 − ROUTING_FEE) ≈ provider_price × 1.015233.
-    # Wayforth keeps the difference as the routing fee.
-    routing_fee_pct = ROUTING_FEE
-    # amount_usd is the provider's stated price; fee is a markup on top, not a deduction.
-    service_receives_usd = amount_usd
-    routing_fee_usd = round(amount_usd / (1 - routing_fee_pct) - amount_usd, 8)
+    # x402 fee model: developer pays provider_price × 1.015.
+    # Provider receives provider_price exactly (100%) — fee is not deducted from payout.
+    # Wayforth keeps 1.5% as a routing/discovery fee charged to the developer.
+    service_receives_usd = amount_usd                                   # provider gets 100%
+    developer_charge_usd = round(amount_usd * (1 + ROUTING_FEE), 8)    # developer pays 1.5% more
+    routing_fee_usd = round(developer_charge_usd - amount_usd, 8)
     wayforth_revenue = routing_fee_usd
 
     service_name = service["name"] if service else service_id
@@ -738,7 +737,8 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
             else:
                 settlement = await _x402_settle_cdp(endpoint_url, amount_usd)
                 if settlement["settled"]:
-                    credits_needed = max(1, round(amount_usd * 1000))
+                    # Developer pays provider_price × 1.015; provider receives full amount.
+                    credits_needed = max(1, round(developer_charge_usd * 1000))
                     ok, bal_after = await check_and_deduct_credits(
                         db, str(key_record["user_id"]), credits_needed, "/pay", service_id,
                         tx_type="cross_rail",
@@ -819,7 +819,8 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
         }
 
     # TRACK A: Card-funded (Stripe Treasury — credits deduction)
-    credits_needed = max(1, round(amount_usd * 1000))
+    # Developer pays provider_price × 1.015; provider receives full amount via payout.
+    credits_needed = max(1, round(developer_charge_usd * 1000))
 
     success, balance_after = await check_and_deduct_credits(
         db,
@@ -976,7 +977,8 @@ async def execute_service(request: Request, db=Depends(get_db)):
     # ── Cross-rail path: credits → x402 catalog service ──────────────────────
     if is_cross_rail and cross_rail_svc:
         pricing_usdc  = float(cross_rail_svc["pricing_usdc"] or 0.01)
-        total_credits = math.ceil(pricing_usdc * 1000)
+        # Developer pays provider_price × 1.015; provider receives full amount via settlement.
+        total_credits = math.ceil(pricing_usdc * (1 + ROUTING_FEE) * 1000)
 
         success, balance_after = await check_and_deduct_credits(
             db, str(user_id), total_credits, "/execute",

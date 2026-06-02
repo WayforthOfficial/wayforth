@@ -2,7 +2,7 @@
 v0.6.14 Economics regression tests + v0.7.0 version bump.
 
 Covers:
-  - x402 fee model: developer charge = provider_price / 0.985
+  - x402 fee model: developer charge = provider_price * 1.015
   - SERVICE_CONFIGS: all services have real_cost_per_call defined
   - Margin check: stability AI is positive at Growth tier
   - VERSION constant
@@ -13,7 +13,6 @@ from main import VERSION
 from core.credits import (
     ROUTING_FEE,
     _GROWTH_CREDIT_VALUE_USD,
-    _X402_FEE_DIVISOR,
     check_service_margins,
     x402_developer_charge,
 )
@@ -36,26 +35,28 @@ class TestVersion:
 
 class TestX402FeeModel:
 
-    def test_fee_divisor_is_0985(self):
-        assert _X402_FEE_DIVISOR == pytest.approx(0.985)
+    def test_fee_multiplier_is_1015(self):
+        # New model: developer pays provider_price * 1.015 exactly.
+        charge = x402_developer_charge(1.0)
+        assert charge == pytest.approx(1.015, rel=1e-6)
 
-    def test_fee_divisor_derived_from_routing_fee(self):
-        assert _X402_FEE_DIVISOR == pytest.approx(1.0 - ROUTING_FEE)
+    def test_fee_multiplier_derived_from_routing_fee(self):
+        charge = x402_developer_charge(1.0)
+        assert charge == pytest.approx(1.0 * (1 + ROUTING_FEE), rel=1e-6)
 
     def test_developer_charge_exceeds_provider_price(self):
         charge = x402_developer_charge(0.002)
         assert charge > 0.002
 
     def test_developer_charge_formula(self):
-        # Function rounds to 8 decimal places; allow for that rounding
         charge = x402_developer_charge(0.002)
-        assert charge == pytest.approx(0.002 / 0.985, rel=1e-4)
+        assert charge == pytest.approx(0.002 * 1.015, rel=1e-6)
 
-    def test_fee_rate_is_approximately_1_5_percent(self):
+    def test_fee_rate_is_exactly_1_5_percent(self):
         provider_price = 1.0
         charge = x402_developer_charge(provider_price)
         fee_rate = (charge - provider_price) / provider_price
-        assert 0.015 <= fee_rate <= 0.016
+        assert fee_rate == pytest.approx(0.015, rel=1e-6)
 
     def test_fee_is_positive(self):
         charge = x402_developer_charge(0.002)
@@ -69,14 +70,14 @@ class TestX402FeeModel:
         assert wayforth_fee > 0
         assert provider_price + wayforth_fee == pytest.approx(charge, rel=1e-6)
 
-    @pytest.mark.parametrize("provider_price,expected_min,expected_max", [
-        (0.002,  0.002030, 0.002032),
-        (0.010,  0.010150, 0.010153),
-        (1.000,  1.015228, 1.015234),
+    @pytest.mark.parametrize("provider_price,expected", [
+        (0.002,  0.002 * 1.015),
+        (0.010,  0.010 * 1.015),
+        (1.000,  1.000 * 1.015),
     ])
-    def test_developer_charge_range(self, provider_price, expected_min, expected_max):
+    def test_developer_charge_exact(self, provider_price, expected):
         charge = x402_developer_charge(provider_price)
-        assert expected_min <= charge <= expected_max
+        assert charge == pytest.approx(expected, rel=1e-6)
 
     def test_routing_fee_constant_is_1_5_percent(self):
         assert ROUTING_FEE == pytest.approx(0.015)
