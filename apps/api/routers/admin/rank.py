@@ -1,6 +1,10 @@
 """routers/admin/rank.py — /admin/rank/* routes."""
 
 import logging
+import math
+import re as _re
+import secrets
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -12,17 +16,53 @@ logger = logging.getLogger("wayforth")
 
 router = APIRouter()
 
+# wayforth_rank_v2.py is gitignored (lives in wayforth-rank private repo and
+# is not deployed in this container). Inline the three pure math functions so
+# the endpoint works independently.
+
+def _payment_rate_score(payments: int, total_clicks: int) -> float:
+    if total_clicks == 0:
+        return 50.0
+    return min((payments / total_clicks) * 100.0, 100.0)
+
+
+def _volume_score(total_payments: int) -> float:
+    if total_payments == 0:
+        return 0.0
+    return min(math.log(total_payments + 1) / math.log(101) * 100.0, 100.0)
+
+
+def _recency_score(last_seen) -> float:
+    if last_seen is None:
+        return 20.0
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    delta = (datetime.now(timezone.utc) - last_seen).days
+    if delta <= 7:
+        return 100.0
+    if delta <= 30:
+        return 70.0
+    return 40.0
+
+
+def compute_wri_v2(base_wri: float, payments: int, total_clicks: int, last_seen, boost_wri_bonus: int = 0) -> float:
+    score = (
+        base_wri * 0.40
+        + _payment_rate_score(payments, total_clicks) * 0.35
+        + _volume_score(payments) * 0.15
+        + _recency_score(last_seen) * 0.10
+        + boost_wri_bonus
+    )
+    return round(min(score, 100.0), 1)
+
 
 @router.post("/admin/rank/recalculate", tags=["Admin"])
 async def rank_recalculate(request: Request, db=Depends(get_db)):
     """Recompute WayforthRank v2 scores for all services with payment signal data."""
     from main import app, ADMIN_KEY
-    import secrets
     provided_key = request.headers.get("X-Admin-Key", "")
     if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    from wayforth_rank_v2 import compute_wri_v2
 
     signal_rows = await db.fetch("""
         SELECT
