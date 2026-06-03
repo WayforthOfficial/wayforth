@@ -4,6 +4,18 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.6 — WayforthRank integrity — 2026-06-03
+
+- Fixed slug matcher bug: recalculate now matches `clicked_slug` directly against `services.slug` (was using a name-derived proxy, which hit the wrong duplicate rows)
+- Deduped 8 managed service rows with split signal/base history; donor rows soft-retired (`active=false`, reversible)
+- Added base-only scoring fallback for managed services with no signal — zero NULL `wri_score` enforced across all 16 managed services
+- Added `service_health.error_rate` failure penalty (`score × (1 − error_rate × 0.3)`, default on via `ENABLE_FAILURE_PENALTY`)
+- Wired `failure_code` on `/execute/batch` (was the only execution path missing it)
+- Recalculate now stamps `updated_at` on every score write
+- DB changes documented in `scripts/data-fixes/2026-06-03-dedup-managed-services.sql`
+
+---
+
 ## v0.8.5 — Security hardening (post internal audit) — 2026-06-03
 
 Remediation of the 17-finding v0.8.4 internal adversarial audit. The x402 and
