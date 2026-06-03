@@ -32,11 +32,21 @@ async def rank_recalculate(request: Request, db=Depends(get_db)):
     if not rank_url:
         return JSONResponse({"error": "rank_service_not_configured"}, status_code=503)
 
+    # Pass the managed slug list so the rank service can base-only-score managed
+    # services that have no usage signal yet (TASK 1). Sourced from
+    # SERVICE_CONFIGS so it never drifts and never base-scores the whole catalog.
+    try:
+        from services.managed import SERVICE_CONFIGS
+        _managed_slugs = list(SERVICE_CONFIGS.keys())
+    except Exception:
+        _managed_slugs = []
+
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
                 f"{rank_url}/v1/rank/recalculate",
                 headers={"X-Rank-Service-Key": rank_key},
+                json={"managed_slugs": _managed_slugs},
             )
             resp.raise_for_status()
             results = resp.json()
