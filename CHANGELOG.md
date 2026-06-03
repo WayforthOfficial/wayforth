@@ -4,6 +4,31 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.5 — Security hardening (post internal audit) — 2026-06-03
+
+Remediation of the 17-finding v0.8.4 internal adversarial audit. The x402 and
+USDC rails are disabled pending proper on-chain settlement; do not re-enable
+until the v0.9.0 real-money test sequence.
+
+- Disabled x402 and USDC rails pending proper on-chain settlement implementation (env-gated, default off)
+- Stripped shadow execute/search/webhook API from wayforth-rank (now `/health` + `/v1/rank/recalculate` only)
+- Pinned JWT algorithm to {RS256, ES256} from JWKS only; never read `alg` from the token header; pinned issuer
+- Closed webhook SSRF DNS-rebind gap (IPv4-mapped-IPv6 unwrap, fail-closed parse, pre-connect re-validation)
+- Moved anonymous search counters to Redis; IPv6 /64 keying; fail-closed on Redis loss
+- Email canonicalization (plus-suffix / Gmail-dot) before uniqueness checks on signup and provider registration
+- Auth throttle now fails closed on Redis loss (strict in-memory fallback)
+- USDC watcher: payer-address binding, persisted block cursor, atomic tx claim (no genesis re-scan, no double-credit)
+- USDC top-up and subscribe: payer-address verification against the on-chain sender
+- Added admin-only `POST /admin/usdc/reconcile` for manually-reviewed stranded funds
+- Added self-serve account deletion (`DELETE /account` + `/account/undelete`) with 24h grace and a reaper
+- Circuit breakers on rate-capped managed services (global + per-tier per-user daily caps)
+- WRI self-dealing signal exclusion (a provider can't inflate its own ranking)
+- Removed a 122-line dead duplicate `check_auth` that carried the old anon-counter bypass
+- Committed previously ad-hoc migrations (credits CHECK, pioneer counters, email-canonical, deletion, USDC payer-binding)
+- Fixed USDC monthly-reset date math (no February skip)
+
+---
+
 ## v0.8.4 — Integrity Patch — 2026-06-03
 
 ### Credits
