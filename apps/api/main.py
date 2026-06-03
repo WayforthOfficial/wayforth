@@ -755,7 +755,8 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 ALTER TABLE user_credits
                     ADD COLUMN IF NOT EXISTS warning_80_sent_at TIMESTAMPTZ,
-                    ADD COLUMN IF NOT EXISTS warning_95_sent_at TIMESTAMPTZ
+                    ADD COLUMN IF NOT EXISTS warning_95_sent_at TIMESTAMPTZ,
+                    ADD COLUMN IF NOT EXISTS last_credited_at   TIMESTAMPTZ
             """)
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS service_favorites (

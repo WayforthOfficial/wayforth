@@ -839,10 +839,19 @@ async def _monthly_topup_reset():
                     WHERE monthly_topup_reset_at IS NOT NULL
                       AND monthly_topup_reset_at <= NOW()
                 """)
+                # DISTINCT ON (user_id) prevents double-crediting users who have
+                # multiple API keys with different monthly_calls_reset_at dates.
+                # active DESC ensures the active key's tier wins when a user has
+                # both active and inactive keys in the qualifying set.
                 reset_keys = await db.fetch("""
-                    SELECT user_id, tier FROM api_keys
-                    WHERE monthly_calls_reset_at IS NOT NULL
-                      AND monthly_calls_reset_at <= NOW()
+                    SELECT DISTINCT ON (ak.user_id) ak.user_id, ak.tier
+                      FROM api_keys ak
+                     WHERE ak.monthly_calls_reset_at IS NOT NULL
+                       AND ak.monthly_calls_reset_at <= NOW()
+                       AND ak.user_id IS NOT NULL
+                     ORDER BY ak.user_id,
+                              ak.active DESC,
+                              ak.monthly_calls_reset_at
                 """)
                 calls_reset = await db.execute("""
                     UPDATE api_keys
@@ -852,19 +861,23 @@ async def _monthly_topup_reset():
                       AND monthly_calls_reset_at <= NOW()
                 """)
                 # Replenish credits_balance to the plan's monthly_credits allowance.
-                # Cap at monthly_credits so USDC top-ups and pioneer drip accruals
-                # above the base allowance are not wiped; only the base allowance portion
-                # resets. The GREATEST() guard ensures we never reduce a balance that is
-                # legitimately above the plan limit (e.g. unused credits carried forward
-                # by USDC subscribers who paid in advance).
+                # GREATEST() preserves USDC prepay and pioneer drip accruals above plan_max.
+                # last_credited_at gate: idempotent — skips if already credited this
+                # calendar month, closing the multi-key replenishment vector.
                 for _rk in reset_keys:
                     _p = PLANS.get(_rk["tier"], PLANS["free"])
                     _monthly = _p["monthly_credits"]
                     await db.execute("""
                         UPDATE user_credits
-                           SET credits_balance = GREATEST(credits_balance, $1),
-                               updated_at = NOW()
+                           SET credits_balance  = GREATEST(credits_balance, $1),
+                               last_credited_at = NOW(),
+                               updated_at       = NOW()
                          WHERE user_id = $2::uuid
+                           AND (
+                               last_credited_at IS NULL
+                               OR date_trunc('month', last_credited_at AT TIME ZONE 'UTC')
+                                  < date_trunc('month', NOW() AT TIME ZONE 'UTC')
+                           )
                     """, _monthly, _rk["user_id"])
             if updated and updated != "UPDATE 0":
                 logger.info("Monthly topup spend reset: %s", updated)
