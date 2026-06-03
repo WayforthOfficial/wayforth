@@ -359,9 +359,38 @@ class PayRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+async def _is_self_dealing(conn, user_id: str, clicked_slug: str) -> bool:
+    """True if `user_id` owns the provider behind `clicked_slug` (FINDING-009).
+
+    A provider searching for and executing their own service would otherwise
+    inflate their WRI conversion signal (payment_followed=true) at full weight.
+    We detect the overlap by matching the executing user's email(s) to the
+    provider that owns the clicked service.
+    """
+    try:
+        row = await conn.fetchrow("""
+            SELECT 1
+              FROM provider_services ps
+              JOIN providers p          ON p.id = ps.provider_id
+              JOIN api_keys  ak         ON ak.owner_email = p.email
+             WHERE ps.service_slug = $1
+               AND ak.user_id = $2::uuid
+             LIMIT 1
+        """, clicked_slug, user_id)
+        return row is not None
+    except Exception:
+        return False  # detection failure → do not block legitimate signal
+
+
 async def _update_search_signal(pool, user_id: str, clicked_slug: str):
     try:
         async with pool.acquire() as conn:
+            # FINDING-009: exclude provider self-dealing from the ranking signal.
+            # The execution is still recorded for billing; it just doesn't mark
+            # payment_followed (set signal_weight=0 equivalent by not counting it).
+            if await _is_self_dealing(conn, user_id, clicked_slug):
+                logger.info("WRI self-deal excluded: user=%s slug=%s", user_id, clicked_slug)
+                return
             await conn.execute("""
                 UPDATE search_analytics
                 SET clicked_slug = $1, payment_followed = true
@@ -1233,6 +1262,11 @@ async def execute_service(request: Request, db=Depends(get_db)):
     # Capture preceding search query for task_query_text signal (non-blocking lookup).
     _preceding_query = await _get_preceding_search_query(db, str(user_id))
 
+    # FINDING-006: circuit breaker on rate-capped upstreams — checked before any
+    # deduction so a capped call is never charged.
+    from services.managed import check_upstream_cap
+    await check_upstream_cap(service_slug, str(user_id), _tier)
+
     success, balance_after, _tx_id = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/execute",
         service_id=service_slug, tx_type="execution",
@@ -1383,7 +1417,7 @@ async def execute_service(request: Request, db=Depends(get_db)):
 
 # ── /execute/batch — parallel multi-service execution ────────────────────────
 
-async def _execute_one(call: dict, pool, user_id: str, api_key_id: str, request_id: str = "", idx: int = 0) -> dict:
+async def _execute_one(call: dict, pool, user_id: str, api_key_id: str, request_id: str = "", idx: int = 0, tier: str | None = None) -> dict:
     """Execute a single managed service call; used by /execute/batch via asyncio.gather."""
     slug = (call.get("slug") or "").strip().lower()
     params = call.get("params") or {}
@@ -1401,6 +1435,17 @@ async def _execute_one(call: dict, pool, user_id: str, api_key_id: str, request_
         return {"slug": slug, "status": "error",
                 "error": f"'{slug}' is not configured on this server.",
                 "result": None, "execution_ms": 0}
+
+    # FINDING-006: per-call upstream circuit breaker. Catch rather than raise so
+    # one capped call doesn't fail the whole batch.
+    from services.managed import check_upstream_cap
+    try:
+        await check_upstream_cap(slug, user_id, tier)
+    except HTTPException as _cap_exc:
+        detail = _cap_exc.detail if isinstance(_cap_exc.detail, dict) else {"error": str(_cap_exc.detail)}
+        return {"slug": slug, "status": "error",
+                "error": detail.get("error", "upstream_limit_reached"),
+                "detail": detail, "result": None, "execution_ms": 0}
 
     async with pool.acquire() as call_db:
         success, balance_after = await check_and_deduct_credits(
@@ -1517,7 +1562,7 @@ async def execute_batch(request: Request, db=Depends(get_db)):
 
     _batch_req_id = getattr(request.state, "request_id", "")
     results = await asyncio.gather(
-        *[_execute_one(c, pool, str(user_id), str(_api_key_id), _batch_req_id, _idx)
+        *[_execute_one(c, pool, str(user_id), str(_api_key_id), _batch_req_id, _idx, _tier)
           for _idx, c in enumerate(calls)]
     )
 

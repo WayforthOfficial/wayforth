@@ -10,6 +10,81 @@ from fastapi import HTTPException
 _httpx_log = logging.getLogger("httpx")
 logger = logging.getLogger(__name__)
 
+
+# ── Circuit breakers for rate-capped upstreams (FINDING-006) ──────────────────
+# Some upstreams enforce a hard global daily quota on Wayforth's single shared
+# key. Without a breaker, one tenant (or one anonymous x402 caller, pre-disable)
+# could exhaust the quota for everyone. Global caps stop that; per-user/day
+# sub-quotas stop a single tenant from monopolising the shared budget.
+UPSTREAM_DAILY_CAPS: dict[str, int] = {
+    "alphavantage": 25,
+    "resend": 100,
+}
+_USER_UPSTREAM_DAILY_CAPS: dict[str, dict[str, int]] = {
+    "free":       {"alphavantage": 5,  "resend": 10},
+    "builder":    {"alphavantage": 15, "resend": 50},
+    "starter":    {"alphavantage": 15, "resend": 50},
+    "pro":        {"alphavantage": 15, "resend": 50},
+    "growth":     {"alphavantage": 25, "resend": 100},
+    "enterprise": {"alphavantage": 25, "resend": 100},
+}
+
+
+async def check_upstream_cap(service_slug: str, user_id: str | None, tier: str | None) -> None:
+    """Raise 503 (global) or 429 (per-user) if a rate-capped upstream's daily
+    quota is exhausted. No-op for uncapped services. Checked BEFORE credit
+    deduction so a capped call is never charged.
+
+    Counters live in Redis with a 24h TTL. Availability protection, not auth:
+    if Redis is unavailable the breaker fails OPEN (allows the call) rather than
+    blocking all capped-service traffic — auth/throttle paths fail closed
+    elsewhere.
+    """
+    cap = UPSTREAM_DAILY_CAPS.get(service_slug)
+    if cap is None:
+        return
+    from core.tier_gates import _get_redis
+    redis = _get_redis()
+    if redis is None:
+        return
+    from datetime import datetime, timezone
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Per-user sub-quota first, so a rejected user doesn't consume the global budget.
+    ucap = _USER_UPSTREAM_DAILY_CAPS.get(tier or "free", _USER_UPSTREAM_DAILY_CAPS["free"]).get(service_slug)
+    if ucap is not None and user_id:
+        ukey = f"user_upstream:{user_id}:{service_slug}:{day}"
+        try:
+            ucount = await redis.incr(ukey)
+            if ucount == 1:
+                await redis.expire(ukey, 86400)
+        except Exception:
+            ucount = 0  # redis hiccup → don't block
+        if ucount > ucap:
+            raise HTTPException(status_code=429, detail={
+                "error": "user_upstream_daily_limit_reached",
+                "service": service_slug,
+                "your_daily_limit": ucap,
+                "message": f"You've reached your daily limit for {service_slug}. "
+                           "Upgrade your plan or try again tomorrow.",
+            })
+
+    gkey = f"upstream_cap:{service_slug}:{day}"
+    try:
+        gcount = await redis.incr(gkey)
+        if gcount == 1:
+            await redis.expire(gkey, 86400)
+    except Exception:
+        gcount = 0
+    if gcount > cap:
+        raise HTTPException(status_code=503, detail={
+            "error": "upstream_daily_limit_reached",
+            "service": service_slug,
+            "message": f"{service_slug} has reached its shared daily limit. Try again tomorrow "
+                       "or use an alternative service.",
+        })
+
+
 SERVICE_CONFIGS = {
     # Inference
     "groq":        {"key_var": "GROQ_API_KEY",          "credits": 3,   "real_cost_per_call": 0.001},

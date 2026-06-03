@@ -49,6 +49,25 @@ router = APIRouter()
 async def _verify_x402_payment(payment_header: str, payto: str, expected_price_str: str) -> dict:
     """Decode and verify an EIP-3009 X-PAYMENT authorization header.
 
+    ⚠️  FINDING-001 (v0.8.4 internal audit) — DO NOT RE-ENABLE THE x402 RAIL ⚠️
+    This function performs NO real settlement: it only parses the client-supplied
+    base64 JSON and checks the payee + amount fields. A forged envelope therefore
+    "verifies", which is why /x402/execute and /x402/search are hard-disabled
+    (503) via X402_RAIL_ENABLED. The result of this function is currently
+    unreachable from a live request.
+
+    TODO (v0.9.0): wire real EIP-3009 settlement via the CDP facilitator before
+    flipping WAYFORTH_X402_ENABLED=true. Required steps:
+      1. Recover and verify the EIP-3009 signature (eth_account.recover_message)
+         over the typed-data authorization; reject if signer != `from`.
+      2. Call the CDP facilitator settle(authorization) to execute
+         transferWithAuthorization on Base.
+      3. Await the on-chain receipt and require receipt.status == 1.
+      4. Only then return {"valid": True, ...}.
+      5. FINDING-017: derive x402 wallet reputation tiers from SETTLED on-chain
+         value only (this resolves automatically once 1–4 land).
+    Validate end-to-end on Base Sepolia with a funded CDP account first.
+
     Returns {valid, from_address, amount_usdc}. When CDP signing keys are not
     configured (dev/staging without a wallet), we still parse the header and
     require it to be a well-formed JSON envelope with the expected payee +
