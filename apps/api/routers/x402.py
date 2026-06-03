@@ -184,7 +184,7 @@ async def _refund_x402(payer_address: str, price_str: str, service_slug: str):
 
 @router.post("/x402/execute")
 @limiter.limit("60/minute")
-async def x402_execute(request):
+async def x402_execute(request: Request):
     """x402 pay-per-call endpoint. No API key required — payment IS authentication.
 
     Step 1 (no X-PAYMENT header): Returns 402 with USDC payment instructions.
