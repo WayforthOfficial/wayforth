@@ -10,7 +10,7 @@
 
 ## What It Is
 
-Wayforth is the API runtime for AI agents — a single integration that gives any agent access to 4,974 indexed APIs, ranked by real usage signals and executable with credits or crypto. Agents search, select, and pay for API services in one call without managing keys, credentials, or billing integrations. Built for developers who want their agents to reach the full surface area of the internet without building the infrastructure themselves.
+Wayforth is the API runtime for AI agents — a single integration that gives any agent access to ~5,000 indexed APIs, ranked by real usage signals and executable with credits or crypto. Agents search, select, and pay for API services in one call without managing keys, credentials, or billing integrations. Built for developers who want their agents to reach the full surface area of the internet without building the infrastructure themselves.
 
 ---
 
@@ -67,7 +67,7 @@ Full API reference: [gateway.wayforth.io/guide/](https://gateway.wayforth.io/gui
 
 ## Managed Services
 
-15 live, 2 in queue — managed services with zero API key setup. Wayforth holds the credentials — you call the tool.
+16 live — managed services with zero API key setup. Wayforth holds the credentials — you call the tool.
 
 | Service | Category | Credits/call |
 |---------|----------|-------------|
@@ -117,7 +117,7 @@ Register your API: [wayforth.io/providers](https://wayforth.io/providers)
 
 | Metric | Count |
 |--------|-------|
-| APIs indexed | 4,974 |
+| APIs indexed | ~5,000 |
 | Tier 2 verified | 3,550+ |
 | x402-native services | 277 |
 | Categories | 19 |
@@ -152,7 +152,7 @@ Three ways to pay for API calls through Wayforth:
 
 | Tool | Description |
 |------|-------------|
-| `wayforth_search` | Search 4,974 APIs by intent — returns ranked results with WRI scores |
+| `wayforth_search` | Search ~5,000 APIs by intent — returns ranked results with WRI scores |
 | `wayforth_query` | Structured discovery with WayforthQL — filter by tier, latency, region, price, payment rail |
 | `wayforth_run` | Intent-based routing: describe what you need, Wayforth picks and executes the best service |
 | `wayforth_execute` | Direct execution of a managed service by slug — no API key required |

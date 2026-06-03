@@ -1295,7 +1295,9 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
 
     user = await db.fetchrow(
         "SELECT pioneer_opt_in, pioneer_opted_in_at, pioneer_opt_out_at, "
-        "pioneer_cooldown_until, pioneer_last_drip_date FROM users WHERE id = $1::uuid",
+        "pioneer_cooldown_until, pioneer_last_drip_date, "
+        "pioneer_drip_credits_this_cycle, pioneer_drip_days_this_cycle "
+        "FROM users WHERE id = $1::uuid",
         user_id,
     )
     if not user:
@@ -1369,7 +1371,13 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
         # does NOT count down from 30; it only counts down after opting out.
         "cooldown_days_remaining":               _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,
         "days_remaining":                        _cooldown_days_remaining(cooldown_until, now) if cooldown_active else None,  # backward compat
-        "credits_earned_this_month":             int(credits_earned_this_month),
+        "credits_earned_this_month":             int(credits_earned_this_month),  # backward compat alias
+        # Task 10 display fields
+        "days_enrolled":                         int((now - user["pioneer_opted_in_at"]).days) if user["pioneer_opted_in_at"] else 0,
+        "drip_credits_this_cycle":               int(user["pioneer_drip_credits_this_cycle"] or 0),
+        "drip_days_this_cycle":                  int(user["pioneer_drip_days_this_cycle"] or 0),
+        "daily_drip_rate":                       _PIONEER_DAILY_CREDITS.get(tier, 0),
+        "rollover_note":                         "Credits reset with your monthly subscription. Unused credits do not carry over.",
         # Searches that were in the 60% boosted bucket AND had a boosted provider
         # promoted to the front. Not "API calls made" — pioneer_calls_* names kept
         # as backward-compat aliases.
@@ -1436,6 +1444,12 @@ async def run_pioneer_drip(db) -> int:
                     "UPDATE user_credits SET credits_balance = $1, lifetime_credits = lifetime_credits + $2, updated_at = NOW() WHERE user_id = $3::uuid",
                     new_balance, daily, uid,
                 )
+                await db.execute("""
+                    UPDATE users
+                       SET pioneer_drip_credits_this_cycle = pioneer_drip_credits_this_cycle + $2,
+                           pioneer_drip_days_this_cycle    = pioneer_drip_days_this_cycle    + 1
+                     WHERE id = $1::uuid
+                """, uid, daily)
                 await db.execute("""
                     INSERT INTO credit_transactions
                       (user_id, amount, balance_after, type, description, api_endpoint)

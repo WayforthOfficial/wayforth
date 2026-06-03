@@ -28,7 +28,13 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from wayforth_rank_v2 import compute_wri_v2
+try:
+    from wayforth_rank_v2 import compute_wri_v2
+except ImportError:
+    # wayforth_rank_v2 is gitignored (private wayforth-rank repo).
+    # Stub satisfies the signature and capping contract for unit tests.
+    def compute_wri_v2(base_wri, payments, total_clicks, last_seen, boost_wri_bonus=0):  # type: ignore[misc]
+        return round(min(base_wri * 0.90 + boost_wri_bonus, 100.0), 1)
 from routers.billing.account import (
     _PIONEER_DAILY_CREDITS,
     _PIONEER_REJOIN_COOLDOWN,

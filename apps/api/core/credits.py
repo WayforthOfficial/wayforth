@@ -879,6 +879,16 @@ async def _monthly_topup_reset():
                                   < date_trunc('month', NOW() AT TIME ZONE 'UTC')
                            )
                     """, _monthly, _rk["user_id"])
+                    # Zero per-cycle pioneer drip counters so the dashboard shows
+                    # "earned this cycle" from day 1 of the new subscription month.
+                    # Lifetime enrollment days are derived at query time from
+                    # pioneer_opted_in_at and are never reset.
+                    await db.execute("""
+                        UPDATE users
+                           SET pioneer_drip_credits_this_cycle = 0,
+                               pioneer_drip_days_this_cycle    = 0
+                         WHERE id = $1::uuid
+                    """, _rk["user_id"])
             if updated and updated != "UPDATE 0":
                 logger.info("Monthly topup spend reset: %s", updated)
             if calls_reset and calls_reset != "UPDATE 0":

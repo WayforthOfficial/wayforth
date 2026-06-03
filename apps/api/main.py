@@ -1045,11 +1045,13 @@ async def lifespan(app: FastAPI):
             # pioneer_cooldown_until. Mirrored in 046_pioneer_drip.sql.
             await _mconn.execute("""
                 ALTER TABLE users
-                    ADD COLUMN IF NOT EXISTS pioneer_opt_in          BOOLEAN      DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS pioneer_opted_in_at     TIMESTAMPTZ  NULL,
-                    ADD COLUMN IF NOT EXISTS pioneer_opt_out_at      TIMESTAMPTZ  NULL,
-                    ADD COLUMN IF NOT EXISTS pioneer_cooldown_until  TIMESTAMPTZ  NULL,
-                    ADD COLUMN IF NOT EXISTS pioneer_last_drip_date  DATE         NULL,
+                    ADD COLUMN IF NOT EXISTS pioneer_opt_in                    BOOLEAN      DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS pioneer_opted_in_at               TIMESTAMPTZ  NULL,
+                    ADD COLUMN IF NOT EXISTS pioneer_opt_out_at                TIMESTAMPTZ  NULL,
+                    ADD COLUMN IF NOT EXISTS pioneer_cooldown_until            TIMESTAMPTZ  NULL,
+                    ADD COLUMN IF NOT EXISTS pioneer_last_drip_date            DATE         NULL,
+                    ADD COLUMN IF NOT EXISTS pioneer_drip_credits_this_cycle   INT          NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS pioneer_drip_days_this_cycle      INT          NOT NULL DEFAULT 0,
                     DROP COLUMN IF EXISTS pioneer_credits_awarded
             """)
             # 047: backfill pioneer_opted_in_at for users who were enrolled before
