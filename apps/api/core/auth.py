@@ -191,6 +191,23 @@ _ANON_DAILY_LIMIT = 3
 _TIER_RPM = {"free": 30, "builder": 120, "starter": 300, "pro": 600, "growth": 0, "enterprise": 500}
 
 
+def _anon_ip_subject(ip: str) -> str:
+    """Rate-limit subject for an anonymous caller (FINDING-010).
+
+    IPv4 → the address itself. IPv6 → the /64 network, because a single host is
+    routinely assigned a whole /64 and could otherwise rotate through 2^64
+    addresses to defeat a per-address daily cap.
+    """
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False).network_address)
+    return ip
+
+
 async def check_auth(request: Request) -> dict:
     """Unified auth dependency for /search and /query.
 
@@ -297,13 +314,35 @@ async def check_auth(request: Request) -> dict:
             "ip": ip,
         }
 
-    # Anonymous path
+    # Anonymous path — FINDING-010: Redis-backed daily counter, IPv6 keyed on
+    # the /64 prefix (a single host owns 2^64 addresses, so per-full-address
+    # keying was trivially bypassable), and fail CLOSED if Redis is unavailable
+    # (block anonymous access rather than allow unlimited via an in-memory dict).
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    anon_key = f"{ip}:{today}"
-    anon_dict = request.app.state.anon_searches
-    count = anon_dict.get(anon_key, 0)
+    anon_subject = _anon_ip_subject(ip)
+    redis_key = f"anon:{anon_subject}:{today}"
 
-    if count >= _ANON_DAILY_LIMIT:
+    from core.tier_gates import _get_redis
+    _redis = _get_redis()
+    if _redis is None:
+        raise _AuthError(503, {
+            "error": "anonymous_unavailable",
+            "message": "Anonymous search is temporarily unavailable. Sign up free for 100 searches/month.",
+            "signup_url": "https://wayforth.io/signup",
+        })
+    try:
+        count = await _redis.incr(redis_key)
+        if count == 1:
+            await _redis.expire(redis_key, 86400)
+    except Exception as exc:
+        logger.error("anon counter redis error — failing closed: %s", exc)
+        raise _AuthError(503, {
+            "error": "anonymous_unavailable",
+            "message": "Anonymous search is temporarily unavailable. Sign up free for 100 searches/month.",
+            "signup_url": "https://wayforth.io/signup",
+        })
+
+    if count > _ANON_DAILY_LIMIT:
         raise _AuthError(429, {
             "error": "free_limit_reached",
             "message": "You've used your 3 free searches. Sign up free for 100 searches/month — no credit card required.",
@@ -311,11 +350,8 @@ async def check_auth(request: Request) -> dict:
             "dashboard_url": "https://wayforth.io/dashboard",
         })
 
-    anon_dict[anon_key] = count + 1
-    request.state.rate_limit_tier = "anonymous"
     request.state.rate_limit_rpm = 30
-    request.state.ratelimit_remaining = max(0, _ANON_DAILY_LIMIT - (count + 1))
-    from datetime import timedelta as _td
+    request.state.ratelimit_remaining = max(0, _ANON_DAILY_LIMIT - count)
     _anon_now = datetime.now(timezone.utc)
     request.state.ratelimit_reset = int(
         _anon_now.replace(hour=23, minute=59, second=59, microsecond=0).timestamp()
@@ -324,7 +360,7 @@ async def check_auth(request: Request) -> dict:
         "authenticated": False,
         "tier": None,
         "key_id": None,
-        "anonymous_count": count + 1,
+        "anonymous_count": count,
         "ip": ip,
     }
 

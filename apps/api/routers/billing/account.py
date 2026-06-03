@@ -1595,3 +1595,174 @@ async def account_founding_status(request: Request, db=Depends(get_db)):
         "bonus_amount": 500,
         "cutoff_date": FOUNDING_MEMBER_CUTOFF,
     }
+
+
+# ── Self-serve account deletion (FINDING-016) ─────────────────────────────────
+
+_DELETION_GRACE = timedelta(hours=24)
+
+
+@router.delete("/account", tags=["Account"])
+@limiter.limit("3/minute")
+async def delete_account(request: Request, db=Depends(get_db)):
+    """Schedule the caller's account for deletion after a 24h grace window.
+
+    Requires an authenticated session/key AND an explicit confirmation in the
+    body: {"confirm": "DELETE"}. Access is revoked immediately (API keys made
+    inactive, sessions invalidated, Stripe subscription cancelled); the rows are
+    hard-deleted by the reaper once the grace window elapses. The user can undo
+    via POST /account/undelete during the window.
+    """
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or body.get("confirm") != "DELETE":
+        raise HTTPException(status_code=400, detail={
+            "error": "confirmation_required",
+            "message": 'Send {"confirm": "DELETE"} to schedule account deletion.',
+        })
+
+    scheduled_at = datetime.now(timezone.utc) + _DELETION_GRACE
+
+    # Mark for deletion and immediately revoke access.
+    async with db.transaction():
+        await db.execute(
+            "UPDATE users SET deletion_scheduled_at = $2 WHERE id = $1::uuid",
+            user_id, scheduled_at,
+        )
+        await db.execute(
+            "UPDATE api_keys SET active = FALSE WHERE user_id = $1::uuid",
+            user_id,
+        )
+
+    # Best-effort: cancel any Stripe subscription so billing stops during grace.
+    try:
+        sub_rows = await db.fetch(
+            "SELECT DISTINCT stripe_subscription_id FROM api_keys "
+            "WHERE user_id = $1::uuid AND stripe_subscription_id IS NOT NULL",
+            user_id,
+        )
+        if sub_rows:
+            import stripe
+            for r in sub_rows:
+                try:
+                    stripe.Subscription.delete(r["stripe_subscription_id"])
+                except Exception as _se:
+                    logger.warning("account delete: stripe cancel failed: %s", _se)
+    except Exception as _e:
+        logger.warning("account delete: stripe cancel sweep failed: %s", _e)
+
+    # Best-effort: invalidate any active browser session for this user.
+    try:
+        from core.session import get_request_session_token, revoke_session
+        redis = _get_redis()
+        tok = get_request_session_token(request)
+        if redis is not None and tok:
+            await revoke_session(redis, tok)
+    except Exception as _e:
+        logger.warning("account delete: session revoke failed: %s", _e)
+
+    # Confirmation email (best-effort).
+    try:
+        from core.email import send_email
+        import asyncio as _aio
+        if caller.get("email"):
+            _aio.create_task(send_email(caller["email"], "account_deletion_scheduled", {
+                "grace_hours": "24",
+                "scheduled_at": scheduled_at.isoformat(),
+            }))
+    except Exception as _e:
+        logger.warning("account delete: email failed: %s", _e)
+
+    logger.info("account_deletion_scheduled user=%s at=%s", user_id, scheduled_at.isoformat())
+    return {
+        "status": "deletion_scheduled",
+        "scheduled_at": scheduled_at.isoformat(),
+        "grace_period_hours": 24,
+        "message": "Your account is scheduled for deletion in 24 hours. "
+                   "POST /account/undelete to cancel.",
+    }
+
+
+@router.post("/account/undelete", tags=["Account"])
+@limiter.limit("5/minute")
+async def undelete_account(request: Request, db=Depends(get_db)):
+    """Cancel a pending account deletion within the grace window and reactivate keys."""
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    row = await db.fetchrow(
+        "SELECT deletion_scheduled_at FROM users WHERE id = $1::uuid", user_id,
+    )
+    if not row or row["deletion_scheduled_at"] is None:
+        raise HTTPException(status_code=400, detail={"error": "no_pending_deletion"})
+
+    async with db.transaction():
+        await db.execute(
+            "UPDATE users SET deletion_scheduled_at = NULL WHERE id = $1::uuid", user_id,
+        )
+        await db.execute(
+            "UPDATE api_keys SET active = TRUE WHERE user_id = $1::uuid", user_id,
+        )
+    logger.info("account_deletion_cancelled user=%s", user_id)
+    return {"status": "deletion_cancelled", "message": "Your account deletion has been cancelled."}
+
+
+async def _purge_user(db, user_id) -> None:
+    """Hard-delete one user and all dependents in FK-safe order, anonymizing
+    financial records (kept for aggregate accounting, PII stripped)."""
+    async with db.transaction():
+        # Anonymize financial history rather than delete (keep aggregates).
+        await db.execute(
+            "UPDATE credit_transactions SET description = 'redacted', api_endpoint = NULL, "
+            "agent_id = NULL WHERE user_id = $1::uuid",
+            user_id,
+        )
+        # Provider rows keyed by this user's emails (best-effort).
+        emails = await db.fetch(
+            "SELECT DISTINCT owner_email FROM api_keys WHERE user_id = $1::uuid AND owner_email IS NOT NULL",
+            user_id,
+        )
+        for er in emails:
+            prov = await db.fetchrow("SELECT id FROM providers WHERE email = $1", er["owner_email"])
+            if prov:
+                await db.execute("DELETE FROM provider_services WHERE provider_id = $1", prov["id"])
+                await db.execute("DELETE FROM provider_webhooks WHERE contact_email = $1", er["owner_email"])
+                await db.execute("DELETE FROM providers WHERE id = $1", prov["id"])
+        # Dependent rows that don't already cascade.
+        await db.execute("DELETE FROM api_keys WHERE user_id = $1::uuid", user_id)
+        # user_credits has ON DELETE CASCADE on users; deleting the user removes it.
+        await db.execute("DELETE FROM users WHERE id = $1::uuid", user_id)
+    logger.info("account_purged user=%s", user_id)
+
+
+async def _account_deletion_reaper():
+    """Background task: hard-delete accounts whose 24h grace window has elapsed."""
+    import asyncio as _aio
+    from main import app
+    await _aio.sleep(120)  # startup delay
+    while True:
+        try:
+            pool = getattr(app.state, "pool", None)
+            if pool:
+                async with pool.acquire() as db:
+                    due = await db.fetch(
+                        "SELECT id FROM users WHERE deletion_scheduled_at IS NOT NULL "
+                        "AND deletion_scheduled_at <= NOW() LIMIT 50",
+                    )
+                    for r in due:
+                        try:
+                            await _purge_user(db, r["id"])
+                        except Exception as _pe:
+                            logger.error("account reaper purge failed user=%s: %s", r["id"], _pe)
+        except Exception as _e:
+            logger.error("account deletion reaper error: %s", _e)
+        await _aio.sleep(3600)  # hourly

@@ -1102,8 +1102,9 @@ async def lifespan(app: FastAPI):
     probe_task = asyncio.create_task(_probe_managed_services_loop())
     boost_pause_task = asyncio.create_task(_boost_auto_pause_loop())
     webhook_retry_task = asyncio.create_task(_webhook_retry_loop())
-    from routers.billing.account import pioneer_drip_loop
+    from routers.billing.account import pioneer_drip_loop, _account_deletion_reaper
     pioneer_drip_task = asyncio.create_task(pioneer_drip_loop())
+    deletion_reaper_task = asyncio.create_task(_account_deletion_reaper())
     from workers.embed_queries import embed_queries_loop
     embed_queries_task = asyncio.create_task(embed_queries_loop())
     _get_redis()  # eagerly init so the rate-limiter log line appears at startup
