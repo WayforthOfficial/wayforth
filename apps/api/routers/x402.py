@@ -34,6 +34,12 @@ def _x402_disabled_response() -> JSONResponse:
     })
 
 
+# Chain id is env-driven so the same code can target Base mainnet (8453) or
+# Base Sepolia (84532) without a code change. Default = mainnet.
+_BASE_CHAIN_ID = os.environ.get("BASE_CHAIN_ID", "8453")
+_EIP155_NETWORK = f"eip155:{_BASE_CHAIN_ID}"
+
+
 # Replay prevention: store payment header hashes for 5 minutes.
 # NOTE: this dict is per-process. In a multi-worker / multi-instance deploy a
 # determined attacker could replay a payment by hitting a different worker.
@@ -260,7 +266,7 @@ async def x402_execute(request: Request):
             "error": "Payment required",
             "accepts": [{
                 "scheme": "exact",
-                "network": "eip155:8453",
+                "network": _EIP155_NETWORK,
                 "maxAmountRequired": str(micro),
                 "asset": USDC_BASE_ADDRESS,
                 "payTo": wayforth_wallet,
@@ -344,7 +350,7 @@ async def x402_execute(request: Request):
             "error": f"Payment of ${price_str} USDC required, received {received_usdc} USDC. Please retry.",
             "accepts": [{
                 "scheme": "exact",
-                "network": "eip155:8453",
+                "network": _EIP155_NETWORK,
                 "maxAmountRequired": str(micro),
                 "asset": USDC_BASE_ADDRESS,
                 "payTo": wayforth_wallet,
@@ -491,7 +497,7 @@ def _search_payment_required(wayforth_wallet: str, error: str = "Payment require
         },
         "accepts": [{
             "scheme": "exact",
-            "network": "eip155:8453",
+            "network": _EIP155_NETWORK,
             "amount": str(_X402_SEARCH_MICRO),
             "asset": _USDC_BASE_MAINNET,
             "payTo": wayforth_wallet,
@@ -583,7 +589,7 @@ async def x402_well_known():
             },
             "accepts": [{
                 "scheme": "exact",
-                "network": "eip155:8453",
+                "network": _EIP155_NETWORK,
                 "amount": str(_X402_SEARCH_MICRO),
                 "asset": _USDC_BASE_MAINNET,
                 "maxTimeoutSeconds": 300,

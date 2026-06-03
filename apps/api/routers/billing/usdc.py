@@ -53,7 +53,7 @@ async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amo
     reconciliation path passes expected_sender=None after manual review.
     """
     BASE_RPC_URL = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
-    USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    USDC_ADDRESS = os.environ.get("USDC_ADDRESS", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
     TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
     if not BASE_RPC_URL:
@@ -181,7 +181,7 @@ async def _usdc_payment_watcher():
         logger.info("_usdc_payment_watcher: USDC rail disabled — watcher not started")
         return
     BASE_RPC_URL = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
-    USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    USDC_ADDRESS = os.environ.get("USDC_ADDRESS", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
     TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
     while True:
