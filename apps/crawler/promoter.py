@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import math
 import os
+import re as _re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,6 +30,9 @@ DB_URL = (
 _ASYNCPG_URL = DB_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 _UPTIME_THRESHOLD = 90.0  # Phase 1: tighten to 99.0 post-seed
+
+WAYFORTH_API_KEY = os.environ.get("WAYFORTH_TEST_API_KEY", "")
+WAYFORTH_BASE_URL = os.environ.get("WAYFORTH_BASE_URL", "https://gateway.wayforth.io")
 
 
 async def probe_service(service: dict, *, _client: httpx.AsyncClient | None = None) -> dict:
@@ -239,6 +244,175 @@ async def bulk_demote_stale_tier2(db_conn: asyncpg.Connection) -> int:
     return count
 
 
+# ---------------------------------------------------------------------------
+# WRI v2 helpers (inlined from apps/api/wayforth_rank_v2.py — no cross-dir import)
+# ---------------------------------------------------------------------------
+
+def _payment_rate_score(payments: int, total_clicks: int) -> float:
+    if total_clicks == 0:
+        return 50.0
+    return min((payments / total_clicks) * 100.0, 100.0)
+
+
+def _volume_score(total_payments: int) -> float:
+    if total_payments == 0:
+        return 0.0
+    return min(math.log(total_payments + 1) / math.log(101) * 100.0, 100.0)
+
+
+def _recency_score(last_seen) -> float:
+    if last_seen is None:
+        return 20.0
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    delta = (datetime.now(timezone.utc) - last_seen).days
+    if delta <= 7:
+        return 100.0
+    if delta <= 30:
+        return 70.0
+    return 40.0
+
+
+def _compute_wri_v2(base_wri: float, payments: int, total_clicks: int, last_seen, boost: int = 0) -> float:
+    score = (
+        base_wri * 0.40
+        + _payment_rate_score(payments, total_clicks) * 0.35
+        + _volume_score(payments) * 0.15
+        + _recency_score(last_seen) * 0.10
+        + boost
+    )
+    return round(min(score, 100.0), 1)
+
+
+async def run_wri_recalculate(pool: asyncpg.Pool) -> None:
+    """Recompute services.wri_score for all services with search_analytics signal data.
+
+    Mirrors /admin/rank/recalculate. Must run after run_health_check so that
+    service_score_history has fresh base_wri values to read from.
+    """
+    def _slug(name: str) -> str:
+        return name.lower().replace(" ", "_").replace("-", "_").replace("/", "_")
+
+    def _norm(name: str) -> str:
+        return _re.sub(r'[^a-z0-9]', '', name.lower())
+
+    try:
+        async with pool.acquire() as conn:
+            signal_rows = await conn.fetch("""
+                SELECT
+                    clicked_slug,
+                    COUNT(*) AS total_clicks,
+                    SUM(CASE WHEN payment_followed THEN 1 ELSE 0 END) AS payments,
+                    MAX(created_at) AS last_seen
+                FROM search_analytics
+                WHERE clicked_slug IS NOT NULL
+                GROUP BY clicked_slug
+            """)
+            if not signal_rows:
+                logger.info("run_wri_recalculate: no signal data yet, skipping")
+                return
+            services = await conn.fetch("SELECT id, name, category, wri_score FROM services")
+
+        svc_map = {_slug(s["name"]): s for s in services}
+        norm_map = {_norm(s["name"]): s for s in services}
+
+        updated = 0
+        for sig in signal_rows:
+            key = sig["clicked_slug"].lower().replace("-", "_")
+            norm_key = _norm(sig["clicked_slug"])
+            svc = svc_map.get(key)
+            if not svc:
+                for k, s in svc_map.items():
+                    if k.startswith(key + "_"):
+                        svc = s
+                        break
+            if not svc:
+                svc = norm_map.get(norm_key)
+            if not svc:
+                for k, s in norm_map.items():
+                    if k.startswith(norm_key):
+                        svc = s
+                        break
+            if not svc:
+                continue
+
+            async with pool.acquire() as conn:
+                hist = await conn.fetchrow(
+                    "SELECT wri_score FROM service_score_history "
+                    "WHERE service_id = $1 ORDER BY recorded_at DESC LIMIT 1",
+                    str(svc["id"])
+                )
+                base_wri = float(hist["wri_score"]) if hist else 60.0
+                new_wri = _compute_wri_v2(
+                    base_wri,
+                    int(sig["payments"] or 0),
+                    int(sig["total_clicks"] or 0),
+                    sig["last_seen"],
+                )
+                await conn.execute(
+                    "UPDATE services SET wri_score = $1, wri_version = 'v2' WHERE id = $2",
+                    new_wri, svc["id"]
+                )
+            updated += 1
+
+        logger.info("run_wri_recalculate: updated %d services", updated)
+    except Exception as exc:
+        logger.error("run_wri_recalculate failed: %s", exc)
+
+
+# Representative search→execute pairs for daily signal seeding.
+# Covers inference/translation/search/data/web categories at low credit cost (~40 credits/run).
+# Heavy services (stability, elevenlabs) excluded — run feed_signal.py manually for full coverage.
+_SIGNAL_QUERIES: list[tuple[str, str, dict]] = [
+    ("fast llm inference", "groq",
+     {"messages": [{"role": "user", "content": "What is 2+2?"}], "model": "llama-3.3-70b-versatile"}),
+    ("fast chat inference", "mistral",
+     {"messages": [{"role": "user", "content": "Say hello"}], "model": "mistral-small-latest"}),
+    ("translate to spanish", "deepl", {"text": "Hello world", "target_lang": "ES"}),
+    ("web search", "serper", {"query": "best MCP servers 2026"}),
+    ("search the web", "tavily", {"query": "AI agent payment infrastructure", "max_results": 3}),
+    ("weather forecast", "openweather", {"city": "San Francisco"}),
+    ("read webpage", "jina", {"url": "https://wayforth.io"}),
+]
+
+
+async def run_signal_feed(api_key: str, base_url: str) -> None:
+    """Feed search→execute pairs to generate WayforthRank signal data.
+
+    Runs daily at 06:00 UTC only (gated in run_promotion_cycle).
+    Requires WAYFORTH_TEST_API_KEY and WAYFORTH_BASE_URL in the crawler service env.
+    """
+    headers = {"X-Wayforth-API-Key": api_key, "Content-Type": "application/json"}
+    ok = fail = 0
+    async with httpx.AsyncClient() as client:
+        for query, slug, params in _SIGNAL_QUERIES:
+            try:
+                await client.get(
+                    f"{base_url}/search",
+                    params={"q": query, "limit": 3},
+                    headers=headers,
+                    timeout=15.0,
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+            try:
+                r = await client.post(
+                    f"{base_url}/execute",
+                    headers=headers,
+                    json={"service_slug": slug, "params": params},
+                    timeout=30.0,
+                )
+                if r.status_code in (200, 201):
+                    ok += 1
+                else:
+                    fail += 1
+            except Exception:
+                fail += 1
+            await asyncio.sleep(2)
+    logger.info("run_signal_feed: %d ok, %d failed", ok, fail)
+
+
 async def run_promotion_cycle(db_url: str) -> None:
     """
     Main entry point. Run one full promotion cycle:
@@ -327,10 +501,15 @@ async def run_promotion_cycle(db_url: str) -> None:
     )
 
     await run_health_check(pool)
+    await run_wri_recalculate(pool)
     await build_service_graph(pool)
     logger.info("Service graph updated")
     await run_x402_monitor(pool)
     logger.info("x402 monitor complete")
+
+    if datetime.utcnow().hour == 6 and WAYFORTH_API_KEY:
+        logger.info("Daily signal feed: running (06:00 UTC tick)")
+        await run_signal_feed(WAYFORTH_API_KEY, WAYFORTH_BASE_URL)
 
     await pool.close()
 

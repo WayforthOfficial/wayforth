@@ -24,6 +24,8 @@ def compute_wri(service: dict, rank_score: float, popularity_boost: float = 0.0,
             pass  # non-critical: date parse failure skips the recency bonus
     if service.get("consecutive_failures", 1) == 0:
         score += 10
+    if service.get("payment_protocol") == "x402":
+        score += 5
     score += min(popularity_boost, 5.0)
     score += min(payment_boost, 8.0)
     return round(min(score, 100), 1)
