@@ -39,12 +39,18 @@ def _usdc_disabled_response():
     })
 
 
-async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amount_usdc: str) -> dict:
+async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amount_usdc: str,
+                             expected_sender: str | None = None) -> dict:
     """Verify a USDC transfer tx_hash on Base using eth_getTransactionReceipt.
 
-    Returns {valid, reason}. **Fails closed** on RPC error/timeout/misconfig — credits
-    are real money, so an unverifiable transaction is treated as not-paid. Set
-    BASE_RPC_URL to a reliable endpoint in production.
+    Returns {valid, reason, from_address}. **Fails closed** on RPC error/timeout/
+    misconfig — credits are real money, so an unverifiable transaction is treated
+    as not-paid. Set BASE_RPC_URL to a reliable endpoint in production.
+
+    FINDING-003: when `expected_sender` is supplied, the transfer's on-chain
+    sender (ERC-20 Transfer topics[1]) must match it, so a public tx hash can't
+    be claimed by an account other than the one that actually paid. The admin
+    reconciliation path passes expected_sender=None after manual review.
     """
     BASE_RPC_URL = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
     USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
@@ -79,12 +85,20 @@ async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amo
             topics = log.get("topics", [])
             if not topics or topics[0].lower() != TRANSFER_TOPIC.lower():
                 continue
-            # topics[2] is the `to` address (padded to 32 bytes)
+            # ERC-20 Transfer: topics[1]=from, topics[2]=to (each padded 32 bytes)
             if len(topics) < 3:
                 continue
+            from_addr = "0x" + topics[1][-40:]
             to_addr = "0x" + topics[2][-40:]
             if to_addr.lower() != expected_recipient.lower():
                 continue
+            # FINDING-003: bind to the declared payer when provided.
+            if expected_sender and from_addr.lower() != expected_sender.lower():
+                return {
+                    "valid": False,
+                    "reason": "payer_mismatch",
+                    "from_address": from_addr,
+                }
             # Amount is in log data (USDC has 6 decimals). Tightened from 2% to 0.5%
             # tolerance — gas variance does not apply to USDC.transferWithAuthorization
             # value; 2% was a footgun that allowed silent underpayment at scale.
@@ -93,10 +107,12 @@ async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amo
                 amount_usdc = amount_micro / 1_000_000
                 expected = float(expected_amount_usdc)
                 if abs(amount_usdc - expected) / expected <= 0.005:
-                    return {"valid": True, "reason": "confirmed", "amount_usdc": str(amount_usdc)}
+                    return {"valid": True, "reason": "confirmed",
+                            "amount_usdc": str(amount_usdc), "from_address": from_addr}
                 return {
                     "valid": False,
                     "reason": f"amount_mismatch: expected ${expected:.6f}, received ${amount_usdc:.6f}",
+                    "from_address": from_addr,
                 }
             except (ValueError, ZeroDivisionError):
                 continue
@@ -168,7 +184,6 @@ async def _usdc_payment_watcher():
     USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
     TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
-    last_block = "latest"
     while True:
         try:
             await asyncio.sleep(30)
@@ -177,25 +192,30 @@ async def _usdc_payment_watcher():
                 continue
 
             async with app.state.pool.acquire() as db:
+                # FINDING-002: only consider unconsumed pending rows that carry a
+                # declared payer address; amount-only matching is no longer enough.
                 pending = await db.fetch(
-                    "SELECT id, reference_id, plan, amount_usdc, api_key_id "
-                    "FROM usdc_payments WHERE status = 'pending' AND expires_at > NOW()"
+                    "SELECT id, reference_id, plan, amount_usdc, api_key_id, payer_address "
+                    "FROM usdc_payments "
+                    "WHERE status = 'pending' AND consumed = FALSE "
+                    "  AND expires_at > NOW() AND payer_address IS NOT NULL"
                 )
-                # Mark expired rows
                 await db.execute(
                     "UPDATE usdc_payments SET status = 'expired' "
                     "WHERE status = 'pending' AND expires_at <= NOW()"
                 )
+                # FINDING-002: persisted scan cursor — never re-scan from genesis.
+                cursor = await db.fetchval("SELECT last_block FROM usdc_scan_state WHERE id = 1") or 0
 
             if not pending:
                 continue
 
-            # Fetch Transfer events to our wallet
             padded_wallet = "0x" + "0" * 24 + wallet[2:].lower()
+            from_block = hex(int(cursor)) if cursor else "0x0"
             payload = {
                 "jsonrpc": "2.0", "id": 1, "method": "eth_getLogs",
                 "params": [{
-                    "fromBlock": last_block if last_block != "latest" else "0x1",
+                    "fromBlock": from_block,
                     "toBlock": "latest",
                     "address": USDC_ADDRESS,
                     "topics": [TRANSFER_TOPIC, None, padded_wallet],
@@ -207,22 +227,39 @@ async def _usdc_payment_watcher():
                 continue
 
             logs = r.json().get("result", [])
-            last_block = "latest"
+            max_seen = int(cursor)
 
             for log in logs:
                 tx_hash = log.get("transactionHash", "")
-                # Amount is the last 32 bytes of data field (USDC has 6 decimals)
-                data = log.get("data", "0x")
                 try:
-                    amount_micro = int(data, 16)
-                    amount_usdc = amount_micro / 1_000_000
+                    blk = int(log.get("blockNumber", "0x0"), 16)
+                    max_seen = max(max_seen, blk)
+                except ValueError:
+                    pass
+                topics = log.get("topics") or []
+                sender = ("0x" + topics[1][-40:]).lower() if len(topics) >= 2 and topics[1] else ""
+                try:
+                    amount_usdc = int(log.get("data", "0x"), 16) / 1_000_000
                 except ValueError:
                     continue
 
                 for row in pending:
                     expected = float(row["amount_usdc"])
-                    # Match within 1%
-                    if abs(amount_usdc - expected) / expected <= 0.01:
+                    # FINDING-002/003: require amount AND payer match, then
+                    # atomically claim an unconsumed row, binding THIS tx hash to
+                    # it so the same transfer can never credit a second row.
+                    if (abs(amount_usdc - expected) / expected <= 0.01
+                            and sender
+                            and sender == (row["payer_address"] or "").lower()):
+                        async with app.state.pool.acquire() as cdb:
+                            claimed = await cdb.fetchval(
+                                "UPDATE usdc_payments SET consumed = TRUE, tx_hash = $1 "
+                                "WHERE id = $2 AND consumed = FALSE AND tx_hash IS NULL "
+                                "RETURNING id",
+                                tx_hash, row["id"],
+                            )
+                        if not claimed:
+                            continue
                         plan_def = PLANS.get(row["plan"], PLANS["free"])
                         base_credits = plan_def["monthly_credits"]
                         bonus = math.floor(base_credits * 0.05)
@@ -232,11 +269,19 @@ async def _usdc_payment_watcher():
                             tx_hash,
                             row["plan"],
                             base_credits + bonus,
-                            wallet,  # payer address from log topics[1]
+                            row["payer_address"],
                             str(row["api_key_id"]),
                             bonus,
                         )
                         break
+
+            # Advance the persisted cursor so the next poll starts after the last
+            # block we've already processed.
+            async with app.state.pool.acquire() as db:
+                await db.execute(
+                    "UPDATE usdc_scan_state SET last_block = $1, updated_at = NOW() WHERE id = 1",
+                    max_seen,
+                )
 
         except Exception as _e:
             logger.error("_usdc_payment_watcher error: %s", _e)
@@ -320,6 +365,14 @@ async def subscribe_usdc(request: Request, db=Depends(get_db)):
             "error": f"Invalid plan '{plan}'. Choose from: {', '.join(paid_plans)}"
         })
 
+    # FINDING-003: the paying wallet must be declared up front so the watcher can
+    # bind the inbound transfer to this subscription (no amount-only matching).
+    if not (wallet_address.startswith("0x") and len(wallet_address) == 42):
+        raise HTTPException(status_code=400, detail={
+            "error": "wallet_address_required",
+            "message": "wallet_address (the wallet you will pay FROM, 0x… 42 chars) is required.",
+        })
+
     plan_def = PLANS[plan]
     reference_id = f"sub_usdc_{secrets.token_hex(8)}"
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
@@ -329,10 +382,10 @@ async def subscribe_usdc(request: Request, db=Depends(get_db)):
 
     await db.execute("""
         INSERT INTO usdc_payments
-            (reference_id, api_key_id, plan, amount_usdc, wallet_address, expires_at)
-        VALUES ($1, $2::uuid, $3, $4, $5, $6)
+            (reference_id, api_key_id, plan, amount_usdc, wallet_address, payer_address, expires_at)
+        VALUES ($1, $2::uuid, $3, $4, $5, $5, $6)
     """, reference_id, str(key_record["id"]), plan, float(amount_usdc),
-        wallet_address or None, expires_at)
+        wallet_address, expires_at)
 
     return {
         "payment_address": wayforth_wallet,
@@ -365,11 +418,16 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
     api_key = body.get("api_key", "").strip()
     tx_hash = body.get("tx_hash", "").strip()
     amount_usdc_str = body.get("amount_usdc", "").strip()
+    payer_address = body.get("payer_address", "").strip()
 
-    if not api_key or not tx_hash or not amount_usdc_str:
+    if not api_key or not tx_hash or not amount_usdc_str or not payer_address:
         raise HTTPException(status_code=400, detail={
-            "error": "api_key, tx_hash, and amount_usdc are required"
+            "error": "api_key, tx_hash, amount_usdc, and payer_address are required"
         })
+    # FINDING-003: the declared payer must match the on-chain sender so a public
+    # tx hash cannot be claimed by an account other than the one that paid.
+    if not (payer_address.startswith("0x") and len(payer_address) == 42):
+        raise HTTPException(status_code=400, detail={"error": "invalid_payer_address"})
 
     try:
         amount_usdc_float = float(amount_usdc_str)
@@ -460,8 +518,9 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
             "message": "This transaction hash has already been applied to a top-up.",
         })
 
-    # 7. Verify tx_hash on Base
-    verify = await _verify_tx_on_base(tx_hash, wayforth_wallet, amount_usdc_str)
+    # 7. Verify tx_hash on Base — payer must match the declared wallet.
+    verify = await _verify_tx_on_base(tx_hash, wayforth_wallet, amount_usdc_str,
+                                      expected_sender=payer_address)
     if not verify["valid"]:
         raise HTTPException(status_code=402, detail={
             "error": "payment_verification_failed",
@@ -507,9 +566,10 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
         # Record payment for replay protection and audit
         await db.execute("""
             INSERT INTO usdc_payments
-                (reference_id, api_key_id, plan, amount_usdc, tx_hash, status, bonus_credits, expires_at)
-            VALUES ($1, $2::uuid, 'topup', $3, $4, 'confirmed', $5, NOW() + INTERVAL '10 years')
-        """, reference_id, str(key_record["id"]), amount_usdc_float, tx_hash, topup_bonus)
+                (reference_id, api_key_id, plan, amount_usdc, tx_hash, payer_address,
+                 status, consumed, bonus_credits, expires_at)
+            VALUES ($1, $2::uuid, 'topup', $3, $4, $5, 'confirmed', TRUE, $6, NOW() + INTERVAL '10 years')
+        """, reference_id, str(key_record["id"]), amount_usdc_float, tx_hash, payer_address, topup_bonus)
 
     asyncio.create_task(_maybe_grant_founding_bonus(db, str(key_record["user_id"])))
 

@@ -13,6 +13,7 @@ from core.rate_limit import limiter
 from .rank import router as rank_router
 from .services import router as services_router
 from .dashboard import router as dashboard_router
+from .usdc import router as usdc_router
 
 logger = logging.getLogger("wayforth")
 
@@ -284,3 +285,4 @@ async def admin_page():
 router.include_router(rank_router)
 router.include_router(services_router)
 router.include_router(dashboard_router)
+router.include_router(usdc_router)
