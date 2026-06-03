@@ -4,6 +4,25 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.4 — Integrity Patch — 2026-06-03
+
+### Credits
+- DB-level CHECK constraint: `credits_balance >= 0`
+- Fixed multi-key credit replenishment vector — users with multiple API keys were eligible for N credit resets per month; now gated to once per calendar month per user regardless of key count
+
+### WayforthRank
+- Fixed pioneer `signal_weight` discount — pioneer-routed payment conversions now correctly weighted at 0.75× in both ranking paths (`ranker_client.py` and `search.py`)
+- Restored x402 +5 bonus to v1 inline formula in `services/wayforthrank.py` (had silently drifted from `ranker.py`)
+- `/admin/rank/recalculate` endpoint fixed (was 500 in production — `wayforth_rank_v2.py` is gitignored and not deployed in API container); formula inlined
+- `/admin/rank/recalculate` now runs automatically every 6h after health monitoring completes (previously manual-only; `services.wri_score` was stale by default)
+- `feed_signal.py` now actually scheduled at 06:00 UTC daily (was documented but never wired)
+
+### Security
+- Production database password rotated
+- 25 orphaned null-user-id API keys removed
+
+---
+
 ## v0.8.3 — Calibration — 2026-05-29
 
 This is a feature + correctness release. It corrects the credit model (v0.8.2 quotas were wrong), fixes a data integrity bug in credit transaction logging, adds annual billing for providers, and completes the Pioneer Program routing instrumentation.
