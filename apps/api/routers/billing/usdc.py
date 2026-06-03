@@ -183,6 +183,7 @@ async def _usdc_payment_watcher():
     BASE_RPC_URL = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
     USDC_ADDRESS = os.environ.get("USDC_ADDRESS", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
     TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    logger.info("USDC watcher started (rpc=%s usdc=%s)", BASE_RPC_URL, USDC_ADDRESS)
 
     while True:
         try:
@@ -207,11 +208,30 @@ async def _usdc_payment_watcher():
                 # FINDING-002: persisted scan cursor — never re-scan from genesis.
                 cursor = await db.fetchval("SELECT last_block FROM usdc_scan_state WHERE id = 1") or 0
 
+            # Seed the cursor from the current head on first run. Scanning
+            # eth_getLogs from genesis (0x0) to latest is rejected by public RPCs
+            # for being too wide, so an uninitialised cursor would never progress.
+            if not cursor:
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        br = await client.post(BASE_RPC_URL, json={
+                            "jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []})
+                    head = int(br.json()["result"], 16)
+                    async with app.state.pool.acquire() as db:
+                        await db.execute(
+                            "UPDATE usdc_scan_state SET last_block = $1, updated_at = NOW() WHERE id = 1",
+                            head,
+                        )
+                    logger.info("USDC watcher: seeded scan cursor at block %d", head)
+                except Exception as _seed_err:
+                    logger.warning("USDC watcher: cursor seed failed: %s", _seed_err)
+                continue
+
             if not pending:
                 continue
 
             padded_wallet = "0x" + "0" * 24 + wallet[2:].lower()
-            from_block = hex(int(cursor)) if cursor else "0x0"
+            from_block = hex(int(cursor))
             payload = {
                 "jsonrpc": "2.0", "id": 1, "method": "eth_getLogs",
                 "params": [{
