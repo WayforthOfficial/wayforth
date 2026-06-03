@@ -46,7 +46,7 @@ async def rank_services(query: str, candidates: list[dict], db=None) -> list[dic
                 popularity_signals = {r['top_result_id']: (r['c'] / max_c) * 5.0 for r in rows}
 
             pay_rows = await db.fetch("""
-                SELECT service_id::text, COUNT(*) as c
+                SELECT service_id::text, SUM(COALESCE(signal_weight, 1.0)) as c
                 FROM search_outcomes
                 WHERE outcome_type = 'payment_initiated'
                 AND created_at > NOW() - INTERVAL '7 days'

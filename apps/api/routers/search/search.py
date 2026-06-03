@@ -320,7 +320,7 @@ async def search_services(
         popular_ids = {str(r["top_result_id"]): (r["c"] / max_count) * 5 for r in pop_rows}
 
         pay_rows = await db.fetch("""
-            SELECT service_id, COUNT(*) as c
+            SELECT service_id, SUM(COALESCE(signal_weight, 1.0)) as c
             FROM search_outcomes
             WHERE outcome_type = 'payment_initiated'
               AND created_at > NOW() - INTERVAL '7 days'
