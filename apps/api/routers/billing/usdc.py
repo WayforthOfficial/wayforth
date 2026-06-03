@@ -137,7 +137,7 @@ async def _activate_usdc_subscription(pool, reference_id: str, tx_hash: str,
             await db.execute("""
                 UPDATE usdc_payments
                 SET status = 'confirmed', tx_hash = $1, confirmed_at = NOW(),
-                    bonus_credits = $3
+                    bonus_credits = $3, updated_at = NOW()
                 WHERE reference_id = $2
             """, tx_hash, reference_id, bonus_credits)
             await db.execute("""
@@ -202,7 +202,7 @@ async def _usdc_payment_watcher():
                     "  AND expires_at > NOW() AND payer_address IS NOT NULL"
                 )
                 await db.execute(
-                    "UPDATE usdc_payments SET status = 'expired' "
+                    "UPDATE usdc_payments SET status = 'expired', updated_at = NOW() "
                     "WHERE status = 'pending' AND expires_at <= NOW()"
                 )
                 # FINDING-002: persisted scan cursor — never re-scan from genesis.
@@ -273,7 +273,7 @@ async def _usdc_payment_watcher():
                             and sender == (row["payer_address"] or "").lower()):
                         async with app.state.pool.acquire() as cdb:
                             claimed = await cdb.fetchval(
-                                "UPDATE usdc_payments SET consumed = TRUE, tx_hash = $1 "
+                                "UPDATE usdc_payments SET consumed = TRUE, tx_hash = $1, updated_at = NOW() "
                                 "WHERE id = $2 AND consumed = FALSE AND tx_hash IS NULL "
                                 "RETURNING id",
                                 tx_hash, row["id"],
