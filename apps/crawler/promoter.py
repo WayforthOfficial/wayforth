@@ -244,8 +244,8 @@ async def bulk_demote_stale_tier2(db_conn: asyncpg.Connection) -> int:
     return count
 
 
-# ---------------------------------------------------------------------------
-# WRI v2 helpers (inlined from apps/api/wayforth_rank_v2.py — no cross-dir import)
+# Inlined from wayforth_rank_v2.py (private wayforth-rank repo,
+# gitignored here). If the v2 formula changes, update this too.
 # ---------------------------------------------------------------------------
 
 def _payment_rate_score(payments: int, total_clicks: int) -> float:
