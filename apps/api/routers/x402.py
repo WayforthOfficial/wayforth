@@ -15,6 +15,25 @@ from routers.agent import _upsert_x402_identity
 
 logger = logging.getLogger("wayforth")
 
+# ── Rail kill-switch (v0.8.5 security hardening) ──────────────────────────────
+# The x402 rail performs NO real on-chain settlement (FINDING-001): verification
+# is pure client-side JSON parsing, so a forged X-PAYMENT header yields free
+# managed-service execution. The rail stays HARD-DISABLED until EIP-3009
+# settlement is wired via a funded CDP account (see Phase 3 TODO in
+# _verify_x402_payment). Default off; requires an explicit opt-in env to enable.
+X402_RAIL_ENABLED = os.environ.get("WAYFORTH_X402_ENABLED", "false").lower() == "true"
+
+
+def _x402_disabled_response() -> JSONResponse:
+    return JSONResponse(status_code=503, content={
+        "error": "x402_rail_disabled",
+        "message": (
+            "The x402 payment rail is temporarily disabled pending on-chain "
+            "settlement implementation. Use card or USDC subscription billing."
+        ),
+    })
+
+
 # Replay prevention: store payment header hashes for 5 minutes.
 # NOTE: this dict is per-process. In a multi-worker / multi-instance deploy a
 # determined attacker could replay a payment by hitting a different worker.
@@ -175,6 +194,10 @@ async def x402_execute(request):
     from fastapi import HTTPException
     from services.x402_pricing import X402_PRICES_USDC, to_micro_usdc
     from services.managed import ADAPTERS, SERVICE_CONFIGS, SERVICE_ALTERNATIVES, SERVICE_DISPLAY_NAMES
+
+    # FINDING-001: rail hard-disabled until real settlement lands.
+    if not X402_RAIL_ENABLED:
+        return _x402_disabled_response()
 
     wayforth_wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
     if not wayforth_wallet:
@@ -564,6 +587,10 @@ async def x402_search(
     import hashlib as _hs
     import html as _html
     from fastapi import HTTPException
+
+    # FINDING-001: rail hard-disabled until real settlement lands.
+    if not X402_RAIL_ENABLED:
+        return _x402_disabled_response()
 
     wayforth_wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
     if not wayforth_wallet:

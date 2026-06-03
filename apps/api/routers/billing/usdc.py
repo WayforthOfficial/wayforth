@@ -20,6 +20,24 @@ logger = logging.getLogger("wayforth")
 
 router = APIRouter()
 
+# ── Rail kill-switch (v0.8.5 security hardening) ──────────────────────────────
+# The USDC watcher matched transfers by amount only, re-scanned from genesis,
+# and had no tx dedup (FINDING-002); top-up did not bind the payer (FINDING-003).
+# Both are exploitable against Base MAINNET. The rail stays HARD-DISABLED until
+# the Phase 2 payer-binding + block-advancement + dedup work is deployed and
+# verified. Default off; requires explicit opt-in env to enable.
+USDC_RAIL_ENABLED = os.environ.get("WAYFORTH_USDC_ENABLED", "false").lower() == "true"
+
+
+def _usdc_disabled_response():
+    raise HTTPException(status_code=503, detail={
+        "error": "usdc_rail_disabled",
+        "message": (
+            "USDC billing is temporarily disabled pending a payment-verification "
+            "upgrade. Use card billing for now."
+        ),
+    })
+
 
 async def _verify_tx_on_base(tx_hash: str, expected_recipient: str, expected_amount_usdc: str) -> dict:
     """Verify a USDC transfer tx_hash on Base using eth_getTransactionReceipt.
@@ -143,6 +161,9 @@ async def _activate_usdc_subscription(pool, reference_id: str, tx_hash: str,
 async def _usdc_payment_watcher():
     """Background task: poll Base chain for USDC transfers to WAYFORTH_BASE_WALLET."""
     from main import app
+    if not USDC_RAIL_ENABLED:
+        logger.info("_usdc_payment_watcher: USDC rail disabled — watcher not started")
+        return
     BASE_RPC_URL = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
     USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
     TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -224,6 +245,9 @@ async def _usdc_payment_watcher():
 async def _usdc_renewal_reminder():
     """Background task: fire renewal_due webhooks 7 days before USDC subscription expiry."""
     from main import app
+    if not USDC_RAIL_ENABLED:
+        logger.info("_usdc_renewal_reminder: USDC rail disabled — reminder not started")
+        return
     while True:
         try:
             await asyncio.sleep(3600)  # check hourly
@@ -266,6 +290,8 @@ async def subscribe_usdc(request: Request, db=Depends(get_db)):
     Returns payment instructions. A background watcher confirms the Transfer event
     and activates the subscription automatically.
     """
+    if not USDC_RAIL_ENABLED:
+        _usdc_disabled_response()
     wayforth_wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
     if not wayforth_wallet:
         raise HTTPException(status_code=503, detail={
@@ -333,6 +359,8 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
     Requires billing_permission = 'auto_topup' or 'full' on the API key.
     Enforces monthly_topup_limit_usd. Replay-protected via usdc_payments tx_hash index.
     """
+    if not USDC_RAIL_ENABLED:
+        _usdc_disabled_response()
     body = await request.json()
     api_key = body.get("api_key", "").strip()
     tx_hash = body.get("tx_hash", "").strip()
