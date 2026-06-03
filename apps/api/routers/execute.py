@@ -1448,9 +1448,10 @@ async def _execute_one(call: dict, pool, user_id: str, api_key_id: str, request_
                 "detail": detail, "result": None, "execution_ms": 0}
 
     async with pool.acquire() as call_db:
-        success, balance_after = await check_and_deduct_credits(
+        success, balance_after, _batch_tx_id = await check_and_deduct_credits(
             call_db, user_id, credit_cost, "/execute/batch",
             service_id=slug, tx_type="execution", api_key_id=api_key_id,
+            return_tx_id=True,
         )
 
     if not success:
@@ -1476,6 +1477,12 @@ async def _execute_one(call: dict, pool, user_id: str, api_key_id: str, request_
             async with pool.acquire() as refund_db:
                 new_bal = await _do_refund(refund_db, user_id, credit_cost, slug, error_msg, "/execute/batch", balance_after,
                                            _mk_refund_key(request_id, slug, "batch", idx))
+            # FIX 2: record the failure_code on the original execution row so the
+            # batch path builds real failure signal like the other three paths.
+            asyncio.create_task(_patch_tx_signals(
+                pool, _batch_tx_id,
+                failure_code=_classify_failure(None, error_msg),
+            ))
             return {"slug": slug, "status": "error", "error": error_msg,
                     "refunded": True, "credits_restored": credit_cost,
                     "result": None, "execution_ms": execution_ms}
