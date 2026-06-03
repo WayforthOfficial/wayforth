@@ -36,27 +36,47 @@ _FORBIDDEN_SUFFIXES = (
 
 
 def _is_private_ip(ip_str: str) -> bool:
-    """True if the parsed IP is private/loopback/link-local/multicast/unspecified."""
+    """True if the parsed IP is private/loopback/link-local/multicast/unspecified.
+
+    FINDING-008: also unwraps IPv4-mapped / IPv4-compatible IPv6 (e.g.
+    ::ffff:169.254.169.254) and checks the embedded v4 address, which some
+    stacks would otherwise route to the v4 target while `.is_private` on the v6
+    form returns False.
+    """
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
-        return False
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_unspecified
-        or ip.is_reserved
-    )
+        return True  # unparseable → treat as unsafe (fail closed)
+
+    def _flagged(a) -> bool:
+        return (
+            a.is_private or a.is_loopback or a.is_link_local
+            or a.is_multicast or a.is_unspecified or a.is_reserved
+        )
+
+    if _flagged(ip):
+        return True
+    # Unwrap embedded IPv4 (mapped or compat) and re-check.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None and _flagged(mapped):
+        return True
+    compat = getattr(ip, "sixtofour", None)
+    if compat is not None and _flagged(compat):
+        return True
+    return False
 
 
-def validate_external_url(url: str, field_name: str = "url") -> None:
-    """Raise HTTPException(422) if `url` is not a safe external https:// target.
+def validate_external_url(url: str, field_name: str = "url") -> list[str]:
+    """Validate `url` and return the list of resolved public IPs.
 
+    Raises HTTPException(422) if `url` is not a safe external https:// target.
     Blocks: non-https schemes, localhost/internal hostnames, hostnames that
-    resolve to private/loopback/link-local IPs (incl. IPv6), and cloud-metadata
-    endpoints (169.254.169.254, fd00:ec2::254).
+    resolve to private/loopback/link-local IPs (incl. IPv4-mapped IPv6), and
+    cloud-metadata endpoints.
+
+    FINDING-008: returns the validated IP set so the caller can pin delivery to
+    the same address it validated, rather than letting httpx re-resolve (and
+    potentially rebind to an internal IP) at connect time.
     """
     if not url:
         raise HTTPException(status_code=422, detail={
@@ -101,6 +121,7 @@ def validate_external_url(url: str, field_name: str = "url") -> None:
             "message": f"{field_name} hostname does not resolve",
         })
 
+    resolved_ips: list[str] = []
     for info in infos:
         sockaddr = info[4]
         resolved_ip = sockaddr[0] if sockaddr else ""
@@ -109,3 +130,19 @@ def validate_external_url(url: str, field_name: str = "url") -> None:
                 "error": "internal_target_forbidden",
                 "message": "Hostname resolves to a private or loopback address.",
             })
+        if resolved_ip:
+            resolved_ips.append(resolved_ip)
+    return resolved_ips
+
+
+def assert_still_external(url: str, field_name: str = "url") -> None:
+    """Re-validate immediately before connecting (FINDING-008).
+
+    Webhook delivery calls this right before the httpx request so that a
+    hostname which has rebound to an internal IP since registration is rejected
+    at the last possible moment. This does not fully close the sub-millisecond
+    gap between this resolution and httpx's own — full closure requires pinning
+    the socket to the returned IP — but it rejects any rebind that has settled
+    by delivery time, which is the realistic attack.
+    """
+    validate_external_url(url, field_name=field_name)

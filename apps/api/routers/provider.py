@@ -178,7 +178,14 @@ async def provider_register(request: Request, db=Depends(get_db)):
     if len(password) < 8:
         raise HTTPException(status_code=422, detail={"error": "password must be at least 8 characters"})
 
-    existing = await db.fetchval("SELECT id FROM providers WHERE email = $1", email)
+    # FINDING-011: dedup on canonical email so alias variants can't farm
+    # multiple provider accounts (each of which gets its own Launch Boost).
+    from core.auth import canonicalize_email
+    email_canon = canonicalize_email(email)
+    existing = await db.fetchval(
+        "SELECT id FROM providers WHERE email = $1 OR email_canonical = $2",
+        email, email_canon,
+    )
     if existing:
         raise HTTPException(status_code=409, detail={"error": "email_already_registered"})
 
@@ -192,11 +199,11 @@ async def provider_register(request: Request, db=Depends(get_db)):
     provider_id = await db.fetchval("""
         INSERT INTO providers (
             company_name, email, password_hash,
-            email_verification_token, email_verification_sent_at
+            email_verification_token, email_verification_sent_at, email_canonical
         )
-        VALUES ($1, $2, $3, $4, NOW())
+        VALUES ($1, $2, $3, $4, NOW(), $5)
         RETURNING id
-    """, company_name, email, password_hash, email_verify_token)
+    """, company_name, email, password_hash, email_verify_token, email_canon)
 
     await db.execute("""
         INSERT INTO provider_services (provider_id, service_slug, service_name, verification_code)

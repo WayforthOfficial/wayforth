@@ -618,7 +618,13 @@ async def x402_search(
             )
         payer_address = verify.get("from_address")
     except asyncio.TimeoutError:
-        logger.warning("x402/search payment verification timeout — accepting optimistically")
+        # FINDING-004: fail closed on verification timeout — never serve unpaid.
+        # Mirrors the /x402/execute behaviour exactly.
+        logger.warning("x402/search payment verification timeout — refusing (504)")
+        return JSONResponse(status_code=504, content={
+            "error": "payment_verification_timeout",
+            "message": "Payment verification timed out. Please retry; no results were served.",
+        })
 
     # v0.8.0 Item 1: durable replay protection via x402_settlements.UNIQUE(payment_hash).
     # service_slug sentinel "_x402_search" distinguishes search settlements from per-service ones.

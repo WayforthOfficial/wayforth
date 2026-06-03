@@ -407,9 +407,15 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
     now_utc = datetime.now(timezone.utc)
     reset_at = key_record["monthly_topup_reset_at"]
     if reset_at and now_utc >= reset_at:
-        next_reset = reset_at + timedelta(days=32)
-        # Advance to start of next calendar month
-        next_reset = next_reset.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # FINDING-014: advance to the first of NEXT month relative to now.
+        # The old "reset_at + 32 days then day=1" skipped a month from a
+        # late-month anchor (e.g. Jan-31 + 32d = Mar, skipping February).
+        if now_utc.month == 12:
+            next_reset = now_utc.replace(year=now_utc.year + 1, month=1, day=1,
+                                         hour=0, minute=0, second=0, microsecond=0)
+        else:
+            next_reset = now_utc.replace(month=now_utc.month + 1, day=1,
+                                         hour=0, minute=0, second=0, microsecond=0)
         await db.execute("""
             UPDATE api_keys
             SET monthly_topup_spent_usd = 0,

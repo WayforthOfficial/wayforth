@@ -133,9 +133,21 @@ async def get_jwks() -> list:
     return _jwks_cache["keys"]
 
 
+# Issuer is env-overridable so a misconfiguration can be corrected without a
+# redeploy. Default matches the Supabase project that serves the JWKS above.
+_SUPABASE_ISSUER = os.environ.get(
+    "SUPABASE_JWT_ISSUER", "https://oafqjvdvamcygiqbnoby.supabase.co/auth/v1"
+)
+ALLOWED_JWT_ALGORITHMS = ["RS256", "ES256"]
+
+
 async def verify_supabase_jwt(token: str) -> dict:
     """Asymmetric verification via Supabase JWKS. Supports RS256 and ES256.
-    Checks signature, expiry, and audience.
+    Checks signature, expiry, audience, and issuer.
+
+    FINDING-007: the algorithm is pinned to ALLOWED_JWT_ALGORITHMS and taken
+    ONLY from the (signed-over) JWKS key — never from the unverified token
+    header — to defeat RS→HS algorithm-confusion. The issuer is also pinned.
 
     S10 (v0.7.8): async to let JWKS refresh happen without blocking.
     """
@@ -146,7 +158,11 @@ async def verify_supabase_jwt(token: str) -> dict:
     key = next((k for k in keys if k["kid"] == kid), None)
     if not key:
         raise ValueError("No matching JWKS key found")
-    alg = key.get("alg", header.get("alg", "RS256"))
+    # Algorithm comes from the JWKS key only. Default to RS256 if the key omits
+    # it; never fall back to the attacker-controlled token header.
+    alg = key.get("alg", "RS256")
+    if alg not in ALLOWED_JWT_ALGORITHMS:
+        raise ValueError(f"Disallowed JWT algorithm: {alg}")
     if alg.startswith("ES"):
         public_key = ECAlgorithm.from_jwk(key)
     else:
@@ -154,8 +170,10 @@ async def verify_supabase_jwt(token: str) -> dict:
     return jwt.decode(
         token,
         public_key,
-        algorithms=[alg],
+        algorithms=ALLOWED_JWT_ALGORITHMS,
         audience="authenticated",
+        issuer=_SUPABASE_ISSUER,
+        options={"require": ["exp", "iat"]},
     )
 
 
@@ -432,6 +450,26 @@ async def _load_dashboard_user(db, user_id: str) -> dict:
         "monthly_calls_reset_at": row["monthly_calls_reset_at"],
         "email": row["email"],
     }
+
+
+def canonicalize_email(email: str) -> str:
+    """Return a canonical form of `email` for uniqueness checks (FINDING-011).
+
+    Collapses provider-side aliases that resolve to the same human mailbox so
+    `user+1@gmail.com`, `user+2@gmail.com`, and `u.s.e.r@gmail.com` are treated
+    as one identity for signup / Launch-Boost eligibility. The ORIGINAL address
+    is still stored and displayed; only the canonical form is compared.
+    """
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        return email
+    local, domain = email.split("@", 1)
+    # Strip +suffix (gmail, outlook, fastmail, proton, many others honour this).
+    local = local.split("+", 1)[0]
+    # Gmail/Googlemail ignore dots in the local part.
+    if domain in ("gmail.com", "googlemail.com"):
+        local = local.replace(".", "")
+    return f"{local}@{domain}"
 
 
 _AGENT_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')

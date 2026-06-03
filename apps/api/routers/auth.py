@@ -341,7 +341,14 @@ async def register_user(request: Request, db=Depends(get_db)):
     if local in _RESERVED_PREFIXES:
         raise HTTPException(status_code=403, detail="reserved_email")
 
-    existing = await db.fetchrow("SELECT id FROM users WHERE email = $1", email)
+    # FINDING-011: dedup on the canonical email so alias variants
+    # (user+1@gmail.com, u.s.e.r@gmail.com) cannot farm multiple free accounts.
+    from core.auth import canonicalize_email
+    email_canon = canonicalize_email(email)
+    existing = await db.fetchrow(
+        "SELECT id FROM users WHERE email = $1 OR email_canonical = $2",
+        email, email_canon,
+    )
     if existing:
         raise HTTPException(status_code=409, detail={"error": "account already exists", "code": 409})
 
@@ -354,10 +361,10 @@ async def register_user(request: Request, db=Depends(get_db)):
 
     is_founding = datetime.now(timezone.utc) < FOUNDING_MEMBER_CUTOFF
     user = await db.fetchrow("""
-        INSERT INTO users (email, supabase_id, founding_member)
-        VALUES ($1, $2, $3)
+        INSERT INTO users (email, supabase_id, founding_member, email_canonical)
+        VALUES ($1, $2, $3, $4)
         RETURNING id, email, created_at
-    """, email, supabase_id, is_founding)
+    """, email, supabase_id, is_founding, email_canon)
 
     raw_key = "wf_live_" + secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
