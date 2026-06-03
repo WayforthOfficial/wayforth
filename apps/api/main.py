@@ -374,22 +374,6 @@ async def lifespan(app: FastAPI):
         )
         app.state.db_ok = True
         async with app.state.pool.acquire() as _mconn:
-            # TEMP: restore postgres user password from DATABASE_URL after manual clear.
-            # ALTER USER does not support $1 parameters — must interpolate the literal.
-            # Password comes from our own DATABASE_URL env var (not user input), safe here.
-            # REMOVE this block after confirming external proxy access is restored.
-            try:
-                import re as _re
-                _db_url = os.environ.get("DATABASE_URL", "")
-                _pw_match = _re.match(r"postgresql://[^:]+:([^@]+)@", _db_url)
-                if _pw_match:
-                    _db_pw = _pw_match.group(1)
-                    await _mconn.execute(f"ALTER USER postgres WITH PASSWORD '{_db_pw}'")
-                    logger.info("startup: postgres user password restored")
-                else:
-                    logger.error("startup: could not extract password from DATABASE_URL")
-            except Exception as _pw_err:
-                logger.error("startup: failed to restore postgres password: %s", _pw_err)
             await _mconn.execute("""
                 ALTER TABLE services
                     ADD COLUMN IF NOT EXISTS wri_score FLOAT,
