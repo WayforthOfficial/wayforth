@@ -18,4 +18,4 @@ __all__ = [
     "Service",
     "SearchResult",
 ]
-__version__ = "0.6.14"
+__version__ = "0.8.6"
