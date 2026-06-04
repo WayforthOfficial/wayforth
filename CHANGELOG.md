@@ -4,6 +4,18 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.7 — Pioneer reserve pool — 2026-06-04
+
+- Pioneer drip credits now live in a separate overflow pool (`pioneer_credits_balance`) instead of the main credits balance
+- Spend order: plan credits first, Pioneer reserve activates automatically when plan hits zero
+- Dashboard shows two separate credit bars — plan and pioneer reserve — with overflow and low-credit banners
+- Subscription reset: plan credits reset to plan max, pioneer reserve resets to zero each cycle
+- USDC prepaid balance preserved on reset (Option A: `GREATEST(credits_balance, plan_max)`)
+- `/billing/balance` and `/auth/me` now return `pioneer_credits_remaining` and `total_credits` fields
+- Migration 055 + one-time data-fix committed
+
+---
+
 ## v0.8.6 — WayforthRank integrity — 2026-06-03
 
 - Fixed slug matcher bug: recalculate now matches `clicked_slug` directly against `services.slug` (was using a name-derived proxy, which hit the wrong duplicate rows)

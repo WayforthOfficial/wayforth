@@ -2,7 +2,7 @@
 
 **One tool call. Any API. No setup.**
 
-[![Version](https://img.shields.io/badge/version-0.8.6_WayforthRank_Integrity-4F46E5)](https://gateway.wayforth.io/guide/)
+[![Version](https://img.shields.io/badge/version-0.8.7_Pioneer_Reserve_Pool-4F46E5)](https://gateway.wayforth.io/guide/)
 [![License](https://img.shields.io/badge/license-BSL_1.1-64748B)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-190%2B_passing-10B981)](https://github.com/WayforthOfficial/wayforth)
 
@@ -206,7 +206,7 @@ Full spec: [gateway.wayforth.io/wayforthql-spec](https://gateway.wayforth.io/way
 
 ## Development Status
 
-**v0.8.6 "WayforthRank Integrity" — current release**
+**v0.8.7 "Pioneer Reserve Pool" — current release**
 
 - 190+ tests passing, zero failures
 - 99.97% uptime
