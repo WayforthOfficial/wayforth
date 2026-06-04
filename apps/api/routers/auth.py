@@ -716,7 +716,7 @@ async def auth_me(request: Request, db=Depends(get_db)):
         if me_payload is None:
             row = await db.fetchrow("""
                 SELECT u.email, k.tier,
-                       uc.package_tier, uc.credits_balance, uc.lifetime_credits
+                       uc.package_tier, uc.credits_balance, uc.pioneer_credits_balance, uc.lifetime_credits
                 FROM users u
                 LEFT JOIN api_keys k ON k.user_id = u.id AND k.active = true
                 LEFT JOIN user_credits uc ON uc.user_id = u.id
@@ -728,10 +728,14 @@ async def auth_me(request: Request, db=Depends(get_db)):
                 # Session is valid but the underlying account is gone — treat as logout.
                 raise HTTPException(status_code=401, detail={"error": "account_not_found"})
             tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
+            _main = row["credits_balance"] or 0
+            _pioneer = row["pioneer_credits_balance"] or 0
             me_payload = {
                 "email": row["email"],
                 "tier": tier,
-                "credits_remaining": row["credits_balance"] or 0,
+                "credits_remaining": _main,
+                "pioneer_credits_remaining": _pioneer,
+                "total_credits": _main + _pioneer,
             }
             if redis is not None and me_key:
                 try:
@@ -749,7 +753,7 @@ async def auth_me(request: Request, db=Depends(get_db)):
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         row = await db.fetchrow("""
             SELECT u.email, k.key_prefix, k.tier,
-                   uc.package_tier, uc.credits_balance, uc.lifetime_credits
+                   uc.package_tier, uc.credits_balance, uc.pioneer_credits_balance, uc.lifetime_credits
             FROM api_keys k
             JOIN users u ON u.id = k.user_id
             LEFT JOIN user_credits uc ON uc.user_id = k.user_id
@@ -760,10 +764,14 @@ async def auth_me(request: Request, db=Depends(get_db)):
         if not row:
             raise HTTPException(status_code=401, detail="Invalid API key")
         tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
+        _main = row["credits_balance"] or 0
+        _pioneer = row["pioneer_credits_balance"] or 0
         response = JSONResponse(content={
             "email": row["email"],
             "tier": tier,
-            "credits_remaining": row["credits_balance"] or 0,
+            "credits_remaining": _main,
+            "pioneer_credits_remaining": _pioneer,
+            "total_credits": _main + _pioneer,
         })
         response.headers["Cache-Control"] = "no-store, no-cache"
         return response
@@ -789,7 +797,7 @@ async def auth_me(request: Request, db=Depends(get_db)):
 
     row = await db.fetchrow("""
         SELECT u.email, k.key_prefix, k.tier,
-               uc.package_tier, uc.credits_balance, uc.lifetime_credits
+               uc.package_tier, uc.credits_balance, uc.pioneer_credits_balance, uc.lifetime_credits
         FROM users u
         JOIN api_keys k ON k.user_id = u.id
         LEFT JOIN user_credits uc ON uc.user_id = u.id
@@ -806,11 +814,15 @@ async def auth_me(request: Request, db=Depends(get_db)):
         })
 
     tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
+    _main = row["credits_balance"] or 0
+    _pioneer = row["pioneer_credits_balance"] or 0
 
     response = JSONResponse(content={
         "email": row["email"],
         "tier": tier,
-        "credits_remaining": row["credits_balance"] or 0,
+        "credits_remaining": _main,
+        "pioneer_credits_remaining": _pioneer,
+        "total_credits": _main + _pioneer,
     })
     response.headers["Cache-Control"] = "no-store, no-cache"
     return response

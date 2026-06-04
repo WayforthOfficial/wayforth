@@ -153,7 +153,7 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
     """
     async with db.transaction():
         row = await db.fetchrow(
-            "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
+            "SELECT credits_balance, pioneer_credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
             user_id
         )
         if not row:
@@ -163,21 +163,28 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
                 ON CONFLICT (user_id) DO NOTHING
             """, user_id)
             row = await db.fetchrow(
-                "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
+                "SELECT credits_balance, pioneer_credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
                 user_id
             )
 
         balance = row['credits_balance']
-        if balance < cost:
+        pioneer = row['pioneer_credits_balance']
+        # Spend the main balance first, then draw from the pioneer overflow pool.
+        if balance + pioneer < cost:
             if return_tx_id:
                 return False, balance, None
             return False, balance
 
-        new_balance = balance - cost
+        if balance >= cost:
+            new_balance, new_pioneer = balance - cost, pioneer
+        else:
+            new_balance, new_pioneer = 0, pioneer - (cost - balance)
         await db.execute(
-            "UPDATE user_credits SET credits_balance = $1, updated_at = NOW() WHERE user_id = $2::uuid",
-            new_balance, user_id
+            "UPDATE user_credits SET credits_balance = $1, pioneer_credits_balance = $2, "
+            "updated_at = NOW() WHERE user_id = $3::uuid",
+            new_balance, new_pioneer, user_id
         )
+        # balance_after records the MAIN pool after deduction (unchanged semantics).
         tx_id = await db.fetchval("""
             INSERT INTO credit_transactions
             (user_id, amount, balance_after, type, description, api_endpoint, service_id, agent_id, api_key_id)
@@ -870,6 +877,7 @@ async def _monthly_topup_reset():
                     await db.execute("""
                         UPDATE user_credits
                            SET credits_balance  = GREATEST(credits_balance, $1),
+                               pioneer_credits_balance = 0,
                                last_credited_at = NOW(),
                                updated_at       = NOW()
                          WHERE user_id = $2::uuid

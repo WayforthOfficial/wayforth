@@ -271,10 +271,11 @@ async def get_balance(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     credits = await db.fetchrow(
-        "SELECT credits_balance, package_tier, payment_method FROM user_credits WHERE user_id = $1",
+        "SELECT credits_balance, pioneer_credits_balance, package_tier, payment_method FROM user_credits WHERE user_id = $1",
         key_record["user_id"],
     )
     balance = credits["credits_balance"] if credits else 0
+    pioneer_balance = credits["pioneer_credits_balance"] if credits else 0
     pkg_tier = credits["package_tier"] if credits else "free"
     payment_method = (credits["payment_method"] if credits else None) or "card"
     tier = _credits_to_tier(balance, pkg_tier)
@@ -320,6 +321,8 @@ async def get_balance(request: Request, db=Depends(get_db)):
     return {
         "plan": tier,
         "credits_remaining": credits_remaining,
+        "pioneer_credits_remaining": pioneer_balance,
+        "total_credits": credits_remaining + pioneer_balance,
         "credits_included": base_credits + bonus_credits,
         "calls_remaining": credits_remaining,         # backward compat
         "calls_included": base_credits + bonus_credits,  # backward compat
@@ -1435,14 +1438,16 @@ async def run_pioneer_drip(db) -> int:
             if not claimed:
                 continue
             if daily > 0:
+                # Drip lands in the separate pioneer overflow pool, not the main
+                # credits_balance.
                 cred = await db.fetchrow(
-                    "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE", uid
+                    "SELECT pioneer_credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE", uid
                 )
-                current = cred["credits_balance"] if cred else 0
-                new_balance = current + daily
+                current = cred["pioneer_credits_balance"] if cred else 0
+                new_pioneer = current + daily
                 await db.execute(
-                    "UPDATE user_credits SET credits_balance = $1, lifetime_credits = lifetime_credits + $2, updated_at = NOW() WHERE user_id = $3::uuid",
-                    new_balance, daily, uid,
+                    "UPDATE user_credits SET pioneer_credits_balance = $1, lifetime_credits = lifetime_credits + $2, updated_at = NOW() WHERE user_id = $3::uuid",
+                    new_pioneer, daily, uid,
                 )
                 await db.execute("""
                     UPDATE users
@@ -1450,11 +1455,12 @@ async def run_pioneer_drip(db) -> int:
                            pioneer_drip_days_this_cycle    = pioneer_drip_days_this_cycle    + 1
                      WHERE id = $1::uuid
                 """, uid, daily)
+                # balance_after records the pioneer pool after the drip.
                 await db.execute("""
                     INSERT INTO credit_transactions
                       (user_id, amount, balance_after, type, description, api_endpoint)
                     VALUES ($1::uuid, $2, $3, 'pioneer_drip', $4, '/account/pioneer/drip')
-                """, uid, daily, new_balance, f"pioneer_drip: {daily} credits ({tier})")
+                """, uid, daily, new_pioneer, f"pioneer_drip: {daily} credits ({tier})")
         dripped += 1
         logger.info("pioneer_drip_awarded user=%s credits=%s tier=%s", uid, daily, tier)
 
