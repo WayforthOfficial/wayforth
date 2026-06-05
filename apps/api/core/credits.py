@@ -288,7 +288,18 @@ async def _increment_calls(pool, api_key_id: str, cost: int = 1) -> int:
             )
             # Fire usage alerts on threshold crossings (fires exactly once per crossing)
             monthly_limit = p["calls_included"]
-            if monthly_limit > 0:
+            # FIX 2: suppress usage alerts while a meaningful pioneer reserve still
+            # cushions the user (> 10% of the plan allowance). They aren't running
+            # out — the reserve covers continued usage.
+            _pioneer_reserve = 0
+            try:
+                _pioneer_reserve = await pool.fetchval(
+                    "SELECT pioneer_credits_balance FROM user_credits WHERE user_id = $1::uuid",
+                    row["user_id"],
+                ) or 0
+            except Exception:
+                _pioneer_reserve = 0
+            if monthly_limit > 0 and _pioneer_reserve <= monthly_limit * 0.10:
                 import asyncio as _asyncio
                 # 80% used — 20% remaining
                 t80 = monthly_limit * 0.20
@@ -725,8 +736,18 @@ async def _maybe_dispatch_credits_low(pool, user_id: str, api_key_str: str, bala
         if not key:
             return
 
+        # FIX 2: alerts must consider the pioneer overflow pool. A user with a
+        # funded pioneer reserve is not "low on credits" just because the main
+        # plan balance dipped — only alarm when the TOTAL is below threshold.
+        async with pool.acquire() as db:
+            pioneer = await db.fetchval(
+                "SELECT pioneer_credits_balance FROM user_credits WHERE user_id = $1::uuid",
+                user_id,
+            )
+        total_after = balance_after + (pioneer or 0)
+
         threshold_credits = (key["topup_trigger_calls"] or 100) * CREDITS_PER_CALL
-        if balance_after >= threshold_credits:
+        if total_after >= threshold_credits:
             return
 
         calls_remaining = balance_after // CREDITS_PER_CALL
@@ -863,7 +884,8 @@ async def _monthly_topup_reset():
                 calls_reset = await db.execute("""
                     UPDATE api_keys
                     SET monthly_calls_count = 0,
-                        monthly_calls_reset_at = date_trunc('month', NOW()) + INTERVAL '1 month'
+                        monthly_calls_reset_at = date_trunc('month', NOW()) + INTERVAL '1 month',
+                        quota_reset_at         = date_trunc('month', NOW()) + INTERVAL '1 month'
                     WHERE monthly_calls_reset_at IS NOT NULL
                       AND monthly_calls_reset_at <= NOW()
                 """)
