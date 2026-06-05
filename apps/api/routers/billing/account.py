@@ -1451,8 +1451,7 @@ async def run_pioneer_drip(db) -> int:
                 )
                 await db.execute("""
                     UPDATE users
-                       SET pioneer_drip_credits_this_cycle = pioneer_drip_credits_this_cycle + $2,
-                           pioneer_drip_days_this_cycle    = pioneer_drip_days_this_cycle    + 1
+                       SET pioneer_drip_credits_this_cycle = pioneer_drip_credits_this_cycle + $2
                      WHERE id = $1::uuid
                 """, uid, daily)
                 # balance_after records the pioneer pool after the drip.
@@ -1461,6 +1460,22 @@ async def run_pioneer_drip(db) -> int:
                       (user_id, amount, balance_after, type, description, api_endpoint)
                     VALUES ($1::uuid, $2, $3, 'pioneer_drip', $4, '/account/pioneer/drip')
                 """, uid, daily, new_pioneer, f"pioneer_drip: {daily} credits ({tier})")
+                # FIX 3: derive days from DISTINCT Pacific calendar dates dripped
+                # this cycle (since last_credited_at) — robust against makeup /
+                # out-of-band drips that would otherwise inflate a raw event count.
+                # Runs after the INSERT so the current drip is included.
+                await db.execute("""
+                    UPDATE users
+                       SET pioneer_drip_days_this_cycle = (
+                           SELECT COUNT(DISTINCT (ct.created_at AT TIME ZONE 'America/Los_Angeles')::date)
+                             FROM credit_transactions ct
+                             JOIN user_credits uc ON uc.user_id = ct.user_id
+                            WHERE ct.user_id = $1::uuid
+                              AND ct.type = 'pioneer_drip'
+                              AND ct.created_at >= COALESCE(uc.last_credited_at, '2000-01-01')
+                       )
+                     WHERE id = $1::uuid
+                """, uid)
         dripped += 1
         logger.info("pioneer_drip_awarded user=%s credits=%s tier=%s", uid, daily, tier)
 
