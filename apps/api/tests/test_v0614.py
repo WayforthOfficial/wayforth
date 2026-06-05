@@ -24,8 +24,8 @@ from services.managed import SERVICE_CONFIGS
 class TestVersion:
 
     def test_version_is_070(self):
-        # v0.8.7 — Pioneer reserve pool.
-        assert VERSION == "0.8.7"
+        # v0.8.8 — Credits & Pioneer fixes.
+        assert VERSION == "0.8.8"
 
     def test_version_is_string(self):
         assert isinstance(VERSION, str)

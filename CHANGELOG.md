@@ -4,6 +4,15 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.8 — Credits & Pioneer fixes — 2026-06-04
+
+- Subscription reset now fires correctly — `quota_reset_at` and `monthly_calls_reset_at` fields synced; overdue reset triggered immediately
+- Credit alerts now aware of the Pioneer reserve pool — low/zero alerts only fire when total credits (plan + reserve) are depleted
+- Pioneer day counter now derived from distinct Pacific calendar dates, not raw drip event count — robust against makeup drips and out-of-band events
+- Migration 056 (reset-date sync) committed; data-fix for the overdue reset applied
+
+---
+
 ## v0.8.7 — Pioneer reserve pool — 2026-06-04
 
 - Pioneer drip credits now live in a separate overflow pool (`pioneer_credits_balance`) instead of the main credits balance
