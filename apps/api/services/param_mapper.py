@@ -231,7 +231,7 @@ MANAGED_TO_CATALOG: dict[str, str] = {
     "resend":      "resend",
     "firecrawl":   "firecrawl",
     "mistral":     "mistral_ai",
-    "gemini":      "gemini_flash",
+    "gemini":      "gemini",
 }
 
 
