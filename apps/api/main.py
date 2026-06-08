@@ -99,6 +99,18 @@ _PROBE_PARAMS: dict[str, dict] = {
     "newsapi":     {"query": "test"},
     "alphavantage":{"symbol": "AAPL"},
     "jina":        {"url": "https://example.com"},
+    "mistral":     {"messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
+    "gemini":      {"messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
+    "firecrawl":   {"url": "https://example.com", "formats": ["markdown"]},
+    "resend":      {"from": "probe@wayforth.io", "to": "dorassulin1@gmail.com",
+                    "subject": "Wayforth service probe", "text": "Health check."},
+    # AssemblyAI: submit a short public clip; the adapter polls up to 30s then
+    # returns "processing" without error — queuing successfully = probe passes.
+    "assemblyai":  {"audio_url": "https://assembly.ai/wildfires.mp3"},  # 4.5MB, under 12MB cap
+    "stability":   {"prompt": "blue circle", "output_format": "jpeg", "aspect_ratio": "1:1"},  # ~$0.08/probe
+    # ElevenLabs key is flagged → probe fails by design. ever_succeeded=false keeps
+    # it out of the /system/status aggregate until the key is fixed (v0.9.0).
+    "elevenlabs":  {"text": "probe", "voice_id": "21m00Tcm4TlvDq8ikWAM"},
 }
 
 
