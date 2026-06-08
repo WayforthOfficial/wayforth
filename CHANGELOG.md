@@ -4,6 +4,18 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.9 — Health monitoring & infrastructure — 2026-06-08
+
+- All 16 managed services now probed and tracked every 6 hours (was 30 minutes, 9 services)
+- Probe interval reduced 30min → 6h globally — eliminates rate-capped API quota exhaustion
+- Alpha Vantage and Resend removed from probe-exempt (full 6h schedule makes exemptions unnecessary)
+- Fixed Gemini catalog mapping (gemini_flash → gemini) so probe results are correctly tracked
+- Crawler build fixed — removed [build] nixpacks section from railway.toml; regenerated stale uv.lock
+- Status link added to mobile hamburger menu
+- /system/status now correctly excludes never-succeeded services from degraded aggregate
+
+---
+
 ## v0.8.8 — Credits & Pioneer fixes — 2026-06-04
 
 - Subscription reset now fires correctly — `quota_reset_at` and `monthly_calls_reset_at` fields synced; overdue reset triggered immediately

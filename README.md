@@ -2,7 +2,7 @@
 
 **One tool call. Any API. No setup.**
 
-[![Version](https://img.shields.io/badge/version-0.8.8_Credits_&_Pioneer_Fixes-4F46E5)](https://gateway.wayforth.io/guide/)
+[![Version](https://img.shields.io/badge/version-0.8.9_Health_Monitoring_&_Infrastructure-4F46E5)](https://gateway.wayforth.io/guide/)
 [![License](https://img.shields.io/badge/license-BSL_1.1-64748B)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-190%2B_passing-10B981)](https://github.com/WayforthOfficial/wayforth)
 
@@ -206,10 +206,11 @@ Full spec: [gateway.wayforth.io/wayforthql-spec](https://gateway.wayforth.io/way
 
 ## Development Status
 
-**v0.8.8 "Credits & Pioneer Fixes" — current release**
+**v0.8.9 "Health Monitoring & Infrastructure" — current release**
 
 - 190+ tests passing, zero failures
 - 99.97% uptime
+- **Health monitoring** — all 16 managed services probed and tracked every 6h; never-succeeded services excluded from the `/system/status` degraded aggregate
 - **Credits system** — per-service credit costs enforced (Groq 3 cr, DeepL 20 cr, Stability AI 86 cr, etc.). Monthly quotas in credits: Free 100 · Builder 6,000 · Starter 21,000 · Pro 72,000 · Growth 240,000
 - **Pioneer Program** — indefinite enrollment, daily credit drip by tier, 7-day rejoin cooldown. Search responses include `pioneer_routing`, `pioneer_routed_to_boosted`, and `signal_weight` fields for opted-in developers
 - **Provider annual billing** — 17% discount for annual subscriptions (Intelligence $82/mo · Premium $249/mo)
