@@ -128,10 +128,6 @@ async def _probe_managed_services_loop():
             cfg = SERVICE_CONFIGS.get(managed_slug)
             if not cfg:
                 continue
-            if cfg.get("probe_exempt"):
-                # Rate-capped free tier — 30-min probing (48x/day) would exhaust the
-                # daily quota and trigger 500s for the rest of the day. Skip entirely.
-                continue
             api_key = os.environ.get(cfg["key_var"], "")
             if not api_key:
                 continue
@@ -211,7 +207,7 @@ async def _probe_managed_services_loop():
                 logger.warning("probe db write failed for %s: %s", managed_slug, db_err)
 
         logger.info("managed service probe cycle complete")
-        await asyncio.sleep(1800)  # 30 minutes
+        await asyncio.sleep(21600)  # 6 hours — same cadence as the WRI recalculate cron
 
 
 async def _boost_auto_pause_loop():
@@ -1789,14 +1785,7 @@ async def system_status_v075(db=Depends(get_db)):
     # (broken/blocked key), not an operational failure — exclude it from health calc.
     configured_slugs = [
         slug for slug, cfg in SERVICE_CONFIGS.items()
-        if os.environ.get(cfg["key_var"]) and not cfg.get("probe_exempt")
-    ]
-    # Rate-capped services are intentionally not probed (probing would exhaust
-    # their daily quota). They're "unmonitored", not failing — excluded from the
-    # health calc and surfaced separately so the aggregate isn't pulled to degraded.
-    unmonitored = [
-        slug for slug, cfg in SERVICE_CONFIGS.items()
-        if os.environ.get(cfg["key_var"]) and cfg.get("probe_exempt")
+        if os.environ.get(cfg["key_var"])
     ]
     if not configured_slugs:
         # No keys at all — early state, not an outage
@@ -1870,7 +1859,6 @@ async def system_status_v075(db=Depends(get_db)):
     return {
         "status": overall,
         "components": components,
-        "unmonitored_services": unmonitored,   # rate-capped, intentionally not probed
         "uptime_30d": uptime_30d,
         "incidents": [],
     }

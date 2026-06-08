@@ -98,7 +98,7 @@ SERVICE_CONFIGS = {
     "perplexity":  {"key_var": "PERPLEXITY_API_KEY",    "credits": 10,  "real_cost_per_call": 0.006},
     # Data
     "openweather": {"key_var": "OPENWEATHER_API_KEY",   "credits": 2,   "real_cost_per_call": 0.0},
-    "alphavantage":{"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 4,   "real_cost_per_call": 0.0, "probe_exempt": True},  # 25 req/day free cap
+    "alphavantage":{"key_var": "ALPHA_VANTAGE_API_KEY", "credits": 4,   "real_cost_per_call": 0.0},
     "jina":        {"key_var": "JINA_API_KEY",          "credits": 4,   "real_cost_per_call": 0.0001},
     # Audio / Voice
     "assemblyai":  {"key_var": "ASSEMBLYAI_API_KEY",    "credits": 25,  "real_cost_per_call": 0.0195},
@@ -106,7 +106,7 @@ SERVICE_CONFIGS = {
     # Image — stability credits: 86 for core (default), 150 for ultra (resolved at call time)
     "stability":   {"key_var": "STABILITY_API_KEY",     "credits": 86,  "real_cost_per_call": 0.080},
     # Email
-    "resend":      {"key_var": "RESEND_API_KEY",        "credits": 3,   "real_cost_per_call": 0.0, "probe_exempt": True},  # 100 send/day cap
+    "resend":      {"key_var": "RESEND_API_KEY",        "credits": 3,   "real_cost_per_call": 0.0},
     # Web scraping
     "firecrawl":   {"key_var": "FIRECRAWL_API_KEY",     "credits": 6,   "real_cost_per_call": 0.00533},
     # Inference (additional)
