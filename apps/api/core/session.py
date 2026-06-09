@@ -135,6 +135,41 @@ async def revoke_session(redis, raw_token: str) -> None:
         logger.warning("revoke_session error: %s", exc)
 
 
+async def revoke_all_user_sessions(redis, user_id: str) -> int:
+    """Revoke every active session for `user_id` (FINDING-106).
+
+    Session records carry their user_id but Redis has no user_id→token index,
+    so we SCAN the `session:` keyspace and delete the records that match. Used
+    by the account-deletion reaper to ensure no session minted during the grace
+    window outlives the purge. Returns the count revoked; best-effort (logs and
+    returns on Redis error rather than raising)."""
+    if redis is None or not user_id:
+        return 0
+    revoked = 0
+    cursor = 0
+    try:
+        while True:
+            cursor, keys = await redis.scan(
+                cursor=cursor, match=_REDIS_KEY_PREFIX + "*", count=200
+            )
+            for key in keys:
+                try:
+                    raw = await redis.get(key)
+                    if not raw:
+                        continue
+                    rec = _json.loads(raw)
+                    if str(rec.get("user_id")) == str(user_id):
+                        await redis.delete(key)
+                        revoked += 1
+                except Exception:
+                    continue  # malformed/unreadable record — skip
+            if cursor == 0:
+                break
+    except Exception as exc:
+        logger.warning("revoke_all_user_sessions scan failed user=%s: %s", user_id, exc)
+    return revoked
+
+
 def set_session_cookie(response: Response, raw_token: str) -> None:
     """Set the wf_session cookie with the hardened attribute set.
 

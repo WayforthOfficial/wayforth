@@ -160,3 +160,87 @@ async def clear_login_failures(email: str, redis) -> None:
         await redis.delete(_fail_key(email))
     except Exception as exc:
         logger.debug("clear_login_failures failed (ignoring): %s", exc)
+
+
+# ── Admin gate: stricter per-IP throttle (FRONTEND B-001) ─────────────────────
+# The admin login is a higher-value target than user login, so it gets a much
+# tighter per-IP gate than the shared _IP_*_THRESHOLD values above: 3 failed
+# attempts from one IP within 1 hour → hard 3-hour lock.
+_ADMIN_IP_FAIL_PREFIX = "admin_login_fail_ip:"
+_ADMIN_IP_LOCK_PREFIX = "admin_login_lock_ip:"
+_ADMIN_IP_MAX_FAILS = 3
+_ADMIN_IP_WINDOW = 3600        # count failures within a 1-hour rolling window
+_ADMIN_IP_LOCK_SECONDS = 10800  # 3-hour lock once the threshold is hit
+
+
+def _admin_ip_fail_key(ip: str) -> str:
+    return _ADMIN_IP_FAIL_PREFIX + hashlib.sha256(ip.encode()).hexdigest()
+
+
+def _admin_ip_lock_key(ip: str) -> str:
+    return _ADMIN_IP_LOCK_PREFIX + hashlib.sha256(ip.encode()).hexdigest()
+
+
+async def check_admin_login_lockout(redis, ip: str | None) -> None:
+    """Raise 429 if `ip` is currently locked out of the admin login.
+
+    Fails CLOSED if Redis is unavailable (reuses the strict in-memory fallback),
+    so a Redis outage can't open an admin brute-force window."""
+    if not ip:
+        return
+    if redis is None:
+        if _fallback_register_and_check(_admin_ip_lock_key(ip)):
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed admin login attempts — try again later",
+                headers={"Retry-After": str(_FALLBACK_LOCK_SECONDS)},
+            )
+        return
+    try:
+        locked = await redis.get(_admin_ip_lock_key(ip))
+        if locked:
+            ttl = await redis.ttl(_admin_ip_lock_key(ip))
+            retry = ttl if (ttl and ttl > 0) else _ADMIN_IP_LOCK_SECONDS
+            logger.warning("admin login lockout (ip) hash=%s ttl=%s", _admin_ip_lock_key(ip)[-8:], retry)
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed admin login attempts — locked for 3 hours",
+                headers={"Retry-After": str(retry)},
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("admin login lockout check failed — failing closed: %s", exc)
+        if _fallback_register_and_check(_admin_ip_lock_key(ip)):
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed admin login attempts — try again later",
+                headers={"Retry-After": str(_FALLBACK_LOCK_SECONDS)},
+            )
+
+
+async def record_admin_login_failure(redis, ip: str | None) -> None:
+    """Count an admin login failure for `ip`; set the 3-hour lock at the threshold."""
+    if redis is None or not ip:
+        return
+    try:
+        key = _admin_ip_fail_key(ip)
+        count = await redis.incr(key)
+        if count == 1:
+            await redis.expire(key, _ADMIN_IP_WINDOW)
+        if count >= _ADMIN_IP_MAX_FAILS:
+            await redis.set(_admin_ip_lock_key(ip), "1", ex=_ADMIN_IP_LOCK_SECONDS)
+            logger.warning("admin login IP locked for 3h (>=%d fails) hash=%s", _ADMIN_IP_MAX_FAILS, key[-8:])
+    except Exception as exc:
+        logger.debug("record_admin_login_failure failed (ignoring): %s", exc)
+
+
+async def clear_admin_login_failures(redis, ip: str | None) -> None:
+    """Clear the admin per-IP failure counter after a successful admin login.
+    The lock key is left untouched (a locked IP can't reach success anyway)."""
+    if redis is None or not ip:
+        return
+    try:
+        await redis.delete(_admin_ip_fail_key(ip))
+    except Exception as exc:
+        logger.debug("clear_admin_login_failures failed (ignoring): %s", exc)

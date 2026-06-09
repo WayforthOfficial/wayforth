@@ -67,17 +67,39 @@ def _is_private_ip(ip_str: str) -> bool:
 
 
 def validate_external_url(url: str, field_name: str = "url") -> list[str]:
-    """Validate `url` and return the list of resolved public IPs.
+    """Validate `url` (https:// only) and return the list of resolved public IPs.
 
     Raises HTTPException(422) if `url` is not a safe external https:// target.
     Blocks: non-https schemes, localhost/internal hostnames, hostnames that
     resolve to private/loopback/link-local IPs (incl. IPv4-mapped IPv6), and
     cloud-metadata endpoints.
 
-    FINDING-008: returns the validated IP set so the caller can pin delivery to
-    the same address it validated, rather than letting httpx re-resolve (and
-    potentially rebind to an internal IP) at connect time.
+    Returns the validated public IP set. NOTE: returning the IPs does not by
+    itself prevent DNS rebinding — httpx re-resolves the hostname at connect
+    time, so a 0-TTL record can still rebind to an internal IP between this
+    check and the connection. Callers that perform a server-side request MUST
+    send it through `post_pinned()` below, which connects to one of these
+    validated IPs directly (no second DNS lookup) and is what actually closes
+    the rebind TOCTOU (FINDING-008 / FINDING-102).
     """
+    return _validate_external_url(url, field_name, allowed_schemes=("https",))
+
+
+def validate_external_url_relaxed(url: str, field_name: str = "url") -> list[str]:
+    """Like `validate_external_url` but also permits http://.
+
+    DECISION 1 (v0.8.10): content-fetching adapters (Jina reader, Firecrawl
+    scrape) legitimately receive http:// page URLs. This validator relaxes ONLY
+    the scheme restriction — every private/loopback/link-local/internal IP and
+    hostname block is identical, so the SSRF defense is unchanged. Do NOT use
+    this for audio/webhook targets, which should stay https-only.
+    """
+    return _validate_external_url(url, field_name, allowed_schemes=("http", "https"))
+
+
+def _validate_external_url(url: str, field_name: str, allowed_schemes: tuple[str, ...]) -> list[str]:
+    """Shared implementation for the strict and relaxed validators. Only the set
+    of permitted URL schemes differs; the IP/hostname screening is identical."""
     if not url:
         raise HTTPException(status_code=422, detail={
             "error": f"invalid_{field_name}",
@@ -85,10 +107,11 @@ def validate_external_url(url: str, field_name: str = "url") -> list[str]:
         })
 
     parsed = urlparse(url)
-    if parsed.scheme != "https":
+    if parsed.scheme not in allowed_schemes:
+        _scheme_hint = " or ".join(f"{s}://" for s in allowed_schemes)
         raise HTTPException(status_code=422, detail={
             "error": f"invalid_{field_name}",
-            "message": f"{field_name} must use https://",
+            "message": f"{field_name} must use {_scheme_hint}",
         })
 
     host = (parsed.hostname or "").lower().strip()
@@ -135,14 +158,46 @@ def validate_external_url(url: str, field_name: str = "url") -> list[str]:
     return resolved_ips
 
 
-def assert_still_external(url: str, field_name: str = "url") -> None:
-    """Re-validate immediately before connecting (FINDING-008).
+async def post_pinned(
+    client,
+    url: str,
+    *,
+    content=None,
+    headers: dict | None = None,
+    field_name: str = "url",
+):
+    """Validate `url`, then POST it with the TCP connection pinned to a
+    validated IP — actually closing the DNS-rebind TOCTOU (FINDING-008/102).
 
-    Webhook delivery calls this right before the httpx request so that a
-    hostname which has rebound to an internal IP since registration is rejected
-    at the last possible moment. This does not fully close the sub-millisecond
-    gap between this resolution and httpx's own — full closure requires pinning
-    the socket to the returned IP — but it rejects any rebind that has settled
-    by delivery time, which is the realistic attack.
+    `validate_external_url` resolves and screens every A/AAAA record. We then
+    rewrite the URL host to that exact IP *literal* and connect to it. Because
+    the host is now an IP literal, httpx/httpcore performs no second DNS lookup
+    at connect time, so a hostname that rebinds to 127.0.0.1 / 169.254.169.254
+    after validation can never be reached. The original hostname is preserved
+    for the TLS SNI, certificate verification, and the Host header, so TLS and
+    request routing behave exactly as for the un-pinned request.
+
+    Raises HTTPException(422) if the URL fails validation (e.g. it has since
+    rebound to an internal address).
     """
-    validate_external_url(url, field_name=field_name)
+    ips = validate_external_url(url, field_name=field_name)
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not ips or not host:
+        # Defensive fallback: validate_external_url returns >=1 IP on success.
+        return await client.post(url, content=content, headers=headers)
+
+    ip = ips[0]
+    ip_host = f"[{ip}]" if ":" in ip else ip  # bracket IPv6 literals
+    netloc = f"{ip_host}:{parsed.port}" if parsed.port else ip_host
+    pinned_url = parsed._replace(netloc=netloc).geturl()
+
+    merged = dict(headers or {})
+    # Preserve original Host (incl. non-default port) so the server routes by
+    # hostname, not by the pinned IP.
+    merged["Host"] = f"{host}:{parsed.port}" if parsed.port else host
+
+    request = client.build_request("POST", pinned_url, content=content, headers=merged)
+    # TLS SNI + cert hostname verification use the real hostname, not the IP.
+    request.extensions["sni_hostname"] = host
+    return await client.send(request)

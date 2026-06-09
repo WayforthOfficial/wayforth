@@ -12,7 +12,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from core.audit import log_admin_action
 from core.credits import PLANS, _dispatch_webhooks
 from core.db import get_db
-from core.login_security import check_login_lockout, record_login_failure, clear_login_failures
+from core.login_security import (
+    check_login_lockout, record_login_failure, clear_login_failures,
+    check_admin_login_lockout, record_admin_login_failure, clear_admin_login_failures,
+)
 from core.rate_limit import limiter
 
 logger = logging.getLogger("wayforth")
@@ -90,6 +93,9 @@ async def admin_login(request: Request, db=Depends(get_db)):
     from core.rate_limit import get_real_ip
     redis = _get_redis()
     ip = get_real_ip(request)
+    # B-001: strict admin-gate per-IP throttle (3 fails/hour → 3h lock) in
+    # addition to the shared email/IP login lockout.
+    await check_admin_login_lockout(redis, ip)
     await check_login_lockout(email, redis, ip=ip)
 
     user = await db.fetchrow(
@@ -97,6 +103,7 @@ async def admin_login(request: Request, db=Depends(get_db)):
     )
 
     if not user or not bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
+        await record_admin_login_failure(redis, ip)
         await record_login_failure(email, redis, ip=ip)
         # v0.8.0 Item 4: audit failed logins so a brute-force attempt is visible
         # to anyone reading the audit log, not just to whoever scrapes logs.
@@ -108,6 +115,7 @@ async def admin_login(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     await clear_login_failures(email, redis)
+    await clear_admin_login_failures(redis, ip)
 
     if user.get("mfa_enabled"):
         from routers.mfa import issue_mfa_challenge

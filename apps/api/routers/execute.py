@@ -366,6 +366,13 @@ async def _is_self_dealing(conn, user_id: str, clicked_slug: str) -> bool:
     inflate their WRI conversion signal (payment_followed=true) at full weight.
     We detect the overlap by matching the executing user's email(s) to the
     provider that owns the clicked service.
+
+    FINDING-105 (accepted risk, v0.9.x backlog): this exclusion is single-
+    dimension (user_id only). A provider can still self-deal from a SECOND
+    account (different user_id) to inflate their own service's WRI. Backlog
+    hardening: (1) distinct-buyer floor so one user can't dominate a service's
+    conversion signal, (2) per-user signal-weight cap, (3) IP/ASN + device-
+    fingerprint clustering on search_analytics. Not blocking v0.9.0.
     """
     try:
         row = await conn.fetchrow("""
@@ -942,7 +949,9 @@ async def execute_service(request: Request, db=Depends(get_db)):
     if is_cross_rail:
         catalog_svc = await db.fetchrow(
             "SELECT id, name, slug, category, x402_supported, endpoint_url, pricing_usdc, consecutive_failures "
-            "FROM services WHERE slug = $1 OR LOWER(name) = $1",
+            "FROM services WHERE (slug = $1 OR LOWER(name) = $1) "
+            # FINDING-104: never execute a soft-retired (active=false) service.
+            "AND (active IS NULL OR active IS NOT FALSE)",
             service_slug,
         )
 

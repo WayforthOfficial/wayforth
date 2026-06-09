@@ -4,6 +4,21 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.10 — Security hardening (post v0.8.9 audit) — 2026-06-09
+
+- SSRF: AssemblyAI, Jina, Firecrawl adapters now validate user-supplied URLs before any HTTP request
+- SSRF: Webhook DNS-rebind TOCTOU closed with socket-level IP pinning (post_pinned helper, verified on Python 3.12)
+- WayforthRank: All 8 stale MANAGED_TO_CATALOG mappings corrected — health signal routes to canonical rows
+- Catalog: Retired services excluded from execute and catalog browse endpoints
+- Account deletion: grace period blocks re-authentication; deliberate re-login cancels pending deletion
+- Email canonicalization: UNIQUE constraint enforced at DB level (migration 057); all auth lookups normalized
+- USDC: tx_hash race condition returns 409 (not 500)
+- Admin gate: server-side Redis-backed rate limiting
+- payer_address: full hex/checksum validation
+- Probe: email recipient configurable via PROBE_EMAIL_TO env
+
+---
+
 ## v0.8.9 — Health monitoring & infrastructure — 2026-06-08
 
 - All 16 managed services now probed and tracked every 6 hours (was 30 minutes, 9 services)

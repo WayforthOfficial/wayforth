@@ -360,11 +360,21 @@ async def register_user(request: Request, db=Depends(get_db)):
         })
 
     is_founding = datetime.now(timezone.utc) < FOUNDING_MEMBER_CUTOFF
-    user = await db.fetchrow("""
-        INSERT INTO users (email, supabase_id, founding_member, email_canonical)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, email, created_at
-    """, email, supabase_id, is_founding, email_canon)
+    try:
+        user = await db.fetchrow("""
+            INSERT INTO users (email, supabase_id, founding_member, email_canonical)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, email, created_at
+        """, email, supabase_id, is_founding, email_canon)
+    except Exception as _ie:
+        # FINDING-107: a concurrent registration can win the race against the
+        # check-then-insert above. The UNIQUE constraints on email /
+        # email_canonical / supabase_id (migration 057) now make that fail
+        # closed — surface a clean 409 instead of a 500 rather than ever
+        # creating a duplicate canonical identity.
+        if _ie.__class__.__name__ == "UniqueViolationError":
+            raise HTTPException(status_code=409, detail={"error": "account already exists", "code": 409})
+        raise
 
     raw_key = "wf_live_" + secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
@@ -553,7 +563,7 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail={"error": "invalid_supabase_jwt"})
 
     row = await db.fetchrow("""
-        SELECT u.id, u.email, u.supabase_id, k.tier,
+        SELECT u.id, u.email, u.supabase_id, u.deletion_scheduled_at, k.tier,
                uc.package_tier, uc.lifetime_credits
         FROM users u
         LEFT JOIN api_keys k ON k.user_id = u.id AND k.active = true
@@ -568,18 +578,23 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
     # supabase_id lookup missed, try matching by the verified email claim.
     # On success, update supabase_id to the new sub so future logins hit the
     # fast path and don't rely on this fallback again.
+    # FINDING-107: match the fallback on the CANONICAL email so an OAuth identity
+    # for user@gmail.com correctly links to an existing u.s.e.r+tag@gmail.com
+    # account (same human) instead of missing and minting a duplicate.
+    from core.auth import canonicalize_email
+    claim_email_canon = canonicalize_email(claim_email) if claim_email else ""
     email_fallback_used = False
-    if not row and claim_email:
+    if not row and claim_email_canon:
         row = await db.fetchrow("""
-            SELECT u.id, u.email, u.supabase_id, k.tier,
+            SELECT u.id, u.email, u.supabase_id, u.deletion_scheduled_at, k.tier,
                    uc.package_tier, uc.lifetime_credits
             FROM users u
             LEFT JOIN api_keys k ON k.user_id = u.id AND k.active = true
             LEFT JOIN user_credits uc ON uc.user_id = u.id
-            WHERE lower(u.email) = $1
+            WHERE u.email_canonical = $1
             ORDER BY (k.encrypted_key IS NOT NULL) DESC NULLS LAST, k.created_at DESC NULLS LAST
             LIMIT 1
-        """, claim_email)
+        """, claim_email_canon)
         if row:
             email_fallback_used = True
 
@@ -590,8 +605,9 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
         })
     # Belt-and-braces: confirm the JWT email matches the row email so a JWT
     # whose `email` claim was tampered with (and somehow passed signature)
-    # cannot ride someone else's account.
-    if claim_email and row["email"].lower() != claim_email:
+    # cannot ride someone else's account. Compared on the canonical form so a
+    # dotted/aliased-but-equivalent Gmail address is not falsely rejected.
+    if claim_email_canon and canonicalize_email(row["email"]) != claim_email_canon:
         raise HTTPException(status_code=401, detail={"error": "email_mismatch"})
 
     if email_fallback_used:
@@ -604,6 +620,27 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
             supabase_sub, row["id"],
         )
 
+    # FINDING-106: reaching this endpoint requires a freshly-verified Supabase
+    # JWT for this account — i.e. a deliberate, authenticated re-login by the
+    # owner. If the account is inside the deletion grace window, treat that as
+    # an explicit intent to recover: cancel the pending deletion and reactivate
+    # the API keys that delete_account deactivated. This both unblocks the
+    # account and closes the silent-purge footgun (a re-login that didn't clear
+    # deletion_scheduled_at would otherwise still be reaped at T+24h).
+    account_recovered = False
+    if row["deletion_scheduled_at"] is not None:
+        async with db.transaction():
+            await db.execute(
+                "UPDATE users SET deletion_scheduled_at = NULL WHERE id = $1::uuid",
+                row["id"],
+            )
+            await db.execute(
+                "UPDATE api_keys SET active = TRUE WHERE user_id = $1::uuid",
+                row["id"],
+            )
+        account_recovered = True
+        logger.info("account_deletion_cancelled_via_relogin user=%s", row["id"])
+
     tier = _credits_to_tier(row["lifetime_credits"] or 0, row["package_tier"])
 
     from core.session import create_session, set_session_cookie
@@ -615,7 +652,14 @@ async def auth_session_create(request: Request, db=Depends(get_db)):
         supabase_id=supabase_sub,
     )
 
-    response = JSONResponse(content={"ok": True})
+    _content = {"ok": True}
+    if account_recovered:
+        _content["account_recovered"] = True
+        _content["message"] = (
+            "Your account was scheduled for deletion. Logging in has cancelled "
+            "the deletion — your account and API keys are active again."
+        )
+    response = JSONResponse(content=_content)
     response.headers["Cache-Control"] = "no-store, no-cache"
     set_session_cookie(response, raw_token)
     return response

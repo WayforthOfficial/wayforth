@@ -7,6 +7,8 @@ import time as _time
 import httpx
 from fastapi import HTTPException
 
+from core.url_validation import validate_external_url, validate_external_url_relaxed
+
 _httpx_log = logging.getLogger("httpx")
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,11 @@ logger = logging.getLogger(__name__)
 UPSTREAM_DAILY_CAPS: dict[str, int] = {
     "alphavantage": 25,
     "resend": 100,
+    # FINDING-111: stability generates real billable images (~$0.08 each). Cap
+    # the shared daily budget so a runaway loop / abuse can't burn unbounded spend.
+    # Raise this cap as real Stability traffic grows.
+    # Current 10/day bounds the 4 probes/day + 6 user calls/day.
+    "stability": 10,
 }
 _USER_UPSTREAM_DAILY_CAPS: dict[str, dict[str, int]] = {
     "free":       {"alphavantage": 5,  "resend": 10},
@@ -356,6 +363,10 @@ async def call_assemblyai(params: dict, api_key: str) -> dict:
     audio_url = params.get("audio_url", "")
     if not audio_url:
         raise Exception("params.audio_url is required")
+    # FINDING-101: audio_url is user-supplied and is both HEADed by us and fetched
+    # server-side by AssemblyAI — reject internal/loopback/link-local targets
+    # before any HTTP request to close the SSRF / metadata-probe vector.
+    validate_external_url(audio_url, field_name="audio_url")
     # Tier 1 input cap: ~10 min audio (~12 MB Content-Length heuristic).
     # HEAD the URL to check size; allow through if Content-Length is absent or HEAD fails.
     try:
@@ -572,6 +583,11 @@ async def call_jina(params: dict, api_key: str) -> dict:
     url = params.get("url", "")
     if not url:
         raise Exception("params.url is required")
+    # FINDING-101 / DECISION 1: url is user-supplied and fetched server-side by
+    # Jina — reject internal/loopback/link-local targets before the request.
+    # Relaxed validator: http:// pages are legitimate scrape targets; internal
+    # IP/host blocking is unchanged.
+    validate_external_url_relaxed(url, field_name="url")
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get(
             f"https://r.jina.ai/{url}",
@@ -706,6 +722,11 @@ async def call_firecrawl(params: dict, api_key: str) -> dict:
     url = params.get("url", "")
     if not url:
         raise Exception("params.url is required")
+    # FINDING-101 / DECISION 1: url is user-supplied and fetched server-side by
+    # Firecrawl — reject internal/loopback/link-local targets before the request.
+    # Relaxed validator: http:// pages are legitimate scrape targets; internal
+    # IP/host blocking is unchanged.
+    validate_external_url_relaxed(url, field_name="url")
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(
             "https://api.firecrawl.dev/v1/scrape",

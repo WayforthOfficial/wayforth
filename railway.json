@@ -11,6 +11,7 @@
     "startCommand": "sh -c 'uv run uvicorn main:app --host 0.0.0.0 --port $PORT'",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 300,
+    "_comment_numReplicas": "FINDING-015: HARD CONSTRAINT — must remain 1. _RUN_CACHE and _spend_anomaly_cooldown (core/credits.py) are in-process; >1 replica fragments security state. The app refuses to start if REPLICA_COUNT or CPU_CORES env > 1. Move that state to Redis before raising this.",
     "numReplicas": 1,
     "sleepApplication": false,
     "restartPolicyType": "ON_FAILURE",

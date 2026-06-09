@@ -300,9 +300,12 @@ async def provider_resend_verification(request: Request, db=Depends(get_db)):
     if not email:
         raise HTTPException(status_code=422, detail={"error": "email required"})
 
+    # FINDING-107: look up by canonical email so an aliased variant resolves to
+    # the same provider account that registered.
+    from core.auth import canonicalize_email
     row = await db.fetchrow(
-        "SELECT id, company_name, email_verified FROM providers WHERE email = $1",
-        email,
+        "SELECT id, company_name, email_verified FROM providers WHERE email_canonical = $1",
+        canonicalize_email(email),
     )
     if row and not row["email_verified"]:
         new_token = secrets.token_urlsafe(32)
@@ -345,9 +348,13 @@ async def provider_login(request: Request, db=Depends(get_db)):
     ip = get_real_ip(request)
     await check_login_lockout(email, redis, ip=ip)
 
+    # FINDING-107: authenticate by canonical email so a provider can log in with
+    # any alias of their registered address, and lookups can't be split across
+    # raw-email variants.
+    from core.auth import canonicalize_email
     provider = await db.fetchrow(
-        "SELECT id, company_name, email, password_hash, tier, verified, mfa_enabled FROM providers WHERE email = $1",
-        email,
+        "SELECT id, company_name, email, password_hash, tier, verified, mfa_enabled FROM providers WHERE email_canonical = $1",
+        canonicalize_email(email),
     )
     if not provider or not bcrypt.checkpw(password.encode(), provider["password_hash"].encode()):
         await record_login_failure(email, redis, ip=ip)

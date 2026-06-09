@@ -409,7 +409,7 @@ async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
             # This re-resolves and refuses delivery to internal / loopback /
             # link-local / metadata addresses.
             try:
-                from core.url_validation import validate_external_url
+                from core.url_validation import validate_external_url, post_pinned
                 validate_external_url(row["webhook_url"], field_name="url")
             except Exception as _vexc:
                 logger.warning(
@@ -442,7 +442,8 @@ async def _dispatch_webhooks(user_id: str, event: str, payload: dict) -> None:
             status_code: int | None = None
             error: str | None = None
             try:
-                resp = await client.post(
+                resp = await post_pinned(
+                    client,
                     row["webhook_url"],
                     content=body,
                     headers={
@@ -619,7 +620,7 @@ async def _webhook_retry_loop() -> None:
                             # Re-validate destination on every retry — see
                             # _dispatch_webhooks above for rationale.
                             try:
-                                from core.url_validation import validate_external_url
+                                from core.url_validation import validate_external_url, post_pinned
                                 validate_external_url(target_url, field_name="url")
                             except Exception as _vexc:
                                 logger.warning(
@@ -638,7 +639,8 @@ async def _webhook_retry_loop() -> None:
                             status_code: int | None = None
                             error: str | None = None
                             try:
-                                resp = await client.post(
+                                resp = await post_pinned(
+                                    client,
                                     target_url,
                                     content=body,
                                     headers={

@@ -1715,7 +1715,9 @@ async def delete_account(request: Request, db=Depends(get_db)):
 @limiter.limit("5/minute")
 async def undelete_account(request: Request, db=Depends(get_db)):
     """Cancel a pending account deletion within the grace window and reactivate keys."""
-    caller = await resolve_dashboard_caller(request, db)
+    # FINDING-106: this endpoint legitimately operates on a pending-deletion
+    # account, so it must bypass the "account_scheduled_for_deletion" 403 guard.
+    caller = await resolve_dashboard_caller(request, db, allow_pending_deletion=True)
     user_id = caller["user_id"]
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -1740,6 +1742,17 @@ async def undelete_account(request: Request, db=Depends(get_db)):
 async def _purge_user(db, user_id) -> None:
     """Hard-delete one user and all dependents in FK-safe order, anonymizing
     financial records (kept for aggregate accounting, PII stripped)."""
+    # FINDING-106: revoke any session minted during the grace window so it can't
+    # outlive the account. Best-effort and outside the DB transaction.
+    try:
+        from core.session import revoke_all_user_sessions
+        redis = _get_redis()
+        if redis is not None:
+            n = await revoke_all_user_sessions(redis, str(user_id))
+            if n:
+                logger.info("account_purge revoked %d session(s) user=%s", n, user_id)
+    except Exception as _se:
+        logger.warning("account_purge session revoke failed user=%s: %s", user_id, _se)
     async with db.transaction():
         # Anonymize financial history rather than delete (keep aggregates).
         await db.execute(

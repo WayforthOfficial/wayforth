@@ -25,6 +25,10 @@ router = APIRouter()
 @router.post("/admin/usdc/reconcile", tags=["Admin"])
 async def admin_usdc_reconcile(request: Request, db=Depends(get_db)):
     """Manually credit a verified-on-chain USDC payment (stranded-funds edge case)."""
+    # FINDING-110: this endpoint INTENTIONALLY bypasses the WAYFORTH_USDC_ENABLED
+    # kill-switch so an operator can recover stranded funds even while the USDC
+    # rail is disabled. It is admin-key gated (constant-time compare below) and
+    # writes an audit log line on every successful use (see end of handler).
     from main import ADMIN_KEY
     provided = request.headers.get("X-Admin-Key", "")
     if not ADMIN_KEY or not secrets.compare_digest(provided, ADMIN_KEY):
@@ -84,6 +88,26 @@ async def admin_usdc_reconcile(request: Request, db=Depends(get_db)):
     reference_id = f"reconcile_{secrets.token_hex(8)}"
 
     async with db.transaction():
+        # FINDING-108: claim the tx_hash FIRST via ON CONFLICT so a concurrent
+        # reconcile of the same tx fails closed (clean 409, no double-credit)
+        # instead of a UniqueViolationError → 500.
+        claimed = await db.fetchval("""
+            INSERT INTO usdc_payments
+                (reference_id, api_key_id, plan, amount_usdc, tx_hash, payer_address,
+                 status, consumed, bonus_credits, reconciliation_note, reconciled_by,
+                 reconciled_at, expires_at)
+            VALUES ($1, $2::uuid, 'reconcile', $3, $4, $5, 'confirmed', TRUE, $6, $7,
+                    'admin', NOW(), NOW() + INTERVAL '10 years')
+            ON CONFLICT (tx_hash) DO NOTHING
+            RETURNING id
+        """, reference_id, str(key_record["id"]), amount_usdc_float, tx_hash,
+            verify.get("from_address"), bonus, notes)
+        if claimed is None:
+            return JSONResponse(
+                {"error": "transaction_already_used",
+                 "message": "This tx hash has already been applied."},
+                status_code=409,
+            )
         new_balance = await db.fetchval("""
             UPDATE user_credits
                SET credits_balance = credits_balance + $1,
@@ -98,15 +122,6 @@ async def admin_usdc_reconcile(request: Request, db=Depends(get_db)):
                 VALUES ($1::uuid, $2, $2, 'free', 'usdc')
             """, str(key_record["user_id"]), credits_to_add)
             new_balance = credits_to_add
-        await db.execute("""
-            INSERT INTO usdc_payments
-                (reference_id, api_key_id, plan, amount_usdc, tx_hash, payer_address,
-                 status, consumed, bonus_credits, reconciliation_note, reconciled_by,
-                 reconciled_at, expires_at)
-            VALUES ($1, $2::uuid, 'reconcile', $3, $4, $5, 'confirmed', TRUE, $6, $7,
-                    'admin', NOW(), NOW() + INTERVAL '10 years')
-        """, reference_id, str(key_record["id"]), amount_usdc_float, tx_hash,
-            verify.get("from_address"), bonus, notes)
         await db.execute("""
             INSERT INTO credit_transactions (user_id, amount, balance_after, type, description)
             VALUES ($1::uuid, $2, $3, 'usdc_reconcile', $4)

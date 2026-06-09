@@ -2,7 +2,7 @@
 
 **One tool call. Any API. No setup.**
 
-[![Version](https://img.shields.io/badge/version-0.8.9_Health_Monitoring_&_Infrastructure-4F46E5)](https://gateway.wayforth.io/guide/)
+[![Version](https://img.shields.io/badge/version-0.8.10_Security_Hardening-4F46E5)](https://gateway.wayforth.io/guide/)
 [![License](https://img.shields.io/badge/license-BSL_1.1-64748B)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-190%2B_passing-10B981)](https://github.com/WayforthOfficial/wayforth)
 
@@ -206,8 +206,9 @@ Full spec: [gateway.wayforth.io/wayforthql-spec](https://gateway.wayforth.io/way
 
 ## Development Status
 
-**v0.8.9 "Health Monitoring & Infrastructure" — current release**
+**v0.8.10 "Security Hardening" — current release**
 
+- Post-v0.8.9 audit remediation: SSRF validation on URL-fetching adapters, webhook DNS-rebind IP pinning, account-deletion grace hardening, DB-level email-canonical uniqueness, USDC tx_hash race fix, admin-gate rate limiting
 - 190+ tests passing, zero failures
 - 99.97% uptime
 - **Health monitoring** — all 16 managed services probed and tracked every 6h; never-succeeded services excluded from the `/system/status` degraded aggregate

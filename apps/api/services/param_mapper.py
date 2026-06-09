@@ -212,25 +212,30 @@ INTENT_CATEGORY_HINTS: dict[str, list[str]] = {
 }
 
 
-# Managed slug → canonical catalog slug in the services table
+# Managed slug → canonical catalog slug in the services table.
+# FINDING-103: the 2026-06-03 dedup made these the CANONICAL services.slug
+# values and soft-retired (active=false) the long-form duplicates. Each managed
+# slug must map to its canonical row so health/probe signal lands where the
+# ranker reads it — not on the retired duplicate. (perplexity was never deduped,
+# so it keeps its perplexity_ai slug.)
 MANAGED_TO_CATALOG: dict[str, str] = {
     "groq":        "groq",
-    "together":    "together_ai",
+    "together":    "together",
     "deepl":       "deepl",
     "serper":      "serper",
-    "tavily":      "tavily_ai_search",
-    "brave":       "brave_search_2",
+    "tavily":      "tavily",
+    "brave":       "brave",
     "perplexity":  "perplexity_ai",
-    "openweather": "openweathermap",
+    "openweather": "openweather",
 
-    "alphavantage":"alpha_vantage",
-    "jina":        "jina_reader",
+    "alphavantage":"alphavantage",
+    "jina":        "jina",
     "assemblyai":  "assemblyai",
     "elevenlabs":  "elevenlabs",
-    "stability":   "stability_ai",
+    "stability":   "stability",
     "resend":      "resend",
     "firecrawl":   "firecrawl",
-    "mistral":     "mistral_ai",
+    "mistral":     "mistral",
     "gemini":      "gemini",
 }
 

@@ -45,7 +45,8 @@ async def list_services(
     sort: str = "tier",
     db=Depends(get_db),
 ):
-    conditions = ["1=1"]
+    # FINDING-104: exclude soft-retired (active=false) services from catalog browse.
+    conditions = ["1=1", "(active IS NULL OR active IS NOT FALSE)"]
     params = []
     idx = 1
 
@@ -115,6 +116,7 @@ async def list_categories(request: Request, db=Depends(get_db)):
                    COUNT(*) FILTER (WHERE coverage_tier >= 2) as tier2_count
             FROM services
             WHERE category IS NOT NULL
+              AND (active IS NULL OR active IS NOT FALSE)
             GROUP BY category ORDER BY count DESC
         """)
     except Exception as e:
@@ -135,6 +137,7 @@ async def featured_services(request: Request, db=Depends(get_db)):
                 ) as rn
                 FROM services
                 WHERE coverage_tier >= 2
+                  AND (active IS NULL OR active IS NOT FALSE)
             )
             SELECT name, description, category, pricing_usdc,
                    coverage_tier, payment_protocol,

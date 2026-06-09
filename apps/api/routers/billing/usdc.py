@@ -5,6 +5,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -387,10 +388,12 @@ async def subscribe_usdc(request: Request, db=Depends(get_db)):
 
     # FINDING-003: the paying wallet must be declared up front so the watcher can
     # bind the inbound transfer to this subscription (no amount-only matching).
-    if not (wallet_address.startswith("0x") and len(wallet_address) == 42):
+    # FINDING-109: full 20-byte hex validation, not just prefix+length — a
+    # non-hex 42-char string must not pass as an address.
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", wallet_address):
         raise HTTPException(status_code=400, detail={
             "error": "wallet_address_required",
-            "message": "wallet_address (the wallet you will pay FROM, 0x… 42 chars) is required.",
+            "message": "wallet_address (the wallet you will pay FROM, 0x… 40 hex chars) is required.",
         })
 
     plan_def = PLANS[plan]
@@ -446,7 +449,8 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
         })
     # FINDING-003: the declared payer must match the on-chain sender so a public
     # tx hash cannot be claimed by an account other than the one that paid.
-    if not (payer_address.startswith("0x") and len(payer_address) == 42):
+    # FINDING-109: full 20-byte hex validation, not just prefix+length.
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", payer_address):
         raise HTTPException(status_code=400, detail={"error": "invalid_payer_address"})
 
     try:
@@ -558,6 +562,24 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
     reference_id = f"topup_{secrets.token_hex(8)}"
 
     async with db.transaction():
+        # FINDING-108: claim the tx_hash FIRST via ON CONFLICT so a concurrent
+        # request with the same tx_hash fails closed (no double-credit, clean
+        # 409) instead of raising UniqueViolationError → 500 at the end. Only
+        # the request that wins the insert proceeds to credit the account.
+        claimed = await db.fetchval("""
+            INSERT INTO usdc_payments
+                (reference_id, api_key_id, plan, amount_usdc, tx_hash, payer_address,
+                 status, consumed, bonus_credits, expires_at)
+            VALUES ($1, $2::uuid, 'topup', $3, $4, $5, 'confirmed', TRUE, $6, NOW() + INTERVAL '10 years')
+            ON CONFLICT (tx_hash) DO NOTHING
+            RETURNING id
+        """, reference_id, str(key_record["id"]), amount_usdc_float, tx_hash, payer_address, topup_bonus)
+        if claimed is None:
+            raise HTTPException(status_code=409, detail={
+                "error": "transaction_already_used",
+                "message": "This transaction hash has already been applied to a top-up.",
+            })
+
         # Add credits to user
         new_credits = await db.fetchval("""
             UPDATE user_credits
@@ -582,14 +604,6 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
             SET monthly_topup_spent_usd = monthly_topup_spent_usd + $1
             WHERE id = $2::uuid
         """, amount_usdc_float, str(key_record["id"]))
-
-        # Record payment for replay protection and audit
-        await db.execute("""
-            INSERT INTO usdc_payments
-                (reference_id, api_key_id, plan, amount_usdc, tx_hash, payer_address,
-                 status, consumed, bonus_credits, expires_at)
-            VALUES ($1, $2::uuid, 'topup', $3, $4, $5, 'confirmed', TRUE, $6, NOW() + INTERVAL '10 years')
-        """, reference_id, str(key_record["id"]), amount_usdc_float, tx_hash, payer_address, topup_bonus)
 
     asyncio.create_task(_maybe_grant_founding_bonus(db, str(key_record["user_id"])))
 

@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.8.9"
+VERSION = "0.8.10"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -86,6 +86,11 @@ async def _cleanup_anon_searches_loop(app: "FastAPI"):
 
 
 
+# FINDING-111: probe email endpoints are config-driven, not a hardcoded personal
+# address committed to source. Defaults preserve existing behaviour.
+_PROBE_EMAIL_FROM = os.environ.get("PROBE_EMAIL_FROM", "probe@wayforth.io")
+_PROBE_EMAIL_TO = os.environ.get("PROBE_EMAIL_TO", "dorassulin1@gmail.com")
+
 # Probe payloads for each probeable managed service (skip resend, stability, assemblyai, elevenlabs)
 _PROBE_PARAMS: dict[str, dict] = {
     "groq":        {"messages": [{"role": "user", "content": "Hi"}]},
@@ -102,12 +107,15 @@ _PROBE_PARAMS: dict[str, dict] = {
     "mistral":     {"messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
     "gemini":      {"messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
     "firecrawl":   {"url": "https://example.com", "formats": ["markdown"]},
-    "resend":      {"from": "probe@wayforth.io", "to": "dorassulin1@gmail.com",
+    "resend":      {"from": _PROBE_EMAIL_FROM, "to": _PROBE_EMAIL_TO,
                     "subject": "Wayforth service probe", "text": "Health check."},
     # AssemblyAI: submit a short public clip; the adapter polls up to 30s then
     # returns "processing" without error — queuing successfully = probe passes.
     "assemblyai":  {"audio_url": "https://assembly.ai/wildfires.mp3"},  # 4.5MB, under 12MB cap
-    "stability":   {"prompt": "blue circle", "output_format": "jpeg", "aspect_ratio": "1:1"},  # ~$0.08/probe
+    # FINDING-111: stability generates a REAL billable image (~$0.08/probe, i.e.
+    # ~$0.32/day at the 6h cadence). Capped in UPSTREAM_DAILY_CAPS so a runaway
+    # probe loop can't burn unbounded budget.
+    "stability":   {"prompt": "blue circle", "output_format": "jpeg", "aspect_ratio": "1:1"},
     # ElevenLabs key is flagged → probe fails by design. ever_succeeded=false keeps
     # it out of the /system/status aggregate until the key is fixed (v0.9.0).
     "elevenlabs":  {"text": "probe", "voice_id": "21m00Tcm4TlvDq8ikWAM"},
@@ -128,13 +136,25 @@ async def _probe_managed_services_loop():
 
         async with pool.acquire() as conn:
             catalog_slugs = list(MANAGED_TO_CATALOG.values())
+            # FINDING-103: only resolve to ACTIVE catalog rows. A mapping that
+            # points at a retired/non-existent slug now resolves to no id and is
+            # logged below, instead of silently writing health signal onto a
+            # soft-retired (active=false) row the ranker never reads.
             slug_to_id = {
                 r["slug"]: str(r["id"])
                 for r in await conn.fetch(
-                    "SELECT id, slug FROM services WHERE slug = ANY($1::text[])",
+                    "SELECT id, slug FROM services "
+                    "WHERE slug = ANY($1::text[]) AND active IS NOT FALSE",
                     catalog_slugs,
                 )
             }
+            _missing = [s for s in catalog_slugs if s not in slug_to_id]
+            if _missing:
+                logger.error(
+                    "PROBE_SLUG_MISMATCH: MANAGED_TO_CATALOG points at slugs with "
+                    "no active services row: %s — health signal for these would be "
+                    "dropped; fix the mapping.", _missing,
+                )
 
         for managed_slug, probe_params in _PROBE_PARAMS.items():
             cfg = SERVICE_CONFIGS.get(managed_slug)
@@ -349,6 +369,26 @@ async def lifespan(app: FastAPI):
     from routers.billing import _usdc_payment_watcher, _usdc_renewal_reminder
 
     _check_required_config()
+
+    # FINDING-015: _RUN_CACHE and _spend_anomaly_cooldown (core/credits.py) plus
+    # the anon-search map are in-process and only correct at a SINGLE replica.
+    # Refuse to start if the deploy is configured to scale out, so we fail loudly
+    # instead of silently fragmenting security state (duplicate spend-anomaly
+    # alerts, divergent run idempotency). Move both to Redis before scaling.
+    # numReplicas=1 is pinned in railway.json as the matching deploy constraint.
+    _replicas = int(os.environ.get("REPLICA_COUNT", "1") or "1")
+    _cpu_cores = int(os.environ.get("CPU_CORES", "1") or "1")
+    if _replicas > 1 or _cpu_cores > 1:
+        logger.critical(
+            "FINDING-015: in-process security caches require a single replica, but "
+            "REPLICA_COUNT=%s CPU_CORES=%s. Refusing to start — move "
+            "_RUN_CACHE/_spend_anomaly_cooldown to Redis before scaling out.",
+            _replicas, _cpu_cores,
+        )
+        raise RuntimeError(
+            "Refusing to start: >1 replica/core with in-process security state (FINDING-015)"
+        )
+
     check_service_margins()
     logger.info(f"Wayforth API starting, environment={ENVIRONMENT}")
     try:

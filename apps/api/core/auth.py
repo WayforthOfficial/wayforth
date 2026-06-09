@@ -380,7 +380,7 @@ async def _resolve_user(db, api_key: str):
     return key_record["user_id"], key_record["id"], key_record["tier"] or "free"
 
 
-async def resolve_dashboard_caller(request: Request, db) -> dict:
+async def resolve_dashboard_caller(request: Request, db, allow_pending_deletion: bool = False) -> dict:
     """Authenticate a dashboard /account/* caller.
 
     Tries, in priority order:
@@ -416,7 +416,7 @@ async def resolve_dashboard_caller(request: Request, db) -> dict:
     # ── 1. wf_session cookie (browser dashboard) ────────────────────────────
     sess = get_request_session(request)
     if sess:
-        return await _load_dashboard_user(db, sess["user_id"])
+        return await _load_dashboard_user(db, sess["user_id"], allow_pending_deletion)
 
     # ── 2. Authorization: Bearer <supabase_jwt> ─────────────────────────────
     auth_header = request.headers.get("Authorization", "")
@@ -432,7 +432,7 @@ async def resolve_dashboard_caller(request: Request, db) -> dict:
         user_id = await db.fetchval("SELECT id FROM users WHERE supabase_id = $1", sub)
         if not user_id:
             raise HTTPException(status_code=401, detail={"error": "account_not_found"})
-        return await _load_dashboard_user(db, str(user_id))
+        return await _load_dashboard_user(db, str(user_id), allow_pending_deletion)
 
     # ── 3. X-Wayforth-API-Key header (programmatic) ─────────────────────────
     raw_key = request.headers.get("X-Wayforth-API-Key", "")
@@ -462,14 +462,20 @@ async def resolve_dashboard_caller(request: Request, db) -> dict:
     )
 
 
-async def _load_dashboard_user(db, user_id: str) -> dict:
+async def _load_dashboard_user(db, user_id: str, allow_pending_deletion: bool = False) -> dict:
     """Look up the standard dashboard caller shape for a user_id resolved via
     cookie or JWT. Picks the user's most-recent active api_key for the api_key
     fields; if no active key exists, returns a safe "free" shape so the
-    dashboard can still render without 500'ing."""
+    dashboard can still render without 500'ing.
+
+    FINDING-106: an account inside the deletion grace window is "unavailable" —
+    any lingering session must be blocked. Callers that legitimately operate on
+    a pending-deletion account (e.g. /account/undelete) pass
+    allow_pending_deletion=True."""
     row = await db.fetchrow("""
         SELECT k.id AS api_key_id, k.tier,
-               k.monthly_calls_count, k.monthly_calls_reset_at, u.email
+               k.monthly_calls_count, k.monthly_calls_reset_at, u.email,
+               u.deletion_scheduled_at
         FROM users u
         LEFT JOIN api_keys k ON k.user_id = u.id AND k.active = TRUE
         WHERE u.id = $1::uuid
@@ -478,6 +484,12 @@ async def _load_dashboard_user(db, user_id: str) -> dict:
     """, user_id)
     if not row:
         raise HTTPException(status_code=401, detail={"error": "account_not_found"})
+    if row["deletion_scheduled_at"] is not None and not allow_pending_deletion:
+        raise HTTPException(status_code=403, detail={
+            "error": "account_scheduled_for_deletion",
+            "message": "This account is scheduled for deletion. "
+                       "Log in again to cancel, or contact support.",
+        })
     return {
         "user_id": str(user_id),
         "api_key_id": row["api_key_id"],
