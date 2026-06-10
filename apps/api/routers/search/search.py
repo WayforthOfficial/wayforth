@@ -347,14 +347,13 @@ async def search_services(
 
     # Load Pioneer Boost metadata for each result slug.
     # Joins provider_services → providers to find active (non-paused, non-expired) boosts.
-    _boost_map: dict = {}  # slug → {wri_bonus, expires_at, new_provider}
+    _boost_map: dict = {}  # slug → {expires_in_days, new_provider}
     try:
         _top_slugs = [s.get("slug") for s in top if s.get("slug")]
         if _top_slugs:
             from datetime import datetime, timezone as _tz
             _boost_rows = await db.fetch("""
                 SELECT ps.service_slug,
-                       p.boost_wri_bonus,
                        p.boost_expires_at,
                        p.created_at AS provider_created_at
                   FROM provider_services ps
@@ -374,7 +373,6 @@ async def search_services(
                     and (_now - (_provider_created if _provider_created.tzinfo else _provider_created.replace(tzinfo=_tz.utc))).days <= 30
                 )
                 _boost_map[br["service_slug"]] = {
-                    "wri_bonus": int(br["boost_wri_bonus"] or 0),
                     "expires_in_days": days_left,
                     "new_provider": is_new,
                 }
@@ -386,18 +384,16 @@ async def search_services(
     for s in top:
         slug = s.get("slug")
         _boost = _boost_map.get(slug, {})
-        _boost_bonus = _boost.get("wri_bonus", 0)
-        _base_wri = _apply_health_wri(
+        _wri = _apply_health_wri(
             s["wri_score"] if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
             _health_map.get(slug),
         )
-        _boosted_wri = min(round((_base_wri or 0) + _boost_bonus, 1), 100.0)
         result = {
             "name": s.get("name"),
             "slug": slug,
             "description": s.get("description"),
             "score": s.get("score", 0),
-            "wri": _boosted_wri,
+            "wri": _wri,
             "ranking_version": "v2" if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else "v1",
             "reason": s.get("reason", ""),
             "coverage_tier": s.get("coverage_tier"),
@@ -424,11 +420,11 @@ async def search_services(
             },
         }
         if _boost:
-            result["boosted"] = True
+            result["boost_active"] = True
             result["boost_expires_in_days"] = _boost["expires_in_days"]
             result["new_provider"] = _boost["new_provider"]
         else:
-            result["boosted"] = False
+            result["boost_active"] = False
         results.append(result)
     response: dict = {
         "query_id": query_id,

@@ -855,7 +855,7 @@ async def admin_boosts_list(request: Request, db=Depends(get_db)):
     session = await get_admin_session(request, db)
     rows = await db.fetch("""
         SELECT p.id, p.company_name, p.email, p.boost_tier,
-               p.boost_used, p.boost_paused, p.boost_wri_bonus,
+               p.boost_used, p.boost_paused,
                p.boost_activated_at, p.boost_expires_at,
                ps.service_slug
           FROM providers p
@@ -883,7 +883,6 @@ async def admin_boosts_list(request: Request, db=Depends(get_db)):
             "boost_active":   active,
             "boost_paused":   bool(r["boost_paused"]),
             "days_remaining": days_remaining,
-            "wri_bonus":      r["boost_wri_bonus"],
             "activated_at":   r["boost_activated_at"].isoformat() if r["boost_activated_at"] else None,
             "expires_at":     expires.isoformat() if expires else None,
         })
@@ -1026,7 +1025,7 @@ async def admin_boost_pause(request: Request, provider_id: str, db=Depends(get_d
     """Manually pause a provider's Pioneer Boost."""
     session = await get_admin_session(request, db)
     result = await db.execute(
-        "UPDATE providers SET boost_paused = TRUE, boost_wri_bonus = 0 WHERE id = $1::uuid AND boost_used = TRUE",
+        "UPDATE providers SET boost_paused = TRUE WHERE id = $1::uuid AND boost_used = TRUE",
         provider_id,
     )
     if result == "UPDATE 0":
@@ -1039,11 +1038,10 @@ async def admin_boost_pause(request: Request, provider_id: str, db=Depends(get_d
 
 @router.post("/admin-api/providers/{provider_id}/boost/unpause")
 async def admin_boost_unpause(request: Request, provider_id: str, db=Depends(get_db)):
-    """Manually unpause a provider's Pioneer Boost (restores correct wri_bonus from boost_tier)."""
-    from routers.provider import _BOOST_CONFIG
+    """Manually unpause a provider's Pioneer Boost (resumes Pioneer routing traffic)."""
     session = await get_admin_session(request, db)
     row = await db.fetchrow(
-        "SELECT boost_tier, boost_expires_at FROM providers WHERE id = $1::uuid AND boost_used = TRUE",
+        "SELECT boost_expires_at FROM providers WHERE id = $1::uuid AND boost_used = TRUE",
         provider_id,
     )
     if not row:
@@ -1051,19 +1049,15 @@ async def admin_boost_unpause(request: Request, provider_id: str, db=Depends(get
     from datetime import datetime, timezone
     if row["boost_expires_at"] and row["boost_expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(status_code=409, detail={"error": "boost_expired", "message": "Boost window has elapsed; cannot unpause."})
-    cfg = _BOOST_CONFIG.get(row["boost_tier"] or "", {})
-    correct_bonus = cfg.get("wri_bonus", 0)
     await db.execute(
-        "UPDATE providers SET boost_paused = FALSE, boost_wri_bonus = $2 WHERE id = $1::uuid",
-        provider_id, correct_bonus,
+        "UPDATE providers SET boost_paused = FALSE WHERE id = $1::uuid",
+        provider_id,
     )
     from core.audit import log_admin_action
     await log_admin_action(db, session, "boost_manually_unpaused",
                            target_resource=provider_id,
-                           payload={"wri_bonus_restored": correct_bonus},
                            request=request)
-    return {"status": "unpaused", "wri_bonus_restored": correct_bonus,
-            "provider_id": provider_id, "changed_by": session["email"]}
+    return {"status": "unpaused", "provider_id": provider_id, "changed_by": session["email"]}
 
 
 # ── Pioneer Developer Program Stats ───────────────────────────────────────────

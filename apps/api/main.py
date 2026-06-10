@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.8.11"
+VERSION = "0.8.12"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -247,12 +247,13 @@ async def _boost_auto_pause_loop():
 
     Pause rule:  boost active AND provider's service drops below Tier 2
                  (coverage_tier < 2 OR consecutive_failures >= 3)
-                 → boost_paused = TRUE, boost_wri_bonus = 0
+                 → boost_paused = TRUE (Pioneer routing traffic paused)
 
     Resume rule: boost paused AND service recovers to Tier 2
                  (coverage_tier >= 2 AND consecutive_failures < 3)
-                 → boost_paused = FALSE, bonus restored from boost_tier config
+                 → boost_paused = FALSE (routing traffic restored)
                  Note: boost_expires_at is never changed — paused days are lost.
+    WRI score is never modified by boost state — see /integrity §11.5.
     """
     from routers.provider import _BOOST_CONFIG
     await asyncio.sleep(120)  # startup delay — let probe loop run first
@@ -263,8 +264,7 @@ async def _boost_auto_pause_loop():
                 async with pool.acquire() as conn:
                     # Find all providers with an active (non-expired) boost
                     boost_rows = await conn.fetch("""
-                        SELECT p.id AS provider_id, p.boost_tier, p.boost_paused,
-                               p.boost_wri_bonus
+                        SELECT p.id AS provider_id, p.boost_paused
                           FROM providers p
                          WHERE p.boost_used = TRUE
                            AND p.boost_expires_at > NOW()
@@ -285,27 +285,24 @@ async def _boost_auto_pause_loop():
                             (svc["coverage_tier"] or 0) >= 2
                             and (svc["consecutive_failures"] or 0) < 3
                         )
-                        cfg = _BOOST_CONFIG.get(row["boost_tier"] or "", {})
-                        correct_bonus = cfg.get("wri_bonus", 0)
 
                         if not tier2_ok and not row["boost_paused"]:
-                            # Service degraded → pause boost
+                            # Service degraded → pause boost (routing only, no WRI effect)
                             await conn.execute("""
                                 UPDATE providers
-                                   SET boost_paused = TRUE, boost_wri_bonus = 0
+                                   SET boost_paused = TRUE
                                  WHERE id = $1
                             """, row["provider_id"])
                             logger.info("boost auto-paused provider=%s", row["provider_id"])
 
                         elif tier2_ok and row["boost_paused"]:
-                            # Service recovered → restore boost
+                            # Service recovered → resume boost
                             await conn.execute("""
                                 UPDATE providers
-                                   SET boost_paused = FALSE, boost_wri_bonus = $2
+                                   SET boost_paused = FALSE
                                  WHERE id = $1
-                            """, row["provider_id"], correct_bonus)
-                            logger.info("boost auto-resumed provider=%s bonus=%d",
-                                        row["provider_id"], correct_bonus)
+                            """, row["provider_id"])
+                            logger.info("boost auto-resumed provider=%s", row["provider_id"])
             except Exception as exc:
                 logger.warning("boost_auto_pause_loop error: %s", exc)
         await asyncio.sleep(1800)  # 30 minutes

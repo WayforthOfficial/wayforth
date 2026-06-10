@@ -4,6 +4,16 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.12 — Integrity: Launch Boost WRI separation — 2026-06-09
+
+- Launch Boost no longer modifies displayed WRI scores (+10/+20 grant removed per /integrity §11.5)
+- Boost value is now purely Pioneer routing traffic share — boosted providers receive preferential routing in the Pioneer bucket for the boost duration
+- Per-result boost_active: true/false field added to search responses (transparent disclosure)
+- compute_wri_v2 formula updated in both API and rank service — boost_wri_bonus parameter removed
+- All ranking pipeline paths (search, auto-pause, admin pause/unpause, recalculate) verified: WRI is probe/payment-signal derived only
+
+---
+
 ## v0.8.11 — Security hardening (information disclosure) — 2026-06-09
 
 - /system/health: unauthenticated callers now receive only {"status":"ok","version":"..."} — account counts, tier counts, encryption algorithm, escrow address, and managed-service config are gated behind X-Admin-Key

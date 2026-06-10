@@ -1058,8 +1058,8 @@ async def provider_earnings_history(request: Request, db=Depends(get_db)):
 # ── Provider Boost (Pioneer Program) ─────────────────────────────────────────
 
 _BOOST_CONFIG = {
-    "intelligence": {"days": 15, "wri_bonus": 10},
-    "premium":      {"days": 30, "wri_bonus": 20},
+    "intelligence": {"days": 15},
+    "premium":      {"days": 30},
 }
 
 
@@ -1074,7 +1074,8 @@ async def provider_boost_activate(request: Request, db=Depends(get_db)):
     - boost_used must be FALSE — this is a lifetime, one-time benefit
 
     On success: sets boost_used=TRUE (permanent), boost_activated_at, boost_expires_at,
-    boost_tier, boost_wri_bonus; records to audit log.
+    boost_tier; records to audit log. Boosts grant preferential Pioneer routing traffic
+    for the duration — WRI score is never modified by a paid boost (/integrity §11.5).
     """
     from datetime import datetime, timezone, timedelta
     from core.audit import log_provider_action
@@ -1137,11 +1138,11 @@ async def provider_boost_activate(request: Request, db=Depends(get_db)):
                boost_activated_at = $2,
                boost_expires_at   = $3,
                boost_tier         = $4,
-               boost_wri_bonus    = $5,
+               boost_wri_bonus    = 0,
                boost_paused       = FALSE
          WHERE id = $1 AND boost_used = FALSE
          RETURNING id
-    """, provider_id, now, expires_at, tier, cfg["wri_bonus"])
+    """, provider_id, now, expires_at, tier)
     if activated is None:
         raise HTTPException(status_code=409, detail={
             "error": "boost_already_used",
@@ -1156,7 +1157,6 @@ async def provider_boost_activate(request: Request, db=Depends(get_db)):
         target_resource=svc["service_slug"],
         payload={
             "tier": tier,
-            "wri_bonus": cfg["wri_bonus"],
             "expires_at": expires_at.isoformat(),
         },
         request=request,
@@ -1165,7 +1165,7 @@ async def provider_boost_activate(request: Request, db=Depends(get_db)):
     return {
         "boost_activated": True,
         "boost_tier":      tier,
-        "boost_wri_bonus": cfg["wri_bonus"],
+        "boost_active":    True,
         "boost_activated_at": now.isoformat(),
         "boost_expires_at":   expires_at.isoformat(),
         "days":               cfg["days"],
@@ -1182,7 +1182,7 @@ async def provider_boost_status(request: Request, db=Depends(get_db)):
     provider = await _get_provider(request, db)
     row = await db.fetchrow("""
         SELECT boost_used, boost_activated_at, boost_expires_at,
-               boost_tier, boost_wri_bonus, boost_paused
+               boost_tier, boost_paused
           FROM providers WHERE id = $1
     """, provider["provider_id"])
     if not row:
@@ -1205,7 +1205,6 @@ async def provider_boost_status(request: Request, db=Depends(get_db)):
         "boost_active":       boost_active,
         "boost_paused":       bool(row["boost_paused"]),
         "boost_tier":         row["boost_tier"],
-        "boost_wri_bonus":    row["boost_wri_bonus"] if boost_active else 0,
         "boost_activated_at": row["boost_activated_at"].isoformat() if row["boost_activated_at"] else None,
         "boost_expires_at":   expires_at.isoformat() if expires_at else None,
         "days_remaining":     days_remaining,
