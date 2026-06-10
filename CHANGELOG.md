@@ -4,6 +4,12 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.11 — Security hardening (information disclosure) — 2026-06-09
+
+- /system/health: unauthenticated callers now receive only {"status":"ok","version":"..."} — account counts, tier counts, encryption algorithm, escrow address, and managed-service config are gated behind X-Admin-Key
+
+---
+
 ## v0.8.10 — Security hardening (post v0.8.9 audit) — 2026-06-09
 
 - SSRF: AssemblyAI, Jina, Firecrawl adapters now validate user-supplied URLs before any HTTP request
