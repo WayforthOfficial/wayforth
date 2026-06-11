@@ -4,6 +4,27 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.13 — Security hardening, crawler fix, PyPI corrections — 2026-06-10
+
+### Security
+- Auth-gated `/system/health` — unauthenticated callers now receive `{status, version}` only; all internal metrics require a valid API key
+- PostgreSQL password rotated across all services
+- Crawler switched to private network (`postgres.railway.internal`)
+- Removed stale `$WAYF burn` comment from `execute.py`
+
+### Infrastructure
+- Fixed crawler DB authentication failure — password mismatch resolved
+- All Railway services verified healthy post-rotation
+
+### Package (wayforth-mcp 0.8.13)
+- License corrected to BSL 1.1 (was incorrectly showing MIT on PyPI)
+- Documentation URL updated to `wayforth.io/guide/`
+- Tools table corrected: 17 tools documented (was 13, 4 were missing)
+- API count updated to ~5,000
+- Tier 2 count corrected to 3,400+
+
+---
+
 ## v0.8.12 — Integrity: Launch Boost WRI separation — 2026-06-09
 
 - Launch Boost no longer modifies displayed WRI scores (+10/+20 grant removed per /integrity §11.5)

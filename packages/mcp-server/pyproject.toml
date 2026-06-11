@@ -1,9 +1,9 @@
 [project]
 name = "wayforth-mcp"
-version = "0.8.9"
+version = "0.8.13"
 description = "MCP server for Wayforth — The API Runtime for AI Agents."
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "BSL-1.1"}
 authors = [{name = "Wayforth Technologies Inc."}]
 requires-python = ">=3.10"
 dependencies = [
@@ -16,7 +16,7 @@ keywords = ["ai", "agents", "mcp", "wayforth", "api"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3",
 ]
 
@@ -26,7 +26,7 @@ wayforth-mcp = "server:main"
 [project.urls]
 Homepage = "https://wayforth.io"
 Repository = "https://github.com/WayforthOfficial/wayforth"
-Documentation = "https://gateway.wayforth.io/docs"
+Documentation = "https://wayforth.io/guide/"
 
 [build-system]
 requires = ["hatchling"]

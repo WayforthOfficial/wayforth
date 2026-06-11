@@ -24,8 +24,7 @@ from services.managed import SERVICE_CONFIGS
 class TestVersion:
 
     def test_version_is_070(self):
-        # v0.8.9 — Health monitoring & infrastructure.
-        assert VERSION == "0.8.9"
+        assert VERSION == "0.8.13"
 
     def test_version_is_string(self):
         assert isinstance(VERSION, str)

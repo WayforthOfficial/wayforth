@@ -679,7 +679,6 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
       - Coinbase facilitator handles settlement
 
     Routing fee: 1.5% on all tracks
-    30% of fee allocated to $WAYF burn (post-mainnet)
     """
     api_key = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key:

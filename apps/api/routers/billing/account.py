@@ -829,19 +829,23 @@ async def account_agent_detail(request: Request, agent_id: str, db=Depends(get_d
 @router.get("/system/health")
 async def system_health(request: Request, db=Depends(get_db)):
     """Comprehensive health check for all payment tracks and subsystems."""
-    import secrets as _secrets
     import time as _time
-    from main import app, VERSION, ADMIN_KEY
+    from main import app, VERSION
     from core.auth import get_fernet
     from routers.billing.stripe import STRIPE_MOCK as _STRIPE_MOCK
 
-    provided_key = request.headers.get("X-Admin-Key", "")
-    _is_admin = bool(
-        ADMIN_KEY
-        and provided_key
-        and _secrets.compare_digest(provided_key, ADMIN_KEY)
-    )
-    if not _is_admin:
+    # Unauthenticated callers get only status + version — full internals are
+    # gated behind a valid API key to prevent information disclosure.
+    raw_key = request.headers.get("X-Wayforth-API-Key", "")
+    _is_authed = False
+    if raw_key:
+        _key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        _key_row = await db.fetchrow(
+            "SELECT id FROM api_keys WHERE key_hash = $1 AND active = TRUE",
+            _key_hash,
+        )
+        _is_authed = bool(_key_row)
+    if not _is_authed:
         return {"status": "ok", "version": VERSION}
 
     start = _time.time()
