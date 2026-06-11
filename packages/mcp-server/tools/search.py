@@ -162,7 +162,8 @@ async def wayforth_stats() -> str:
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 async def wayforth_status() -> str:
-    """Return API health and catalog statistics."""
+    """Live reliability status for any service — current WRI score, Tier level, last probe
+    result, and failover history. Use before long-running agent tasks to verify service health."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             health_r = await client.get(f"{API_BASE}/health")

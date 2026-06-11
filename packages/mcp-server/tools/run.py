@@ -31,11 +31,11 @@ async def wayforth_run(
         description="Optional: tag this call with your agent's name for per-agent analytics in your dashboard. Example: 'translation-agent', 'my-chatbot'. Max 64 chars, alphanumeric/hyphens/underscores.",
     ),
 ) -> str:
-    """The Wayforth runtime. One call does everything: searches for the best API,
-    picks the top-ranked service by WayforthRank v2, maps your input to the
-    service's params, and executes it — returning the result directly.
+    """Intent-based routing with automatic reliability failover.
+    Describe what you need — Wayforth selects the highest-WRI verified service
+    and executes it. If the primary service degrades mid-session, automatically
+    reroutes to the next verified equivalent. Returns result + failover status.
 
-    Use this instead of wayforth_search + wayforth_execute when you just want the result.
     Supports: translation, weather, news, stock prices, web search, image generation,
     speech-to-text, text-to-speech, email, and 300+ more catalog services.
 
@@ -102,12 +102,19 @@ async def wayforth_run(
     data = resp.json()
     svc = data.get("service_used", {})
     ctx = data.get("search_context", {})
+    failover = data.get("failover", {"triggered": False})
 
-    return json.dumps({
+    out: dict = {
         "result": data.get("result"),
         "service_used": svc,
         "search_context": ctx,
+        "failover": failover,
         "credits_remaining": data.get("credits_remaining"),
-        "calls_remaining": data.get("calls_remaining"),
         "execution_ms": data.get("execution_ms"),
-    }, indent=2)
+    }
+    if failover.get("triggered"):
+        out["_failover_note"] = (
+            f"⚡ Failover: {failover.get('original_service')} → {failover.get('routed_to')} "
+            f"({failover.get('reason')}, WRI {failover.get('original_wri')} → {failover.get('fallback_wri')})"
+        )
+    return json.dumps(out, indent=2)

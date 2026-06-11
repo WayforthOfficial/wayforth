@@ -32,11 +32,12 @@ export WAYFORTH_API_KEY=wf_live_...
 |------|-------------|
 | `wayforth_search` | Search ~5,000 APIs by natural language — returns WRI scores, tier, price/req |
 | `wayforth_query` | Structured discovery — filter by tier, latency, region, price, payment rail |
-| `wayforth_run` | Intent-based routing: describe what you need, Wayforth picks and executes |
-| `wayforth_execute` | Direct execution of a managed service by slug — no API key required |
+| `wayforth_run` | Intent-based routing with automatic reliability failover — returns result + failover status |
+| `wayforth_execute` | Direct execution of a managed service; auto-fails over to best alternative if degraded — returns result + failover status |
+| `wayforth_reliability` | Real-time reliability check — WRI score, tier, 7d uptime, last probe, failover candidate |
 | `wayforth_pay` | Pay for a service via card credits or USDC on Base |
 | `wayforth_list` | Browse catalog with category, tier, and limit filters |
-| `wayforth_status` | Live API health and service counts |
+| `wayforth_status` | Live API health, WRI scores, tier levels, last probe result, and failover history |
 | `wayforth_stats` | Catalog statistics — total services, tier breakdown |
 | `wayforth_keys` | Store your own API keys encrypted at rest (BYOK) |
 | `wayforth_remember` | Save a service to persistent agent memory |

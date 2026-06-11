@@ -16,11 +16,10 @@ async def wayforth_execute(
     key_source: str = Field(default="managed", description="Key source: 'managed' (use Wayforth's key, default) or 'byok' (use your stored key)"),
     agent_id: str = Field(default="", description="Optional: tag this call with your agent's name for per-agent analytics. Example: 'translation-agent'. Max 64 chars, alphanumeric/hyphens/underscores."),
 ) -> str:
-    """Execute any API service instantly.
-    15 managed services run with zero API keys —
-    Wayforth holds the credentials.
-    The fastest way to add any API capability
-    to your agent.
+    """Direct execution against a managed service by slug.
+    If the service is below Tier 2 or WRI-degraded at call time, Wayforth
+    fails over to the best verified alternative automatically.
+    Returns result + failover status.
 
     Optional: include agent_id='my-agent-name' to tag this call for per-agent analytics
     in your dashboard at wayforth.io/dashboard/agents.
@@ -54,13 +53,21 @@ async def wayforth_execute(
             return f"Service error ({service_slug}): {detail.get('error', 'unknown')}"
         return f"Execute error {resp.status_code}: {resp.text[:300]}"
     data = resp.json()
-    result_str = json.dumps({
+    failover = data.get("failover", {"triggered": False})
+    out: dict = {
         "service": data.get("service"),
         "result": data.get("result"),
+        "failover": failover,
         "credits_deducted": data.get("credits_deducted"),
         "credits_remaining": data.get("credits_remaining"),
         "execution_ms": data.get("execution_ms"),
-    }, indent=2)
+    }
+    if failover.get("triggered"):
+        out["_failover_note"] = (
+            f"⚡ Failover: {failover.get('original_service')} → {failover.get('routed_to')} "
+            f"({failover.get('reason')}, WRI {failover.get('original_wri')} → {failover.get('fallback_wri')})"
+        )
+    result_str = json.dumps(out, indent=2)
 
     credits_ded = data.get("credits_deducted", "?")
     credits_rem = data.get("credits_remaining", "—")

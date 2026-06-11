@@ -99,6 +99,30 @@ def _mk_refund_key(base: str, *parts) -> str:
     return str(_uuid.uuid5(_REFUND_NS, ":".join(str(p) for p in (base, *parts))))
 
 
+_FAILURE_REASON_LABELS: dict[str, str] = {
+    "timeout":     "Service timeout",
+    "rate_limit":  "Rate limit exceeded",
+    "unavailable": "Service unavailable",
+    "auth":        "Service authentication failed",
+    "parse_error": "Service response parse error",
+}
+
+
+async def _fetch_wri(db, slug: str) -> float | None:
+    """Return the current WRI score for a catalog slug, or None."""
+    from services.param_mapper import MANAGED_TO_CATALOG as _M2C
+    catalog_slug = _M2C.get(slug, slug)
+    try:
+        row = await db.fetchrow(
+            "SELECT wri_score FROM services WHERE slug = $1", catalog_slug
+        )
+        if row and row["wri_score"] is not None:
+            return round(float(row["wri_score"]), 1)
+    except Exception:
+        pass
+    return None
+
+
 def _classify_error(error_msg: str) -> str:
     """Classify a service error as 'service_failure' (refund) or 'client_error' (no refund).
 
@@ -1418,8 +1442,21 @@ async def execute_service(request: Request, db=Depends(get_db)):
         "priority": _tier in ("pro", "growth"),
     }
     if _execute_fallback_from:
-        resp["fallback_from"] = _execute_fallback_from
-        resp["fallback_reason"] = "service_unavailable"
+        _orig_wri = await _fetch_wri(db, _execute_fallback_from)
+        _fb_wri   = await _fetch_wri(db, service_slug)
+        resp["failover"] = {
+            "triggered":        True,
+            "original_service": _execute_fallback_from,
+            "routed_to":        service_slug,
+            "reason":           _FAILURE_REASON_LABELS.get(_original_failure_code, "Service unavailable"),
+            "original_wri":     _orig_wri,
+            "fallback_wri":     _fb_wri,
+        }
+        # Preserved for backward-compat consumers still reading flat fields
+        resp["fallback_from"]   = _execute_fallback_from
+        resp["fallback_reason"] = _FAILURE_REASON_LABELS.get(_original_failure_code, "service_unavailable")
+    else:
+        resp["failover"] = {"triggered": False}
     return resp
 
 
@@ -2021,8 +2058,21 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
         "priority": _tier in ("pro", "growth"),
     }
     if _fallback_from:
-        _run_result["fallback_from"] = _fallback_from
+        _run_orig_wri = await _fetch_wri(db, _fallback_from)
+        _run_fb_wri   = round(float(wri), 1) if wri is not None else None
+        _run_result["failover"] = {
+            "triggered":        True,
+            "original_service": _fallback_from,
+            "routed_to":        selected_slug,
+            "reason":           "Service unavailable",
+            "original_wri":     _run_orig_wri,
+            "fallback_wri":     _run_fb_wri,
+        }
+        # Preserved for backward-compat consumers still reading flat fields
+        _run_result["fallback_from"]   = _fallback_from
         _run_result["fallback_reason"] = "service_unavailable"
+    else:
+        _run_result["failover"] = {"triggered": False}
     _run_cache_set(_cache_key, _run_result)
 
     _run_model = mapped_params.get("model") if selected_slug in _LLM_SLUGS else None

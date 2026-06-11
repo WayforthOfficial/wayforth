@@ -334,6 +334,122 @@ async def service_slug_health(request: Request, slug: str, db=Depends(get_db)):
     }
 
 
+@router.get("/reliability")
+@limiter.limit("60/minute")
+async def service_reliability(
+    request: Request,
+    slug: str | None = Query(default=None, description="Managed service slug (e.g. deepl, groq)"),
+    category: str | None = Query(default=None, description="Category name — returns top 5 by WRI"),
+    db=Depends(get_db),
+):
+    """Real-time reliability snapshot for a service or category.
+
+    Returns WRI score, tier, uptime estimate, last probe timestamp, and whether
+    a verified failover alternative is available. Use before committing to a
+    service for a long-running agent task.
+    """
+    from services.managed import SERVICE_ALTERNATIVES
+    from services.param_mapper import CATALOG_TO_MANAGED
+
+    async def _build_entry(svc_slug: str) -> dict:
+        catalog_slug = MANAGED_TO_CATALOG.get(svc_slug, svc_slug)
+        svc_row = await db.fetchrow(
+            "SELECT name, coverage_tier, wri_score, consecutive_failures, last_tested_at "
+            "FROM services WHERE slug = $1",
+            catalog_slug,
+        )
+        health_row = await db.fetchrow(
+            "SELECT avg_response_ms, error_rate, last_probe_at, probe_count "
+            "FROM service_health WHERE slug = $1",
+            svc_slug,
+        )
+
+        wri = None
+        tier = None
+        name = svc_slug
+        if svc_row:
+            name = svc_row["name"] or svc_slug
+            tier = svc_row["coverage_tier"]
+            wri = round(float(svc_row["wri_score"]), 1) if svc_row["wri_score"] is not None else None
+
+        error_rate = float(health_row["error_rate"]) if health_row and health_row["error_rate"] is not None else None
+        avg_ms = float(health_row["avg_response_ms"]) if health_row and health_row["avg_response_ms"] is not None else None
+        consec_fail = (svc_row["consecutive_failures"] or 0) if svc_row else 0
+
+        if error_rate is not None and error_rate > 0.3:
+            status = "degraded"
+        elif consec_fail >= 3:
+            status = "outage"
+        else:
+            status = "healthy"
+
+        uptime_7d: str | None = None
+        if error_rate is not None:
+            uptime_7d = f"{round((1 - error_rate) * 100, 1)}%"
+
+        last_probe: str | None = None
+        probe_ts = (
+            health_row["last_probe_at"] if health_row and health_row["last_probe_at"] else
+            (svc_row["last_tested_at"] if svc_row and svc_row["last_tested_at"] else None)
+        )
+        if probe_ts:
+            from datetime import datetime, timezone
+            delta = datetime.now(timezone.utc) - probe_ts.replace(tzinfo=timezone.utc) if probe_ts.tzinfo is None else datetime.now(timezone.utc) - probe_ts
+            mins = int(delta.total_seconds() / 60)
+            if mins < 60:
+                last_probe = f"{mins} minute{'s' if mins != 1 else ''} ago"
+            elif mins < 1440:
+                hrs = mins // 60
+                last_probe = f"{hrs} hour{'s' if hrs != 1 else ''} ago"
+            else:
+                last_probe = f"{mins // 1440} day{'s' if mins // 1440 != 1 else ''} ago"
+
+        alt_slug = SERVICE_ALTERNATIVES.get(svc_slug)
+        failover_available = bool(alt_slug)
+        failover_candidate: str | None = None
+        if alt_slug:
+            alt_catalog = MANAGED_TO_CATALOG.get(alt_slug, alt_slug)
+            alt_svc = await db.fetchrow("SELECT name FROM services WHERE slug = $1", alt_catalog)
+            failover_candidate = (alt_svc["name"] if alt_svc else alt_slug) if alt_slug else None
+
+        return {
+            "service":            svc_slug,
+            "name":               name,
+            "wri":                wri,
+            "tier":               tier,
+            "uptime_7d":          uptime_7d,
+            "avg_response_ms":    round(avg_ms) if avg_ms is not None else None,
+            "last_probe":         last_probe,
+            "status":             status,
+            "failover_available": failover_available,
+            "failover_candidate": failover_candidate,
+        }
+
+    if slug:
+        entry = await _build_entry(slug)
+        if entry["wri"] is None and entry["last_probe"] is None:
+            raise HTTPException(status_code=404, detail={"error": "service_not_found", "slug": slug})
+        return entry
+
+    if category:
+        rows = await db.fetch(
+            "SELECT s.slug, s.wri_score "
+            "FROM services s "
+            "WHERE s.category = $1 AND s.active = TRUE "
+            "ORDER BY s.wri_score DESC NULLS LAST LIMIT 5",
+            category,
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail={"error": "no_services_found", "category": category})
+        results = []
+        for row in rows:
+            managed_slug = CATALOG_TO_MANAGED.get(row["slug"], row["slug"])
+            results.append(await _build_entry(managed_slug))
+        return {"category": category, "services": results}
+
+    raise HTTPException(status_code=422, detail={"error": "provide_slug_or_category", "hint": "Pass ?slug=deepl or ?category=translation"})
+
+
 @router.get("/health-report")
 @limiter.limit("10/minute")
 async def health_report(request: Request, db=Depends(get_db)):

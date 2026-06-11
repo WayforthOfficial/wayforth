@@ -148,14 +148,15 @@ Three ways to pay for API calls through Wayforth:
 
 ## MCP Tools
 
-17 tools available via the Wayforth MCP server:
+18 tools available via the Wayforth MCP server:
 
 | Tool | Description |
 |------|-------------|
 | `wayforth_search` | Search ~5,000 APIs by intent — returns ranked results with WRI scores |
 | `wayforth_query` | Structured discovery with WayforthQL — filter by tier, latency, region, price, payment rail |
-| `wayforth_run` | Intent-based routing: describe what you need, Wayforth picks and executes the best service |
-| `wayforth_execute` | Direct execution of a managed service by slug — no API key required |
+| `wayforth_run` | Intent-based routing with automatic reliability failover — returns result + failover status |
+| `wayforth_execute` | Direct execution of a managed service; auto-fails over to best alternative if degraded |
+| `wayforth_reliability` | Real-time reliability check — WRI score, tier, 7d uptime, last probe, failover candidate |
 | `wayforth_pay` | Pay for a service call via card credits or USDC on Base |
 | `wayforth_list` | List available services with category and tier filters |
 | `wayforth_status` | Live API health check and real-time service counts |
