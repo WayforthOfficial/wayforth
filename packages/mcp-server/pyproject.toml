@@ -1,6 +1,6 @@
 [project]
 name = "wayforth-mcp"
-version = "0.8.13"
+version = "0.8.14"
 description = "MCP server for Wayforth — The API Runtime for AI Agents."
 readme = "README.md"
 license = {text = "BSL-1.1"}

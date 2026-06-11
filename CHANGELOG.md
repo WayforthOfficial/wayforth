@@ -4,6 +4,16 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.8.14 — June 10, 2026
+
+### Features
+- Self-healing failover surfaced as first-class feature — all `/execute` and `/run` responses now include an explicit `failover` block (`triggered`, `original_service`, `routed_to`, `reason`, `original_wri`, `fallback_wri`)
+- New `wayforth_reliability` tool — real-time WRI score, tier, `uptime_7d`, last probe, failover candidate for any service or category
+- New `GET /reliability` endpoint backing the tool
+- Updated `wayforth_run` and `wayforth_execute` tool descriptions to explicitly surface failover behavior
+
+---
+
 ## v0.8.13 — Security hardening, crawler fix, PyPI corrections — 2026-06-10
 
 ### Security
