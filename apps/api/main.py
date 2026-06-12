@@ -89,7 +89,7 @@ async def _cleanup_anon_searches_loop(app: "FastAPI"):
 # FINDING-111: probe email endpoints are config-driven, not a hardcoded personal
 # address committed to source. Defaults preserve existing behaviour.
 _PROBE_EMAIL_FROM = os.environ.get("PROBE_EMAIL_FROM", "probe@wayforth.io")
-_PROBE_EMAIL_TO = os.environ.get("PROBE_EMAIL_TO", "dorassulin1@gmail.com")
+_PROBE_EMAIL_TO = os.environ.get("PROBE_EMAIL_TO", "ops@wayforth.io")
 
 # Probe payloads for each probeable managed service (skip resend, stability, assemblyai, elevenlabs)
 _PROBE_PARAMS: dict[str, dict] = {
@@ -1231,7 +1231,6 @@ app.add_middleware(
         "https://mcp.wayforth.io",
         "https://zeropointaccess.com",
         "https://www.zeropointaccess.com",
-        "https://id-preview--1f7c5e7e-c191-4274-b4a6-f6e732da08d9.lovable.app",
         "https://intent-exchange.lovable.app",
     ],
     allow_credentials=True,
