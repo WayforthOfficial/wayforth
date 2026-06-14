@@ -143,7 +143,7 @@ SERVICE_DISPLAY_NAMES = {
     "openweather": "OpenWeather",
 
     "alphavantage":"Alpha Vantage",
-    "jina":        "Jina Reader",
+    "jina":        "Jina AI",
     "assemblyai":  "AssemblyAI",
     "elevenlabs":  "ElevenLabs TTS",
     "stability":   "Stability AI",
