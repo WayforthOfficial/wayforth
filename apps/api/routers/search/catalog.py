@@ -682,7 +682,7 @@ async def leaderboard_managed():
             JOIN slug_map sm ON sm.catalog_slug = s.slug
             LEFT JOIN sig ON sig.clicked_slug = sm.managed_slug
             WHERE s.slug = ANY($1::text[])
-            ORDER BY s.wri_score DESC NULLS LAST
+            ORDER BY s.wri_score DESC NULLS LAST, total_signals DESC
             """,
             _CATALOG_SLUGS,
             managed_slugs,
