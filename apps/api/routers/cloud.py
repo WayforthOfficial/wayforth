@@ -156,7 +156,7 @@ async def _execute_run(
     """Background task: dispatch to sandbox, deduct compute credits, write signals."""
 
     async def _update(status: str, **fields) -> None:
-        sets = ["status = $1", "updated_at = NOW()"]
+        sets = ["status = $1"]
         vals: list = [status]
         for k, v in fields.items():
             vals.append(v)
