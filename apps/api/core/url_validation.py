@@ -1,4 +1,4 @@
-"""url_validation.py — SSRF defense for user-supplied callback URLs.
+"""url_validation.py — SSRF defense for user-supplied callback URLs (v0.9.0 fix: domain-name host guard).
 
 Webhooks register URLs that the server will later POST to. Without validation,
 a caller can register http(s)://169.254.169.254/... (cloud metadata) or
