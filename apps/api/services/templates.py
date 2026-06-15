@@ -643,7 +643,7 @@ gr = httpx.post(
     timeout=30,
 )
 gr.raise_for_status()
-summary = gr.json().get("content", "")
+summary = gr.json().get("content") or ""
 print(f"[topic-monitor] groq summary: {len(summary)} chars  wri={gr.headers.get('x-wayforth-wri')}")
 
 output = {
@@ -805,7 +805,7 @@ tv = httpx.post(
 tv.raise_for_status()
 tv_data  = tv.json()
 results  = tv_data.get("results", [])
-ai_answer = tv_data.get("answer", "")
+ai_answer = tv_data.get("answer") or ""
 print(f"[content-drafter] tavily: {len(results)} sources, answer={len(ai_answer)} chars  wri={tv.headers.get('x-wayforth-wri')}")
 
 sources_text = NL.join(
@@ -835,7 +835,7 @@ gr = httpx.post(
     timeout=45,
 )
 gr.raise_for_status()
-draft = gr.json().get("content", "")
+draft = gr.json().get("content") or ""
 word_count = len(draft.split())
 print(f"[content-drafter] draft: {word_count} words  wri={gr.headers.get('x-wayforth-wri')}")
 
@@ -1009,7 +1009,7 @@ fc = httpx.post(
 )
 fc.raise_for_status()
 fc_data  = fc.json()
-markdown = fc_data.get("markdown", "")[:6000]
+markdown = (fc_data.get("markdown") or "")[:6000]
 title    = fc_data.get("title", PAGE_URL)
 print(f"[page-snapshot] firecrawl: {len(markdown)} chars  title={title!r}  wri={fc.headers.get('x-wayforth-wri')}")
 
@@ -1324,7 +1324,7 @@ gr = httpx.post(
     timeout=30,
 )
 gr.raise_for_status()
-briefing = gr.json().get("content", "")
+briefing = gr.json().get("content") or ""
 print(f"[daily-briefing] groq briefing: {len(briefing)} chars")
 
 output = {
@@ -1572,8 +1572,8 @@ jr = httpx.post(
 )
 jr.raise_for_status()
 jr_data = jr.json()
-content = jr_data.get("content", "")[:8000]
-title   = jr_data.get("title", URL)
+content = (jr_data.get("content") or "")[:8000]
+title   = jr_data.get("title") or URL
 print(f"[url-summarizer] jina: {len(content)} chars  title={title!r}  wri={jr.headers.get('x-wayforth-wri')}")
 
 # Step 2: Groq summarize
@@ -1591,7 +1591,7 @@ gr = httpx.post(
     timeout=30,
 )
 gr.raise_for_status()
-summary = gr.json().get("content", "")
+summary = gr.json().get("content") or ""
 word_count = len(summary.split())
 print(f"[url-summarizer] groq summary: {word_count} words  wri={gr.headers.get('x-wayforth-wri')}")
 
@@ -1767,8 +1767,8 @@ jr = httpx.post(
 )
 jr.raise_for_status()
 jr_data = jr.json()
-content = jr_data.get("content", "")[:6000]
-title   = jr_data.get("title", homepage_url)
+content = (jr_data.get("content") or "")[:6000]
+title   = jr_data.get("title") or homepage_url
 print(f"[company-enricher] jina: {len(content)} chars  title={title!r}  wri={jr.headers.get('x-wayforth-wri')}")
 
 # Step 3: Groq extract company profile
