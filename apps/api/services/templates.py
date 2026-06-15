@@ -1,4 +1,4 @@
-"""services/templates.py — Wayforth Cloud template registry.
+"""services/templates.py — Wayforth Cloud template registry (v0.9.0, 10 templates).
 
 Templates are Hyperagent-500-grade agents that run on Cloud out of the box.
 Each template ships in both Python 3.12 and TypeScript/Node 20 and has been
