@@ -29,6 +29,7 @@ TIER_FEATURES: dict[str, list[str]] = {
     "agent_identity":     ["pro", "growth", "enterprise"],
     "custom_services":    ["growth", "enterprise"],
     "no_rate_limits":     ["growth", "enterprise"],
+    "cloud_agents":       ["starter", "pro", "growth", "enterprise"],
     "priority_support":   ["enterprise"],
 }
 
