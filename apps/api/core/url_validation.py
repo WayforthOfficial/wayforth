@@ -128,7 +128,14 @@ def _validate_external_url(url: str, field_name: str, allowed_schemes: tuple[str
         })
 
     # Literal IP in URL → check directly, skip DNS.
-    if _is_private_ip(host):
+    # _is_private_ip fails-closed on non-IPs, so only call it when host is a
+    # valid IP literal. Domain names fall through to the DNS resolution below.
+    try:
+        ipaddress.ip_address(host)
+        _host_is_ip = True
+    except ValueError:
+        _host_is_ip = False
+    if _host_is_ip and _is_private_ip(host):
         raise HTTPException(status_code=422, detail={
             "error": "internal_target_forbidden",
             "message": "Private, loopback, or link-local addresses are not allowed.",
