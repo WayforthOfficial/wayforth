@@ -1,6 +1,6 @@
 [project]
 name = "wayforth-sdk"
-version = "0.8.13"
+version = "0.8.14"
 description = "Python SDK for Wayforth — The API Runtime for AI Agents"
 readme = "README.md"
 license = {text = "BSL-1.1"}
