@@ -146,14 +146,46 @@ async def _reconcile_run_signals(pool, run_id: str, user_id: str) -> dict[str, A
     }
 
 
+async def _release_reserve(pool, user_id: str, amount: int, run_id: str) -> None:
+    """Return unused pre-reserved credits to the balance.
+
+    Writes a credit_transactions row with type='agent_release' so the
+    pre-reserve/release cycle is fully auditable in the transactions ledger.
+    """
+    if amount <= 0:
+        return
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "UPDATE user_credits SET credits_balance = credits_balance + $1, "
+                "updated_at = NOW() WHERE user_id = $2::uuid RETURNING credits_balance",
+                amount, user_id,
+            )
+            new_bal = row["credits_balance"] if row else 0
+            await conn.execute("""
+                INSERT INTO credit_transactions
+                  (user_id, amount, balance_after, type, description, service_id, agent_id)
+                VALUES ($1::uuid, $2, $3, 'agent_release',
+                        'Cloud run reserve release', 'cloud_compute', $4)
+            """, user_id, amount, new_bal, run_id)
+
+
 async def _execute_run(
     pool,
     run_id: str,
     agent: dict,
     user_id: str,
     user_api_key: str,
+    credits_reserved: int,
 ) -> None:
-    """Background task: dispatch to sandbox, deduct compute credits, write signals."""
+    """Background task: dispatch to E2B sandbox, settle credits, write WayforthRank signals.
+
+    Pre-reserve model:
+      credits_reserved  — deducted from balance at dispatch (= credit_cap when set, else 0)
+      credits_proxy     — proxy call deductions during the run (from credit_transactions)
+      credits_compute   — 1 credit/min compute charge, deducted at completion
+      credits_released  — max(0, reserved - proxy - compute), returned to balance at completion
+    """
 
     async def _update(status: str, **fields) -> None:
         sets = ["status = $1"]
@@ -171,34 +203,36 @@ async def _execute_run(
     try:
         await _update("running", started_at=datetime.now(timezone.utc))
 
-        # Decrypt user env vars at dispatch — never stored decrypted
+        # Decrypt user env vars at dispatch — decrypted value never stored or logged
         user_env: dict[str, str] = {}
         if agent.get("env_encrypted"):
             user_env = decrypt_env(bytes(agent["env_encrypted"]))
 
-        # Inject caller's Wayforth API key + run attribution
         run_env = {
             **user_env,
             "WAYFORTH_API_KEY": user_api_key,
-            "X_WAYFORTH_AGENT_ID": run_id,  # proxy attributes credit_transactions to this run
+            "X_WAYFORTH_AGENT_ID": run_id,  # tags all proxy credit_transactions to this run
         }
 
-        # Download agent code
         async with pool.acquire() as conn:
             code_row = await conn.fetchrow(
                 "SELECT code FROM hosted_agents WHERE id = $1::uuid", agent["id"]
             )
         code = (code_row or {}).get("code") or ""
         if not code.strip():
+            if credits_reserved > 0:
+                await _release_reserve(pool, user_id, credits_reserved, run_id)
             await _update(
                 "failed",
                 completed_at=datetime.now(timezone.utc),
+                credits_reserved=credits_reserved,
+                credits_released=credits_reserved,
                 error_type="no_code",
                 error_message="No code uploaded for this agent.",
             )
             return
 
-        timeout_s = agent.get("timeout_seconds") or _DEFAULT_TIMEOUT
+        timeout_s = _DEFAULT_TIMEOUT
         provider = get_provider(agent.get("sandbox_provider") or "e2b")
 
         result = await provider.run(
@@ -219,13 +253,20 @@ async def _execute_run(
                 agent_id=run_id,
             )
 
-        # Reconcile WayforthRank signals from proxy calls made during this run
+        # Reconcile WayforthRank signals from proxy calls during this run
         signals = await _reconcile_run_signals(pool, run_id, user_id)
+        proxy_credits = signals["credits_proxy"]
+
+        # Release unused pre-reserve: reserved - (proxy + compute), min 0
+        actual_spend = proxy_credits + compute_credits
+        credits_released = max(0, credits_reserved - actual_spend)
+        if credits_released > 0:
+            await _release_reserve(pool, user_id, credits_released, run_id)
 
         log_combined = f"=== STDOUT ===\n{result.stdout}\n=== STDERR ===\n{result.stderr}"
         log_tail = log_combined[-4096:] if len(log_combined) > 4096 else log_combined
 
-        status = "completed" if result.exit_code == 0 else "failed"
+        final_status = "completed" if result.exit_code == 0 else "failed"
         error_type = None
         if result.exit_code != 0:
             err = (result.stderr or "").lower()
@@ -237,14 +278,16 @@ async def _execute_run(
                 error_type = "code_error"
 
         await _update(
-            status,
+            final_status,
             completed_at=datetime.now(timezone.utc),
             duration_ms=result.duration_ms,
             exit_code=result.exit_code,
             sandbox_id=result.sandbox_id,
+            credits_reserved=credits_reserved,
             credits_compute=compute_credits,
-            credits_proxy=signals["credits_proxy"],
-            credits_total=compute_credits + signals["credits_proxy"],
+            credits_proxy=proxy_credits,
+            credits_total=actual_spend,
+            credits_released=credits_released,
             services_called=json.dumps(signals["services_called"]),
             failover_events=signals["failover_events"],
             substitutions=json.dumps(signals["substitutions"]),
@@ -253,7 +296,6 @@ async def _execute_run(
             log_tail=log_tail,
         )
 
-        # Update agent last_run_at and status
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE hosted_agents SET last_run_at = NOW(), status = 'ready', "
@@ -262,15 +304,23 @@ async def _execute_run(
             )
 
     except asyncio.CancelledError:
+        if credits_reserved > 0:
+            await _release_reserve(pool, user_id, credits_reserved, run_id)
         await _update(
             "cancelled",
             completed_at=datetime.now(timezone.utc),
+            credits_reserved=credits_reserved,
+            credits_released=credits_reserved,
         )
     except Exception as exc:
         logger.exception("Cloud run %s failed: %s", run_id, exc)
+        if credits_reserved > 0:
+            await _release_reserve(pool, user_id, credits_reserved, run_id)
         await _update(
             "failed",
             completed_at=datetime.now(timezone.utc),
+            credits_reserved=credits_reserved,
+            credits_released=credits_reserved,
             error_type="sandbox_error",
             error_message=str(exc)[:2000],
         )
@@ -473,7 +523,7 @@ async def dispatch_run(
         raise HTTPException(status_code=409, detail={"error": "already_running",
             "message": "This agent is already running. Wait for it to complete or cancel the run."})
 
-    # Check user has credits
+    # Check user has credits and pre-reserve if credit_cap is set
     balance_row = await db.fetchrow(
         "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid", user_id
     )
@@ -482,14 +532,39 @@ async def dispatch_run(
         raise HTTPException(status_code=402, detail={"error": "insufficient_credits",
             "message": "Insufficient credits to run an agent. Top up at wayforth.io/billing"})
 
+    credit_cap = agent.get("credit_cap") or 0
+    credits_reserved = 0
+    if credit_cap > 0:
+        if balance < credit_cap:
+            raise HTTPException(status_code=402, detail={
+                "error": "insufficient_credits",
+                "message": f"This agent requires {credit_cap} credits reserved. "
+                           f"You have {balance}. Top up at wayforth.io/billing",
+                "balance": balance,
+                "credit_cap": credit_cap,
+            })
+
     # Pull the caller's raw API key for injection into the sandbox
     api_key_header = request.headers.get("X-Wayforth-API-Key", "")
 
     run_id = str(uuid.uuid4())
+
+    # Pre-reserve: deduct credit_cap from balance before the run starts.
+    # This is released at completion: max(0, reserved - actual_spend) is returned.
+    if credit_cap > 0:
+        await check_and_deduct_credits(
+            db, user_id, credit_cap,
+            f"/cloud/agents/{agent_id}/runs",
+            service_id="cloud_compute",
+            tx_type="agent_reserve",
+            agent_id=run_id,
+        )
+        credits_reserved = credit_cap
+
     await db.execute("""
-        INSERT INTO agent_runs (id, hosted_agent_id, user_id, status, trigger)
-        VALUES ($1::uuid, $2::uuid, $3::uuid, 'queued', 'manual')
-    """, run_id, agent_id, user_id)
+        INSERT INTO agent_runs (id, hosted_agent_id, user_id, status, trigger, credits_reserved)
+        VALUES ($1::uuid, $2::uuid, $3::uuid, 'queued', 'manual', $4)
+    """, run_id, agent_id, user_id, credits_reserved)
 
     await db.execute(
         "UPDATE hosted_agents SET status = 'running', updated_at = NOW() WHERE id = $1::uuid",
@@ -499,15 +574,16 @@ async def dispatch_run(
     # Dispatch asynchronously — caller gets 202 immediately
     from main import app
     asyncio.create_task(
-        _execute_run(app.state.pool, run_id, dict(agent), user_id, api_key_header)
+        _execute_run(app.state.pool, run_id, dict(agent), user_id, api_key_header, credits_reserved)
     )
 
     return {
-        "run_id":    run_id,
-        "agent_id":  agent_id,
-        "status":    "queued",
-        "message":   "Run dispatched. Poll GET /cloud/agents/{id}/runs/{run_id} for status.",
-        "poll_url":  f"/cloud/agents/{agent_id}/runs/{run_id}",
+        "run_id":           run_id,
+        "agent_id":         agent_id,
+        "status":           "queued",
+        "credits_reserved": credits_reserved,
+        "message":          "Run dispatched. Poll GET /cloud/agents/{id}/runs/{run_id} for status.",
+        "poll_url":         f"/cloud/agents/{agent_id}/runs/{run_id}",
     }
 
 
@@ -571,7 +647,8 @@ async def get_run(
 
     row = await db.fetchrow("""
         SELECT id, status, trigger, sandbox_id, started_at, completed_at, duration_ms,
-               exit_code, credits_compute, credits_proxy, credits_total,
+               exit_code, credits_reserved, credits_compute, credits_proxy,
+               credits_total, credits_released,
                services_called, failover_events, substitutions,
                error_type, error_message, log_tail, created_at
         FROM agent_runs
@@ -602,9 +679,11 @@ async def get_run(
         "duration_ms":   row["duration_ms"],
         "exit_code":     row["exit_code"],
         "credits": {
+            "reserved": row["credits_reserved"],
             "compute":  row["credits_compute"],
             "proxy":    row["credits_proxy"],
             "total":    row["credits_total"],
+            "released": row["credits_released"],
         },
         "wayforthrank": {
             "services_called":  _parse_jsonb(row["services_called"]),
