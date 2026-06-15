@@ -112,8 +112,11 @@ class E2BSandboxProvider(SandboxProvider):
                 )
             else:  # node20
                 sbx.files.write("/home/user/agent.ts", code)
+                # "type":"module" is required for top-level await in tsx/esbuild
                 cmd = (
                     "cd /home/user && npm init -y -q 2>/dev/null"
+                    " && node -e \"const p=require('./package.json');p.type='module';"
+                    "require('fs').writeFileSync('package.json',JSON.stringify(p));\""
                     " && npm install tsx wayforth-sdk -q 2>/dev/null"
                     " && npx tsx agent.ts"
                 )
