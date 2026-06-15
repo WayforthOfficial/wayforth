@@ -165,9 +165,10 @@ async def call_groq(params: dict, api_key: str) -> dict:
     max_tokens = params.get("max_tokens", 1024)
     if not messages:
         raise Exception("params.messages is required")
+    _groq_base = _os.environ.get("GROQ_API_BASE", "https://api.groq.com")
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
+            f"{_groq_base}/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={"model": model, "messages": messages, "max_tokens": max_tokens},
         )
