@@ -27,6 +27,7 @@ dependencies = [
     "pyotp>=2.9.0",
     "qrcode[pil]>=8.0",
     "e2b>=2.28.2",
+    "croniter>=2.0.0",
 ]
 # Removed in v0.7.8 (Section 7) — verified zero imports across apps/api/:
 #   beautifulsoup4, lxml, sqlalchemy[asyncio], requests, pillow (standalone).

@@ -1118,6 +1118,24 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS signal_weight  FLOAT   DEFAULT 1.0,
                     ADD COLUMN IF NOT EXISTS pioneer_routed BOOLEAN DEFAULT FALSE
             """)
+            # Migration 060: scheduler + webhook columns for hosted_agents
+            await _mconn.execute("""
+                ALTER TABLE hosted_agents
+                    ADD COLUMN IF NOT EXISTS runner_key_encrypted TEXT,
+                    ADD COLUMN IF NOT EXISTS runner_key_version    INTEGER  DEFAULT 1,
+                    ADD COLUMN IF NOT EXISTS next_run_at           TIMESTAMPTZ,
+                    ADD COLUMN IF NOT EXISTS concurrent_max        INTEGER  NOT NULL DEFAULT 1,
+                    ADD COLUMN IF NOT EXISTS webhook_id            UUID     DEFAULT gen_random_uuid()
+            """)
+            await _mconn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_hosted_agents_webhook_id
+                    ON hosted_agents(webhook_id) WHERE webhook_id IS NOT NULL
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hosted_agents_next_run
+                    ON hosted_agents(next_run_at)
+                    WHERE trigger_type = 'schedule' AND next_run_at IS NOT NULL
+            """)
     except Exception as e:
         logger.error("STARTUP ERROR: %s: %s", type(e).__name__, e, exc_info=True)
         logger.critical("DB pool creation or migrations failed: %s — exiting so the orchestrator can restart cleanly", e)
@@ -1156,6 +1174,8 @@ async def lifespan(app: FastAPI):
     deletion_reaper_task = asyncio.create_task(_account_deletion_reaper())
     from workers.embed_queries import embed_queries_loop
     embed_queries_task = asyncio.create_task(embed_queries_loop())
+    from services.scheduler import run_scheduler
+    scheduler_task = asyncio.create_task(run_scheduler(app.state.pool))
     _get_redis()  # eagerly init so the rate-limiter log line appears at startup
     yield
     cleanup_task.cancel()
@@ -1166,6 +1186,7 @@ async def lifespan(app: FastAPI):
     boost_pause_task.cancel()
     webhook_retry_task.cancel()
     pioneer_drip_task.cancel()
+    scheduler_task.cancel()
     if app.state.pool:
         await app.state.pool.close()
 

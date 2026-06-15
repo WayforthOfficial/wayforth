@@ -33,6 +33,17 @@ TIER_FEATURES: dict[str, list[str]] = {
     "priority_support":   ["enterprise"],
 }
 
+# Max simultaneous queued+running cloud agent runs per user, by tier.
+# cloud_agents requires starter+, so free/builder caps are defensive only.
+CONCURRENT_RUNS_PER_USER: dict[str, int] = {
+    "free":       0,
+    "builder":    1,
+    "starter":    2,
+    "pro":        5,
+    "growth":     10,
+    "enterprise": 25,
+}
+
 TIER_RATE_LIMITS: dict[str, dict] = {
     "free":       {"calls_per_minute": 15,  "calls_per_hour": 100},
     "builder":    {"calls_per_minute": 120, "calls_per_hour": 500},
