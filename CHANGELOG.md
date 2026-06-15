@@ -4,6 +4,31 @@ All notable changes to the Wayforth platform are documented here.
 
 ---
 
+## v0.9.1 — Horizon: Reliability Proxy — June 14, 2026
+
+### Features
+- **Reliability Proxy** (`POST /proxy/{slug}`, `GET /proxy/{slug}`) — transparent base-URL swap giving any agent Wayforth failover + WRI routing + metered signal write with zero code changes beyond the base URL and auth header
+- GET support for query-param services (OpenWeather and equivalents): `GET /proxy/openweather?city=London`
+- Native response shape by default — upstream API response returned directly, no Wayforth envelope
+- Wayforth metadata in response headers: `X-Wayforth-Failover`, `X-Wayforth-Original-Service`, `X-Wayforth-Routed-To`, `X-Wayforth-Reason`, `X-Wayforth-WRI`, `X-Wayforth-Cost`, `X-Wayforth-Rail`, `X-Wayforth-Credits-Remaining`
+- `?wayforth_wrap=true` opt-in for full `/execute`-style envelope
+- Failover on primary degradation: same `SERVICE_ALTERNATIVES` engine as `/execute`; failover reflected in headers and signal row
+- Every proxied call writes a `credit_transactions` signal row with all 8 WayforthRank signal fields (`substitution_from`, `substitution_to`, `substitution_reason`, `failure_code`, `output_length_chars`, `model_routing_attempted`, `model_routing_selected`, `task_query_text`)
+- `X-Wayforth-Agent-ID` header support for agent tagging on proxy calls
+- 10 new tests: structural, auth, POST (Serper), GET (OpenWeather), wrap mode, failover unit (4 mock-based async tests verifying headers + signal kwargs)
+
+### Migration
+```
+Before:  POST https://api.groq.com/v1/chat/completions
+         Authorization: Bearer $GROQ_KEY
+
+After:   POST https://gateway.wayforth.io/proxy/groq
+         X-Wayforth-API-Key: $WAYFORTH_KEY
+```
+Params, method, response parsing — unchanged.
+
+---
+
 ## v0.8.14 — June 10, 2026
 
 ### Features
