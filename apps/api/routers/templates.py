@@ -9,12 +9,14 @@ Requires cloud_agents tier gate (starter+). Auth via X-Wayforth-API-Key.
 """
 from __future__ import annotations
 
+import re
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from core.auth import check_auth
+from core.agent_secrets import encrypt_env
+from core.auth import _resolve_user, encrypt_api_key
 from core.db import get_db
 from core.tier_gates import require_tier
 from services.templates import get_template, list_templates
@@ -47,10 +49,7 @@ async def list_all_templates():
 
 @router.get("/templates/{template_id}")
 async def get_template_detail(template_id: str):
-    """Full template detail including readme and example env vars.
-
-    Code is included per runtime under `code.python3.12` / `code.node20`.
-    """
+    """Full template detail including readme and code per runtime."""
     tmpl = get_template(template_id)
     if not tmpl:
         raise HTTPException(status_code=404, detail={
@@ -66,18 +65,19 @@ async def deploy_template(
     template_id: str,
     body: DeployTemplateRequest,
     request: Request,
+    db=Depends(get_db),
 ):
     """Create a hosted agent pre-loaded with a template.
 
-    This is the one-call deploy path: the resulting agent has code already
-    loaded and status='ready'. Dispatch it immediately with
-    POST /cloud/agents/{id}/runs.
+    One-call deploy: the resulting agent has code already loaded,
+    status='ready'. Dispatch with POST /cloud/agents/{id}/runs.
 
     Required tier: starter+
     """
-    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
-    db = get_db()
-    user_id, _, tier = await check_auth(api_key_header, db, request)
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
+    user_id, _, tier = await _resolve_user(db, api_key)
     require_tier(tier, "cloud_agents")
 
     tmpl = get_template(template_id)
@@ -88,7 +88,6 @@ async def deploy_template(
             "available": [t["id"] for t in list_templates()],
         })
 
-    # Runtime selection
     runtime = body.runtime or tmpl["default_runtime"]
     if runtime not in tmpl["runtimes"]:
         raise HTTPException(status_code=400, detail={
@@ -99,44 +98,54 @@ async def deploy_template(
 
     code = tmpl["code"][runtime]
 
-    # Slug: default to sanitised name if not provided
     slug = body.slug
     if not slug:
-        import re
         slug = re.sub(r"[^a-z0-9\-]", "-", body.name.lower())
         slug = re.sub(r"-+", "-", slug).strip("-")[:80]
         if not slug:
             slug = template_id
 
-    env_vars = body.env_vars or {}
+    # Encrypt env vars the same way cloud.py does (Fernet via core.agent_secrets)
+    env_encrypted = encrypt_env(body.env_vars) if body.env_vars else None
 
-    pool = request.app.state.pool
-    async with pool.acquire() as conn:
-        # Ensure slug is unique within the user's agents
-        existing = await conn.fetchrow(
-            "SELECT id FROM hosted_agents WHERE user_id = $1 AND slug = $2",
-            uuid.UUID(user_id), slug,
-        )
-        if existing:
-            slug = f"{slug}-{uuid.uuid4().hex[:6]}"
+    # Encrypt caller's API key for future scheduled/webhook dispatch
+    runner_key_ct: str | None = None
+    runner_key_ver: int = 1
+    if api_key:
+        try:
+            runner_key_ct, runner_key_ver = encrypt_api_key(api_key)
+        except Exception:
+            pass  # ENCRYPTION_KEY not set; schedule/webhook runs will skip
 
-        import json
-        row = await conn.fetchrow(
-            """
-            INSERT INTO hosted_agents
-                (user_id, name, slug, runtime, trigger_type, status, credit_cap, env_vars, code)
-            VALUES ($1, $2, $3, $4, 'manual', 'ready', $5, $6, $7)
-            RETURNING id, name, slug, runtime, trigger_type, status, credit_cap,
-                      created_at, webhook_id
-            """,
-            uuid.UUID(user_id),
-            body.name,
-            slug,
-            runtime,
-            body.credit_cap,
-            json.dumps(env_vars),
-            code,
-        )
+    # Deduplicate slug within this user's agents
+    existing = await db.fetchrow(
+        "SELECT id FROM hosted_agents WHERE user_id = $1::uuid AND slug = $2",
+        uuid.UUID(str(user_id)), slug,
+    )
+    if existing:
+        slug = f"{slug}-{uuid.uuid4().hex[:6]}"
+
+    row = await db.fetchrow(
+        """
+        INSERT INTO hosted_agents
+            (user_id, name, slug, runtime, trigger_type, status,
+             credit_cap, env_encrypted, code, sandbox_provider,
+             runner_key_encrypted, runner_key_version)
+        VALUES ($1::uuid, $2, $3, $4, 'manual', 'ready',
+                $5, $6, $7, 'e2b', $8, $9)
+        RETURNING id, name, slug, runtime, trigger_type, status, credit_cap,
+                  created_at, webhook_id
+        """,
+        uuid.UUID(str(user_id)),
+        body.name,
+        slug,
+        runtime,
+        body.credit_cap,
+        env_encrypted,
+        code,
+        runner_key_ct,
+        runner_key_ver,
+    )
 
     return {
         "agent_id":       str(row["id"]),
@@ -153,10 +162,14 @@ async def deploy_template(
         "dispatch_url":   f"POST /cloud/agents/{row['id']}/runs",
         "code_url":       f"GET /cloud/agents/{row['id']}/code",
         "credits_per_run": tmpl["credits_per_run"],
-        "env_vars_configured": list(env_vars.keys()),
+        "env_vars_configured": list(body.env_vars.keys()),
         "env_var_defaults": [
-            {"name": v["name"], "default": v.get("default", ""), "required": v.get("required", False)}
+            {
+                "name":     v["name"],
+                "default":  v.get("default", ""),
+                "required": v.get("required", False),
+            }
             for v in tmpl.get("env_vars", [])
-            if v["name"] not in env_vars
+            if v["name"] not in body.env_vars
         ],
     }
