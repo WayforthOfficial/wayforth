@@ -37,7 +37,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.agent_secrets import decrypt_env, encrypt_env
-from core.auth import _resolve_user, decrypt_api_key, encrypt_api_key
+from core.auth import _resolve_user, decrypt_api_key, encrypt_api_key, resolve_dashboard_caller
 from core.credits import check_and_deduct_credits
 from core.db import get_db
 from core.rate_limit import limiter
@@ -90,12 +90,20 @@ async def _get_agent_or_404(db, user_id: str, agent_id: str) -> dict:
 
 
 async def _resolve_caller(request: Request, db) -> tuple[str, str, str]:
-    """Returns (user_id, api_key_id, tier)."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
-    user_id, api_key_id, tier = await _resolve_user(db, api_key)
-    return str(user_id), str(api_key_id), tier
+    """Returns (user_id, api_key_id, tier).
+
+    Delegates to resolve_dashboard_caller, which accepts (in priority order):
+      1. wf_session cookie — browser dashboard
+      2. Authorization: Bearer <supabase_jwt>
+      3. X-Wayforth-API-Key — programmatic clients / SDK
+
+    All three paths produce the same (user_id, api_key_id, tier) tuple, so
+    the tier gate and ownership checks below are identical regardless of which
+    credential was presented.
+    """
+    caller = await resolve_dashboard_caller(request, db)
+    api_key_id = caller.get("api_key_id")
+    return str(caller["user_id"]), str(api_key_id) if api_key_id else "", caller["tier"]
 
 
 async def _reconcile_run_signals(pool, run_id: str, user_id: str) -> dict[str, Any]:
@@ -518,11 +526,18 @@ async def list_agents(request: Request, db=Depends(get_db)) -> dict:
     require_tier(tier, "cloud_agents")
 
     rows = await db.fetch("""
-        SELECT id, name, slug, runtime, status, trigger_type,
-               credit_cap, last_run_at, created_at
-        FROM hosted_agents
-        WHERE user_id = $1::uuid
-        ORDER BY created_at DESC
+        SELECT
+            ha.id, ha.name, ha.slug, ha.runtime, ha.status,
+            ha.trigger_type, ha.schedule, ha.credit_cap,
+            ha.last_run_at, ha.created_at,
+            COALESCE(SUM(ar.credits_total) FILTER (
+                WHERE ar.created_at >= NOW() - INTERVAL '30 days'
+            ), 0) AS credits_30d
+        FROM hosted_agents ha
+        LEFT JOIN agent_runs ar ON ar.hosted_agent_id = ha.id
+        WHERE ha.user_id = $1::uuid
+        GROUP BY ha.id
+        ORDER BY ha.created_at DESC
         LIMIT 100
     """, user_id)
 
@@ -535,7 +550,9 @@ async def list_agents(request: Request, db=Depends(get_db)) -> dict:
                 "runtime":      r["runtime"],
                 "status":       r["status"],
                 "trigger_type": r["trigger_type"],
+                "schedule":     r["schedule"],
                 "credit_cap":   r["credit_cap"],
+                "credits_30d":  int(r["credits_30d"] or 0),
                 "last_run_at":  r["last_run_at"].isoformat() if r["last_run_at"] else None,
                 "created_at":   r["created_at"].isoformat(),
             }
@@ -686,7 +703,8 @@ async def list_runs(
 
     rows = await db.fetch("""
         SELECT id, status, trigger, started_at, completed_at, duration_ms,
-               credits_compute, credits_proxy, credits_total, error_type, created_at
+               credits_compute, credits_proxy, credits_total,
+               failover_events, error_type, created_at
         FROM agent_runs
         WHERE hosted_agent_id = $1::uuid
         ORDER BY created_at DESC
@@ -697,17 +715,18 @@ async def list_runs(
         "agent_id": agent_id,
         "runs": [
             {
-                "id":            str(r["id"]),
-                "status":        r["status"],
-                "trigger":       r["trigger"],
-                "started_at":    r["started_at"].isoformat() if r["started_at"] else None,
-                "completed_at":  r["completed_at"].isoformat() if r["completed_at"] else None,
-                "duration_ms":   r["duration_ms"],
+                "id":              str(r["id"]),
+                "status":          r["status"],
+                "trigger":         r["trigger"],
+                "started_at":      r["started_at"].isoformat() if r["started_at"] else None,
+                "completed_at":    r["completed_at"].isoformat() if r["completed_at"] else None,
+                "duration_ms":     r["duration_ms"],
                 "credits_compute": r["credits_compute"],
                 "credits_proxy":   r["credits_proxy"],
                 "credits_total":   r["credits_total"],
-                "error_type":    r["error_type"],
-                "created_at":    r["created_at"].isoformat(),
+                "failover_events": r["failover_events"],
+                "error_type":      r["error_type"],
+                "created_at":      r["created_at"].isoformat(),
             }
             for r in rows
         ],
@@ -777,6 +796,97 @@ async def get_run(
         "error_message": row["error_message"],
         "log_tail":      row["log_tail"],
         "created_at":    row["created_at"].isoformat(),
+    }
+
+
+@router.get("/agents/{agent_id}/runs/{run_id}/logs")
+@limiter.limit("60/minute")
+async def get_run_logs(
+    request: Request,
+    agent_id: str,
+    run_id: str,
+    db=Depends(get_db),
+) -> dict:
+    """Return the stored log output for a completed run.
+
+    v0.9.0: logs are stored inline as `log_tail` (last 4 KB of stdout+stderr).
+    External log storage is not yet available; this endpoint serves what the DB holds.
+    """
+    user_id, _, tier = await _resolve_caller(request, db)
+    require_tier(tier, "cloud_agents")
+
+    await _get_agent_or_404(db, user_id, agent_id)
+
+    row = await db.fetchrow(
+        "SELECT status, log_tail FROM agent_runs WHERE id = $1::uuid AND hosted_agent_id = $2::uuid",
+        run_id, agent_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail={"error": "run_not_found"})
+
+    return {
+        "run_id":   run_id,
+        "agent_id": agent_id,
+        "status":   row["status"],
+        "log_tail": row["log_tail"] or "",
+    }
+
+
+@router.get("/usage")
+@limiter.limit("30/minute")
+async def get_usage(request: Request, db=Depends(get_db)) -> dict:
+    """Runtime minutes and credit spend for the current billing period (calendar month).
+
+    Intended for the billing view in the dashboard — shows compute time consumed
+    and the split between compute credits and proxy credits, all scoped to the
+    authenticated user.
+    """
+    user_id, _, tier = await _resolve_caller(request, db)
+    require_tier(tier, "cloud_agents")
+
+    now = datetime.now(timezone.utc)
+    period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    row = await db.fetchrow("""
+        SELECT
+            COUNT(*) FILTER (WHERE status IN ('completed', 'failed', 'timeout', 'oom', 'cancelled'))
+                AS runs_total,
+            COUNT(*) FILTER (WHERE status = 'completed')
+                AS runs_completed,
+            COUNT(*) FILTER (WHERE status IN ('failed', 'timeout', 'oom', 'cancelled'))
+                AS runs_failed,
+            COALESCE(SUM(duration_ms) FILTER (WHERE duration_ms IS NOT NULL), 0)
+                AS total_duration_ms,
+            COALESCE(SUM(credits_compute), 0) AS credits_compute,
+            COALESCE(SUM(credits_proxy),   0) AS credits_proxy,
+            COALESCE(SUM(credits_total),   0) AS credits_total
+        FROM agent_runs
+        WHERE user_id = $1::uuid
+          AND created_at >= $2
+    """, user_id, period_start)
+
+    total_ms = int(row["total_duration_ms"] or 0)
+
+    return {
+        "period": {
+            "from": period_start.isoformat(),
+            "to":   now.isoformat(),
+        },
+        "runs": {
+            "total":     int(row["runs_total"] or 0),
+            "completed": int(row["runs_completed"] or 0),
+            "failed":    int(row["runs_failed"] or 0),
+        },
+        "runtime": {
+            "total_ms": total_ms,
+            "seconds":  total_ms // 1000,
+            "minutes":  round(total_ms / 60000, 2),
+        },
+        "credits": {
+            "compute": int(row["credits_compute"] or 0),
+            "proxy":   int(row["credits_proxy"] or 0),
+            "total":   int(row["credits_total"] or 0),
+        },
     }
 
 
