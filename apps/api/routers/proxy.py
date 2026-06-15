@@ -116,6 +116,9 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
         agent_id = header_agent_id
 
     # ── Param validation ──────────────────────────────────────────────────────
+    # Save user-supplied params before service-specific defaults are injected so
+    # failover can re-map cleanly without leaking the primary's default model name.
+    _user_params = dict(params)
     params, _missing = map_params(slug, params)
     if _missing:
         raise HTTPException(status_code=422, detail={
@@ -181,7 +184,7 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
             _fb_cfg = SERVICE_CONFIGS[_fb_slug]
             _fb_key = os.environ.get(_fb_cfg["key_var"], "")
             if _fb_key:
-                _fb_mapped, _fb_miss = map_params(_fb_slug, params)
+                _fb_mapped, _fb_miss = map_params(_fb_slug, _user_params)
                 if not _fb_miss:
                     _fb_cost = _fb_cfg["credits"]
                     _fb_ok, _fb_bal, _fb_tx_id = await check_and_deduct_credits(
