@@ -1,0 +1,3 @@
+WAYFORTH_API_KEY=wf_live_...
+# Optional — set to receive a notification email via Resend
+# NOTIFY_EMAIL=you@example.com

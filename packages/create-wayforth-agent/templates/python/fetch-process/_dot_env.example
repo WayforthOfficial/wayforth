@@ -1,0 +1,3 @@
+WAYFORTH_API_KEY=wf_live_...
+# Optional — city to fetch weather for (default: London)
+# CITY=Tokyo

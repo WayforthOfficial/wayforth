@@ -1,0 +1,18 @@
+{
+  "name": "create-wayforth-agent",
+  "version": "0.9.0",
+  "description": "Scaffold a Wayforth agent project in one command — discovery via SDK, execution via proxy",
+  "keywords": ["wayforth", "ai", "agents", "scaffold", "create"],
+  "license": "BSL-1.1",
+  "homepage": "https://wayforth.io",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WayforthOfficial/wayforth",
+    "directory": "packages/create-wayforth-agent"
+  },
+  "bin": {
+    "create-wayforth-agent": "bin/create.js"
+  },
+  "files": ["bin", "templates"],
+  "engines": { "node": ">=18" }
+}

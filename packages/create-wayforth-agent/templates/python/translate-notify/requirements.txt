@@ -1,0 +1,2 @@
+wayforth-sdk>=0.8.14
+httpx>=0.27

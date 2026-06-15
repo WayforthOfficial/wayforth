@@ -1,0 +1,8 @@
+{
+  "name": "{{AGENT_NAME}}",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": { "start": "tsx src/agent.ts" },
+  "dependencies": { "wayforth-sdk": "^0.8.12" },
+  "devDependencies": { "tsx": "^4.19.0", "typescript": "^5.7.0" }
+}
