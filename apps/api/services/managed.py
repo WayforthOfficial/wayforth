@@ -29,8 +29,8 @@ UPSTREAM_DAILY_CAPS: dict[str, int] = {
 }
 _USER_UPSTREAM_DAILY_CAPS: dict[str, dict[str, int]] = {
     "free":       {"alphavantage": 5,  "resend": 10},
-    "builder":    {"alphavantage": 15, "resend": 50},
     "starter":    {"alphavantage": 15, "resend": 50},
+    "builder":    {"alphavantage": 15, "resend": 50},
     "pro":        {"alphavantage": 15, "resend": 50},
     "growth":     {"alphavantage": 25, "resend": 100},
     "enterprise": {"alphavantage": 25, "resend": 100},

@@ -188,7 +188,7 @@ async def _auth_error_handler(request: Request, exc: _AuthError):
 
 
 _ANON_DAILY_LIMIT = 3
-_TIER_RPM = {"free": 30, "builder": 120, "starter": 300, "pro": 600, "growth": 0, "enterprise": 500}
+_TIER_RPM = {"free": 30, "starter": 120, "builder": 300, "pro": 600, "growth": 0, "enterprise": 500}
 
 
 def _anon_ip_subject(ip: str) -> str:

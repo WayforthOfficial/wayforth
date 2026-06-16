@@ -63,8 +63,8 @@ import asyncpg
 # values the admin endpoint would set.
 _TIER_DEFAULTS: dict[str, dict[str, int]] = {
     "free":       {"rpm": 10,  "monthly": 1_000},
-    "builder":    {"rpm": 30,  "monthly": 5_000},
-    "starter":    {"rpm": 60,  "monthly": 20_000},
+    "starter":    {"rpm": 30,  "monthly": 5_000},
+    "builder":    {"rpm": 60,  "monthly": 20_000},
     "pro":        {"rpm": 120, "monthly": 100_000},
     "growth":     {"rpm": 300, "monthly": 500_000},
     "enterprise": {"rpm": 500, "monthly": -1},  # unlimited

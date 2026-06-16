@@ -26,8 +26,8 @@ router = APIRouter()
 
 TIER_LIMITS = {
     "free":       {"rpm": 10,  "monthly": 1_000,    "fee_bps": 150},
-    "builder":    {"rpm": 30,  "monthly": 5_000,    "fee_bps": 150},
-    "starter":    {"rpm": 60,  "monthly": 20_000,   "fee_bps": 150},
+    "starter":    {"rpm": 30,  "monthly": 5_000,    "fee_bps": 150},
+    "builder":    {"rpm": 60,  "monthly": 20_000,   "fee_bps": 150},
     "pro":        {"rpm": 120, "monthly": 100_000,  "fee_bps": 150},
     "growth":     {"rpm": 300, "monthly": 500_000,  "fee_bps": 150},
     "enterprise": {"rpm": 500, "monthly": -1,       "fee_bps": 150},
@@ -35,8 +35,8 @@ TIER_LIMITS = {
 
 _TIER_FEATURES = {
     "free":     {"execute_managed": True,  "byok": False, "analytics": False, "priority_support": False},
-    "builder":  {"execute_managed": True,  "byok": True,  "analytics": False, "priority_support": False},
-    "starter":  {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": False},
+    "starter":  {"execute_managed": True,  "byok": True,  "analytics": False, "priority_support": False},
+    "builder":  {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": False},
     "pro":      {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": True},
     "growth":   {"execute_managed": True,  "byok": True,  "analytics": True,  "priority_support": True},
 }
@@ -51,9 +51,9 @@ def _credits_to_tier(lifetime_credits: int, package_tier: str | None) -> str:
     if lifetime_credits >= 72_000:
         return "pro"
     if lifetime_credits >= 21_000:
-        return "starter"
-    if lifetime_credits >= 6_000:
         return "builder"
+    if lifetime_credits >= 6_000:
+        return "starter"
     return "free"
 
 
@@ -1173,8 +1173,8 @@ FOUNDING_MEMBER_CUTOFF = "2026-08-31"
 # (≈ each tier's monthly Pioneer allowance spread across ~30 days). Free tier is
 # not eligible (0). Enterprise = 150k/mo ÷ 30.
 _PIONEER_DAILY_CREDITS: dict[str, int] = {
-    "builder":    30,
-    "starter":    105,
+    "starter":    30,
+    "builder":    105,
     "pro":        360,
     "growth":     1_200,
     "enterprise": 5_000,

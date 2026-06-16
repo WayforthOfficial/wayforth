@@ -41,7 +41,7 @@ from core.auth import _resolve_user, decrypt_api_key, encrypt_api_key, resolve_d
 from core.credits import check_and_deduct_credits
 from core.db import get_db
 from core.rate_limit import limiter
-from core.tier_gates import require_tier, CONCURRENT_RUNS_PER_USER
+from core.tier_gates import require_tier, CONCURRENT_RUNS_PER_USER, HOSTED_AGENT_LIMITS
 from services.sandbox import compute_credits_for_run, get_provider
 
 logger = logging.getLogger("wayforth")
@@ -404,6 +404,31 @@ async def create_agent(
 ) -> dict:
     user_id, _, tier = await _resolve_caller(request, db)
     require_tier(tier, "cloud_agents")
+
+    agent_limit = HOSTED_AGENT_LIMITS.get(tier, 1)
+    agent_count = await db.fetchval(
+        "SELECT COUNT(*) FROM hosted_agents WHERE user_id = $1::uuid",
+        user_id,
+    )
+    if agent_count >= agent_limit:
+        raise HTTPException(status_code=403, detail={
+            "error": "agent_limit_reached",
+            "current_count": agent_count,
+            "limit": agent_limit,
+            "tier": tier,
+            "message": f"Your {tier} plan allows {agent_limit} hosted agent(s). "
+                       f"You have {agent_count}. Upgrade to deploy more.",
+            "upgrade_url": "https://wayforth.io/pricing",
+        })
+
+    if tier == "free" and body.trigger_type != "manual":
+        raise HTTPException(status_code=403, detail={
+            "error": "trigger_type_not_allowed",
+            "trigger_type": body.trigger_type,
+            "message": "Free tier supports manual (on-demand) runs only. "
+                       "Upgrade to Starter or above to use scheduled or webhook triggers.",
+            "upgrade_url": "https://wayforth.io/pricing",
+        })
 
     if not _SLUG_RE.match(body.slug):
         raise HTTPException(status_code=422, detail={

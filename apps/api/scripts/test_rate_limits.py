@@ -34,8 +34,8 @@ USER_IDS = {
 # (expected_limit_per_minute, requests_to_fire, should_hit_limit)
 TIER_TESTS = {
     "free":       (15,  20,  True),   # expect 429 on req 16
-    "builder":    (120, 125, True),   # expect 429 on req 121
-    "starter":    (300, 35,  False),  # 35 < 300, all should pass
+    "starter":    (120, 125, True),   # expect 429 on req 121
+    "builder":    (300, 35,  False),  # 35 < 300, all should pass
     "growth":     (None, 40, False),  # unlimited
     "enterprise": (None, 40, False),  # unlimited
 }

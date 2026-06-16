@@ -29,23 +29,23 @@ PLANS = {
         "stripe_price_env":   None,
         "features":           ["search", "execute", "wayforthrank"],
     },
-    "builder": {
+    "starter": {
         "monthly_credits":    6_000,
         "calls_included":     6_000,
         "price_usd":          12,
         "price_usdc":         12,
         "usdc_bonus_credits": 300,    # 5%
-        "stripe_price_env":   "STRIPE_PRICE_BUILDER",
+        "stripe_price_env":   "STRIPE_PRICE_STARTER",
         "features":           ["search", "execute", "wayforthrank", "byok", "webhooks"],
     },
-    "starter": {
+    "builder": {
         "monthly_credits":    21_000,
         "calls_included":     21_000,
         "price_usd":          29,
         "price_usdc":         29,
         "usdc_bonus_credits": 1_050,  # 5%
-        "stripe_price_env":   "STRIPE_PRICE_STARTER",
-        "features":           ["builder_features", "analytics", "wayforthql"],
+        "stripe_price_env":   "STRIPE_PRICE_BUILDER",
+        "features":           ["starter_features", "analytics", "wayforthql"],
     },
     "pro": {
         "monthly_credits":    72_000,
@@ -54,7 +54,7 @@ PLANS = {
         "price_usdc":         99,
         "usdc_bonus_credits": 3_600,   # 5%
         "stripe_price_env":   "STRIPE_PRICE_PRO",
-        "features":           ["starter_features", "wri_scores", "priority"],
+        "features":           ["builder_features", "wri_scores", "priority"],
     },
     "growth": {
         "monthly_credits":    240_000,
@@ -77,10 +77,10 @@ PLANS = {
 }
 
 STRIPE_PACKAGES = {
-    "builder": {"price_cents": 1200,  "credits": 6_000,   "label": "Builder",
-                "price_id": os.environ.get("STRIPE_PRICE_BUILDER", "")},
-    "starter": {"price_cents": 2900,  "credits": 21_000,  "label": "Starter",
+    "starter": {"price_cents": 1200,  "credits": 6_000,   "label": "Starter",
                 "price_id": os.environ.get("STRIPE_PRICE_STARTER", "")},
+    "builder": {"price_cents": 2900,  "credits": 21_000,  "label": "Builder",
+                "price_id": os.environ.get("STRIPE_PRICE_BUILDER", "")},
     "pro":     {"price_cents": 9900,  "credits": 72_000,  "label": "Pro",
                 "price_id": os.environ.get("STRIPE_PRICE_PRO", "")},
     "growth":  {"price_cents": 29900, "credits": 240_000, "label": "Growth",
@@ -89,8 +89,8 @@ STRIPE_PACKAGES = {
 
 # Annual plans: 10 months price (2 months free). Credits replenished monthly.
 PLAN_ANNUAL_DETAILS: dict[str, dict] = {
-    "builder": {"price_usd_annual": 99.0,    "credits": 6_000,   "savings_usd": 45.0},
-    "starter": {"price_usd_annual": 290.0,   "credits": 21_000,  "savings_usd": 58.0},
+    "starter": {"price_usd_annual": 99.0,    "credits": 6_000,   "savings_usd": 45.0},
+    "builder": {"price_usd_annual": 290.0,   "credits": 21_000,  "savings_usd": 58.0},
     "pro":     {"price_usd_annual": 990.0,   "credits": 72_000,  "savings_usd": 198.0},
     "growth":  {"price_usd_annual": 2_990.0, "credits": 240_000, "savings_usd": 598.0},
 }

@@ -19,9 +19,9 @@ TIER_FEATURES: dict[str, list[str]] = {
     "account_agents":     ["builder", "starter", "pro", "growth"],
     "wri_alerts":         ["builder", "starter", "pro", "growth"],
     "topup_usdc":         ["builder", "starter", "pro", "growth"],
-    "compare":            ["starter", "pro", "growth"],
-    "analytics":          ["starter", "pro", "growth"],
-    "wayforthql":         ["starter", "pro", "growth"],
+    "compare":            ["builder", "pro", "growth"],
+    "analytics":          ["builder", "pro", "growth"],
+    "wayforthql":         ["builder", "pro", "growth"],
     "wri_scores_visible": ["pro", "growth"],
     "priority_execution": ["pro", "growth"],
     "agent_identity":     ["pro", "growth"],
@@ -31,8 +31,8 @@ TIER_FEATURES: dict[str, list[str]] = {
 
 TIER_RATE_LIMITS: dict[str, dict] = {
     "free":    {"calls_per_minute": 30,  "calls_per_hour": 100},
-    "builder": {"calls_per_minute": 120, "calls_per_hour": 500},
-    "starter": {"calls_per_minute": 300, "calls_per_hour": 1500},
+    "starter": {"calls_per_minute": 120, "calls_per_hour": 500},
+    "builder": {"calls_per_minute": 300, "calls_per_hour": 1500},
     "pro":     {"calls_per_minute": 600, "calls_per_hour": 5000},
     "growth":  {"calls_per_minute": 600, "calls_per_hour": 10000},
 }

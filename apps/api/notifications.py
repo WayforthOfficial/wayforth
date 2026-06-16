@@ -144,7 +144,7 @@ def send_credits_low_email(to_email: str, calls_remaining: int, percent: int, pl
 
 _TIER_CREDITS = {
     "free":     100,
-    "starter":  50_000,
+    "builder":  50_000,
     "pro":      300_000,
     "growth":   1_000_000,
     "enterprise": 1_000_000,

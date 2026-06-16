@@ -263,6 +263,11 @@ async def test_T213_crlf_in_custom_header_blocked(c):
 async def test_T220_x402_search_no_payment_returns_402(c):
     """GET /x402/search without payment + query returns 402 with PaymentRequired."""
     r = await c.get("/x402/search")
+    if r.status_code == 503:
+        pytest.skip(
+            "x402 rail hard-disabled (FINDING-001): no real on-chain settlement until "
+            "EIP-3009 wired via funded CDP account — returns 503 until re-enabled"
+        )
     assert r.status_code == 402, f"Expected 402, got {r.status_code}: {r.text[:200]}"
     body = r.json()
     assert body.get("x402Version") in (1, 2)

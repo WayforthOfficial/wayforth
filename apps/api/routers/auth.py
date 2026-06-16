@@ -78,16 +78,16 @@ _BLOCKED_DOMAINS = {
 
 TIER_LIMITS = {
     "free":       {"rpm": 10,  "monthly": 1_000,    "fee_bps": 150},
-    "builder":    {"rpm": 30,  "monthly": 5_000,    "fee_bps": 150},
-    "starter":    {"rpm": 60,  "monthly": 20_000,   "fee_bps": 150},
+    "starter":    {"rpm": 30,  "monthly": 5_000,    "fee_bps": 150},
+    "builder":    {"rpm": 60,  "monthly": 20_000,   "fee_bps": 150},
     "pro":        {"rpm": 120, "monthly": 100_000,  "fee_bps": 150},
     "growth":     {"rpm": 300, "monthly": 500_000,  "fee_bps": 150},
     "enterprise": {"rpm": 500, "monthly": -1,       "fee_bps": 150},
 }
 
 PACKAGES = {
-    "builder":    {"credits": 6_000,   "price_usd": 12,  "fee_bps": 150, "label": "Builder"},
-    "starter":    {"credits": 21_000,  "price_usd": 29,  "fee_bps": 150, "label": "Starter"},
+    "starter":    {"credits": 6_000,   "price_usd": 12,  "fee_bps": 150, "label": "Starter"},
+    "builder":    {"credits": 21_000,  "price_usd": 29,  "fee_bps": 150, "label": "Builder"},
     "pro":        {"credits": 72_000,  "price_usd": 99,  "fee_bps": 150, "label": "Pro"},
     "growth":     {"credits": 240_000, "price_usd": 299, "fee_bps": 150, "label": "Growth"},
     "enterprise": {"credits": -1,      "price_usd": None,"fee_bps": 150, "label": "Enterprise"},
@@ -126,9 +126,9 @@ def _credits_to_tier(lifetime_credits: int, package_tier: str | None) -> str:
     if lifetime_credits >= 72_000:
         return "pro"
     if lifetime_credits >= 21_000:
-        return "starter"
-    if lifetime_credits >= 6_000:
         return "builder"
+    if lifetime_credits >= 6_000:
+        return "starter"
     return "free"
 
 

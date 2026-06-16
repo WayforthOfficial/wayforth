@@ -46,18 +46,18 @@ else:
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 PACKAGES = {
-    "builder":    {"credits": 6_000,   "price_usd": 12,  "fee_bps": 150, "label": "Builder"},
-    "starter":    {"credits": 21_000,  "price_usd": 29,  "fee_bps": 150, "label": "Starter"},
+    "starter":    {"credits": 6_000,   "price_usd": 12,  "fee_bps": 150, "label": "Starter"},
+    "builder":    {"credits": 21_000,  "price_usd": 29,  "fee_bps": 150, "label": "Builder"},
     "pro":        {"credits": 72_000,  "price_usd": 99,  "fee_bps": 150, "label": "Pro"},
     "growth":     {"credits": 240_000, "price_usd": 299, "fee_bps": 150, "label": "Growth"},
     "enterprise": {"credits": -1,      "price_usd": None,"fee_bps": 150, "label": "Enterprise"},
 }
 
 STRIPE_PACKAGES = {
-    "builder": {"price_cents": 1200,  "credits": 6_000,   "label": "Builder",
-                "price_id": os.environ.get("STRIPE_PRICE_BUILDER", "")},
-    "starter": {"price_cents": 2900,  "credits": 21_000,  "label": "Starter",
+    "starter": {"price_cents": 1200,  "credits": 6_000,   "label": "Starter",
                 "price_id": os.environ.get("STRIPE_PRICE_STARTER", "")},
+    "builder": {"price_cents": 2900,  "credits": 21_000,  "label": "Builder",
+                "price_id": os.environ.get("STRIPE_PRICE_BUILDER", "")},
     "pro":     {"price_cents": 9900,  "credits": 72_000,  "label": "Pro",
                 "price_id": os.environ.get("STRIPE_PRICE_PRO", "")},
     "growth":  {"price_cents": 29900, "credits": 240_000, "label": "Growth",
@@ -66,12 +66,12 @@ STRIPE_PACKAGES = {
 
 # Annual plans: 10 months price (2 months free). Credits replenished monthly, not upfront.
 STRIPE_ANNUAL_PACKAGES = {
-    "builder_annual": {"price_cents": 9900,   "credits": 6_000,   "label": "Builder Annual",
-                       "price_id": os.environ.get("STRIPE_PRICE_BUILDER_ANNUAL", ""),
-                       "savings_usd": 45.0,  "base_plan": "builder"},
-    "starter_annual": {"price_cents": 29000,  "credits": 21_000,  "label": "Starter Annual",
+    "starter_annual": {"price_cents": 9900,   "credits": 6_000,   "label": "Starter Annual",
                        "price_id": os.environ.get("STRIPE_PRICE_STARTER_ANNUAL", ""),
-                       "savings_usd": 58.0,  "base_plan": "starter"},
+                       "savings_usd": 45.0,  "base_plan": "starter"},
+    "builder_annual": {"price_cents": 29000,  "credits": 21_000,  "label": "Builder Annual",
+                       "price_id": os.environ.get("STRIPE_PRICE_BUILDER_ANNUAL", ""),
+                       "savings_usd": 58.0,  "base_plan": "builder"},
     "pro_annual":     {"price_cents": 99000,  "credits": 72_000,  "label": "Pro Annual",
                        "price_id": os.environ.get("STRIPE_PRICE_PRO_ANNUAL", ""),
                        "savings_usd": 198.0, "base_plan": "pro"},

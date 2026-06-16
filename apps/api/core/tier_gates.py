@@ -21,24 +21,33 @@ TIER_FEATURES: dict[str, list[str]] = {
     "account_agents":     ["builder", "starter", "pro", "growth", "enterprise"],
     "wri_alerts":         ["builder", "starter", "pro", "growth", "enterprise"],
     "topup_usdc":         ["builder", "starter", "pro", "growth", "enterprise"],
-    "compare":            ["starter", "pro", "growth", "enterprise"],
-    "analytics":          ["starter", "pro", "growth", "enterprise"],
-    "wayforthql":         ["starter", "pro", "growth", "enterprise"],
+    "compare":            ["builder", "pro", "growth", "enterprise"],
+    "analytics":          ["builder", "pro", "growth", "enterprise"],
+    "wayforthql":         ["builder", "pro", "growth", "enterprise"],
     "wri_scores_visible": ["pro", "growth", "enterprise"],
     "priority_execution": ["pro", "growth", "enterprise"],
     "agent_identity":     ["pro", "growth", "enterprise"],
     "custom_services":    ["growth", "enterprise"],
     "no_rate_limits":     ["growth", "enterprise"],
-    "cloud_agents":       ["starter", "pro", "growth", "enterprise"],
+    "cloud_agents":       ["free", "builder", "starter", "pro", "growth", "enterprise"],
     "priority_support":   ["enterprise"],
 }
 
+# Max hosted agents a user may have deployed simultaneously, by tier.
+HOSTED_AGENT_LIMITS: dict[str, int] = {
+    "free":       1,
+    "starter":    3,
+    "builder":    5,
+    "pro":        8,
+    "growth":     10,
+    "enterprise": 50,
+}
+
 # Max simultaneous queued+running cloud agent runs per user, by tier.
-# cloud_agents requires starter+, so free/builder caps are defensive only.
 CONCURRENT_RUNS_PER_USER: dict[str, int] = {
-    "free":       0,
-    "builder":    1,
-    "starter":    2,
+    "free":       1,
+    "starter":    1,
+    "builder":    2,
     "pro":        5,
     "growth":     10,
     "enterprise": 25,
@@ -46,8 +55,8 @@ CONCURRENT_RUNS_PER_USER: dict[str, int] = {
 
 TIER_RATE_LIMITS: dict[str, dict] = {
     "free":       {"calls_per_minute": 15,  "calls_per_hour": 100},
-    "builder":    {"calls_per_minute": 120, "calls_per_hour": 500},
-    "starter":    {"calls_per_minute": 300, "calls_per_hour": 1500},
+    "starter":    {"calls_per_minute": 120, "calls_per_hour": 500},
+    "builder":    {"calls_per_minute": 300, "calls_per_hour": 1500},
     "pro":        {"calls_per_minute": 600, "calls_per_hour": 5000},
     "growth":     {"calls_per_minute": 600, "calls_per_hour": 10000},
     "enterprise": {"calls_per_minute": 600, "calls_per_hour": 10000},

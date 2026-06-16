@@ -29,12 +29,10 @@ logger = logging.getLogger("wayforth")
 SCHEDULER_INTERVAL_SECS = 30
 
 # Per-user concurrent-run caps, keyed by package_tier.
-# cloud_agents requires starter+, so free/builder caps of 0 are never reached
-# in practice (require_tier gates those tiers out at the HTTP layer).
 _CONCURRENT_USER_CAP: dict[str, int] = {
-    "free":       0,
-    "builder":    1,
-    "starter":    2,
+    "free":       1,
+    "starter":    1,
+    "builder":    2,
     "pro":        5,
     "growth":     10,
     "enterprise": 25,
