@@ -20,11 +20,12 @@ const TARGET_LANG       = 'FR';
 const NOTIFY_EMAIL      = process.env.NOTIFY_EMAIL ?? '';
 const GATEWAY           = 'https://gateway.wayforth.io';
 
-const PROXY_SERVICES = new Set([
-  'alphavantage', 'assemblyai', 'brave', 'deepl', 'elevenlabs', 'firecrawl',
+const PROXY_CATALOG_SLUGS = new Set([
+  'alphavantage', 'assemblyai', 'brave_search', 'deepl', 'elevenlabs', 'firecrawl',
   'gemini', 'groq', 'jina', 'mistral', 'openweather', 'perplexity',
   'resend', 'serper', 'stability', 'tavily', 'together',
 ]);
+const CATALOG_TO_PROXY: Record<string, string> = { brave_search: 'brave' };
 
 async function proxyPost(slug: string, params: Record<string, unknown>) {
   const resp = await fetch(`${GATEWAY}/proxy/${slug}`, {
@@ -42,13 +43,25 @@ async function main() {
   // ── 1. DISCOVER translation service ──────────────────────────────────────
   console.log('Discovering best translation service...');
   const { results } = await wf.search('translate text to another language', { limit: 10 });
-  const hit = results.find((r) => r.slug !== null && PROXY_SERVICES.has(r.slug!));
-  if (!hit?.slug) throw new Error('No proxy-managed translation service found.');
-  console.log(`→ ${hit.name}  WRI=${hit.wri}  slug=${hit.slug}`);
+  const candidates = results.filter((r) => r.slug !== null && PROXY_CATALOG_SLUGS.has(r.slug!));
+  if (!candidates.length) throw new Error('No proxy-managed translation service found.');
 
-  // ── 2. TRANSLATE via proxy ────────────────────────────────────────────────
-  console.log(`\nTranslating via /proxy/${hit.slug}...`);
-  const resp = await proxyPost(hit.slug, { text: TEXT_TO_TRANSLATE, target_lang: TARGET_LANG });
+  // ── 2. TRANSLATE via proxy (try candidates in WRI order) ─────────────────
+  let resp: Response | null = null;
+  let usedSlug = '';
+  for (const hit of candidates) {
+    const slug = hit.slug!;
+    console.log(`→ Trying ${hit.name}  WRI=${hit.wri}  slug=${slug}`);
+    const r = await fetch(`${GATEWAY}/proxy/${slug}`, {
+      method: 'POST',
+      headers: { 'X-Wayforth-API-Key': API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: TEXT_TO_TRANSLATE, target_lang: TARGET_LANG }),
+    });
+    if (r.ok) { resp = r; usedSlug = slug; break; }
+    console.log(`  ✗ ${slug} returned ${r.status} — trying next service`);
+  }
+  if (!resp) throw new Error('All discovered services failed. Check your API key and credits.');
+  console.log(`\nTranslating via /proxy/${usedSlug}...`);
   console.log(`[wayforth] failover  : ${resp.headers.get('x-wayforth-failover')}`);
   console.log(`[wayforth] wri       : ${resp.headers.get('x-wayforth-wri')}`);
   console.log(`[wayforth] credits   : ${resp.headers.get('x-wayforth-credits-remaining')} remaining`);
@@ -66,7 +79,7 @@ async function main() {
   }
   console.log('\nDiscovering notification service...');
   const { results: notifResults } = await wf.search('send email notification', { limit: 10 });
-  const notifHit = notifResults.find((r) => r.slug !== null && PROXY_SERVICES.has(r.slug!));
+  const notifHit = notifResults.find((r) => r.slug !== null && PROXY_CATALOG_SLUGS.has(r.slug!));
   if (!notifHit?.slug) { console.log('[skip] No proxy-managed email service found.'); return; }
 
   const notifResp = await proxyPost(notifHit.slug, {

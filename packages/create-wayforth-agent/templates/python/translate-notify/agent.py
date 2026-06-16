@@ -22,11 +22,12 @@ TARGET_LANG       = "FR"   # DeepL language code
 # Optional: set to send a notification email via Resend
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "")
 
-_PROXY_SERVICES = {
-    "alphavantage", "assemblyai", "brave", "deepl", "elevenlabs", "firecrawl",
+_PROXY_CATALOG_SLUGS = {
+    "alphavantage", "assemblyai", "brave_search", "deepl", "elevenlabs", "firecrawl",
     "gemini", "groq", "jina", "mistral", "openweather", "perplexity",
     "resend", "serper", "stability", "tavily", "together",
 }
+_CATALOG_TO_PROXY = {"brave_search": "brave"}
 
 
 def proxy_post(slug: str, params: dict) -> httpx.Response:
@@ -46,15 +47,31 @@ def main() -> None:
     # ── 1. DISCOVER translation service ────────────────────────────────────
     print("Discovering best translation service...")
     results = wf.search("translate text to another language", limit=10)["results"]
-    hit = next((r for r in results if r.get("slug") in _PROXY_SERVICES), None)
-    if not hit:
+    candidates = [r for r in results if r.get("slug") in _PROXY_CATALOG_SLUGS]
+    if not candidates:
         sys.exit("No proxy-managed translation service found in discovery results.")
-    slug = hit["slug"]
-    print(f"→ {hit['name']}  WRI={hit['wri']}  slug={slug}")
 
-    # ── 2. TRANSLATE via proxy ──────────────────────────────────────────────
+    # ── 2. TRANSLATE via proxy (try candidates in WRI order) ───────────────
+    resp = None
+    slug = None
+    for hit in candidates:
+        slug = hit["slug"]
+        print(f"→ Trying {hit['name']}  WRI={hit['wri']}  slug={slug}")
+        r = httpx.post(
+            f"https://gateway.wayforth.io/proxy/{slug}",
+            headers={"X-Wayforth-API-Key": API_KEY},
+            json={"text": TEXT_TO_TRANSLATE, "target_lang": TARGET_LANG},
+            timeout=30,
+        )
+        if r.is_success:
+            resp = r
+            break
+        print(f"  ✗ {slug} returned {r.status_code} — trying next service")
+
+    if resp is None:
+        sys.exit("All discovered services failed. Check your API key and credits.")
+
     print(f"\nTranslating via /proxy/{slug}...")
-    resp = proxy_post(slug, {"text": TEXT_TO_TRANSLATE, "target_lang": TARGET_LANG})
 
     print(f"[wayforth] failover  : {resp.headers.get('x-wayforth-failover')}")
     print(f"[wayforth] wri       : {resp.headers.get('x-wayforth-wri')}")
@@ -75,7 +92,7 @@ def main() -> None:
 
     print(f"\nDiscovering notification service...")
     notif_results = wf.search("send email notification", limit=10)["results"]
-    notif_hit = next((r for r in notif_results if r.get("slug") in _PROXY_SERVICES), None)
+    notif_hit = next((r for r in notif_results if r.get("slug") in _PROXY_CATALOG_SLUGS), None)
     if not notif_hit:
         print("[skip] No proxy-managed email service found.")
         return

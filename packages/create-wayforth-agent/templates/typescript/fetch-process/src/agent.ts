@@ -18,11 +18,12 @@ if (!API_KEY) {
 const CITY    = process.env.CITY ?? 'London';
 const GATEWAY = 'https://gateway.wayforth.io';
 
-const PROXY_SERVICES = new Set([
-  'alphavantage', 'assemblyai', 'brave', 'deepl', 'elevenlabs', 'firecrawl',
+const PROXY_CATALOG_SLUGS = new Set([
+  'alphavantage', 'assemblyai', 'brave_search', 'deepl', 'elevenlabs', 'firecrawl',
   'gemini', 'groq', 'jina', 'mistral', 'openweather', 'perplexity',
   'resend', 'serper', 'stability', 'tavily', 'together',
 ]);
+const CATALOG_TO_PROXY: Record<string, string> = { brave_search: 'brave' };
 
 async function main() {
   const wf = new WayforthClient({ apiKey: API_KEY });
@@ -30,15 +31,23 @@ async function main() {
   // ── 1. DISCOVER ──────────────────────────────────────────────────────────
   console.log('Discovering best weather/data service...');
   const { results } = await wf.search('current weather conditions city', { limit: 10 });
-  const hit = results.find((r) => r.slug !== null && PROXY_SERVICES.has(r.slug!));
-  if (!hit?.slug) throw new Error('No proxy-managed data service found.');
-  console.log(`→ ${hit.name}  WRI=${hit.wri}  slug=${hit.slug}`);
+  const candidates = results.filter((r) => r.slug !== null && PROXY_CATALOG_SLUGS.has(r.slug!));
+  if (!candidates.length) throw new Error('No proxy-managed data service found.');
 
-  // ── 2. FETCH via proxy (GET with query params) ────────────────────────────
-  console.log(`\nFetching from /proxy/${hit.slug}?city=${CITY}...`);
-  const url  = `${GATEWAY}/proxy/${hit.slug}?city=${encodeURIComponent(CITY)}`;
-  const resp = await fetch(url, { headers: { 'X-Wayforth-API-Key': API_KEY } });
-  if (!resp.ok) throw new Error(`Proxy returned ${resp.status}: ${await resp.text()}`);
+  // ── 2. FETCH via proxy (try candidates in WRI order) ────────────────────
+  let resp: Response | null = null;
+  let usedSlug = '';
+  for (const hit of candidates) {
+    const slug = hit.slug!;
+    console.log(`→ Trying ${hit.name}  WRI=${hit.wri}  slug=${slug}`);
+    const r = await fetch(`${GATEWAY}/proxy/${slug}?city=${encodeURIComponent(CITY)}`, {
+      headers: { 'X-Wayforth-API-Key': API_KEY },
+    });
+    if (r.ok) { resp = r; usedSlug = slug; break; }
+    console.log(`  ✗ ${slug} returned ${r.status} — trying next service`);
+  }
+  if (!resp) throw new Error('All discovered services failed. Check your API key and credits.');
+  console.log(`\nFetching from /proxy/${usedSlug}?city=${CITY}...`);
 
   console.log(`[wayforth] failover  : ${resp.headers.get('x-wayforth-failover')}`);
   console.log(`[wayforth] wri       : ${resp.headers.get('x-wayforth-wri')}`);

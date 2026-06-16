@@ -21,13 +21,16 @@ from pydantic import BaseModel, Field
 
 _GATEWAY = "https://gateway.wayforth.io"
 
-# Managed proxy slugs — confirmed against SERVICE_CONFIGS in wayforth-api.
+# Catalog slugs returned by /search that correspond to Wayforth managed proxies.
 # Call GET /services?tier=3 or run `wayforth services --tier 3` to refresh.
-_PROXY_SERVICES: frozenset[str] = frozenset({
-    "alphavantage", "assemblyai", "brave", "deepl", "elevenlabs", "firecrawl",
+_PROXY_CATALOG_SLUGS: frozenset[str] = frozenset({
+    "alphavantage", "assemblyai", "brave_search", "deepl", "elevenlabs", "firecrawl",
     "gemini", "groq", "jina", "mistral", "openweather", "perplexity",
     "resend", "serper", "stability", "tavily", "together",
 })
+
+# Some catalog slugs differ from the proxy endpoint slug.
+_CATALOG_TO_PROXY: dict[str, str] = {"brave_search": "brave"}
 
 # Category hint → fallback queries that reliably surface managed slugs.
 # The search API category filter narrows to catalog entries that don't overlap
@@ -110,9 +113,10 @@ class WayforthTool(BaseTool):
             if not resp.is_success:
                 continue
             hit = next((r for r in resp.json().get("results", [])
-                        if r.get("slug") in _PROXY_SERVICES), None)
+                        if r.get("slug") in _PROXY_CATALOG_SLUGS), None)
             if hit:
-                return hit["slug"]
+                catalog_slug = hit["slug"]
+                return _CATALOG_TO_PROXY.get(catalog_slug, catalog_slug)
         return None
 
     def _execute_proxy(self, slug: str, params: dict[str, Any]) -> tuple[Any, dict[str, str]]:
@@ -182,9 +186,10 @@ class WayforthTool(BaseTool):
                 if not sresp.is_success:
                     continue
                 hit = next((r for r in sresp.json().get("results", [])
-                            if r.get("slug") in _PROXY_SERVICES), None)
+                            if r.get("slug") in _PROXY_CATALOG_SLUGS), None)
                 if hit:
-                    slug = hit["slug"]
+                    catalog_slug = hit["slug"]
+                    slug = _CATALOG_TO_PROXY.get(catalog_slug, catalog_slug)
                     break
         if not slug:
             return json.dumps({"error": "no_managed_service_found", "intent": intent})

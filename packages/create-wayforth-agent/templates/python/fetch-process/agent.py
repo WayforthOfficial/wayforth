@@ -18,11 +18,12 @@ if not API_KEY:
 
 CITY = os.environ.get("CITY", "London")
 
-_PROXY_SERVICES = {
-    "alphavantage", "assemblyai", "brave", "deepl", "elevenlabs", "firecrawl",
+_PROXY_CATALOG_SLUGS = {
+    "alphavantage", "assemblyai", "brave_search", "deepl", "elevenlabs", "firecrawl",
     "gemini", "groq", "jina", "mistral", "openweather", "perplexity",
     "resend", "serper", "stability", "tavily", "together",
 }
+_CATALOG_TO_PROXY = {"brave_search": "brave"}
 
 
 def main() -> None:
@@ -31,21 +32,31 @@ def main() -> None:
     # ── 1. DISCOVER ────────────────────────────────────────────────────────
     print(f"Discovering best weather/data service...")
     results = wf.search("current weather conditions city", limit=10)["results"]
-    hit = next((r for r in results if r.get("slug") in _PROXY_SERVICES), None)
-    if not hit:
+    candidates = [r for r in results if r.get("slug") in _PROXY_CATALOG_SLUGS]
+    if not candidates:
         sys.exit("No proxy-managed data service found in discovery results.")
-    slug = hit["slug"]
-    print(f"→ {hit['name']}  WRI={hit['wri']}  slug={slug}")
 
-    # ── 2. FETCH via proxy (GET with query params) ─────────────────────────
+    # ── 2. FETCH via proxy (try candidates in WRI order) ──────────────────
+    resp = None
+    slug = None
+    for hit in candidates:
+        slug = hit["slug"]
+        print(f"→ Trying {hit['name']}  WRI={hit['wri']}  slug={slug}")
+        r = httpx.get(
+            f"https://gateway.wayforth.io/proxy/{slug}",
+            headers={"X-Wayforth-API-Key": API_KEY},
+            params={"city": CITY},
+            timeout=30,
+        )
+        if r.is_success:
+            resp = r
+            break
+        print(f"  ✗ {slug} returned {r.status_code} — trying next service")
+
+    if resp is None:
+        sys.exit("All discovered services failed. Check your API key and credits.")
+
     print(f"\nFetching from /proxy/{slug}?city={CITY}...")
-    resp = httpx.get(
-        f"https://gateway.wayforth.io/proxy/{slug}",
-        headers={"X-Wayforth-API-Key": API_KEY},
-        params={"city": CITY},
-        timeout=30,
-    )
-    resp.raise_for_status()
 
     print(f"[wayforth] failover  : {resp.headers.get('x-wayforth-failover')}")
     print(f"[wayforth] wri       : {resp.headers.get('x-wayforth-wri')}")
