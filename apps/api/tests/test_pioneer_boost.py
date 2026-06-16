@@ -32,9 +32,10 @@ try:
     from wayforth_rank_v2 import compute_wri_v2
 except ImportError:
     # wayforth_rank_v2 is gitignored (private wayforth-rank repo).
-    # Stub satisfies the signature and capping contract for unit tests.
-    def compute_wri_v2(base_wri, payments, total_clicks, last_seen, boost_wri_bonus=0):  # type: ignore[misc]
-        return round(min(base_wri * 0.90 + boost_wri_bonus, 100.0), 1)
+    # Stub satisfies the 4-argument signature only — no boost_wri_bonus param,
+    # matching the real function's contract (/integrity §11.5).
+    def compute_wri_v2(base_wri, payments, total_clicks, last_seen):  # type: ignore[misc]
+        return round(min(base_wri * 0.90, 100.0), 1)
 from routers.billing.account import (
     _PIONEER_DAILY_CREDITS,
     _PIONEER_REJOIN_COOLDOWN,
@@ -83,8 +84,8 @@ def _can_activate_boost(provider: _FakeProvider, service: _FakeService) -> tuple
 
 
 _BOOST_CONFIG = {
-    "intelligence": {"days": 15, "wri_bonus": 10},
-    "premium":      {"days": 30, "wri_bonus": 20},
+    "intelligence": {"days": 15},
+    "premium":      {"days": 30},
 }
 
 def _pioneer_daily_for_tier(tier: str) -> int:
@@ -104,7 +105,7 @@ def _pioneer_routing_decision(query_id: str) -> bool:
 
 class TestBoostActivation:
     def test_T01_happy_path_intelligence(self):
-        """T01 — Intelligence provider with Tier 2 service can activate boost."""
+        """T01 — Intelligence provider with Tier 2 service can activate boost (15-day routing window)."""
         provider = _FakeProvider(tier="intelligence", boost_used=False)
         service = _FakeService(coverage_tier=2, consecutive_failures=0)
         ok, reason = _can_activate_boost(provider, service)
@@ -112,17 +113,17 @@ class TestBoostActivation:
         assert reason == "ok"
         cfg = _BOOST_CONFIG["intelligence"]
         assert cfg["days"] == 15
-        assert cfg["wri_bonus"] == 10
+        assert "wri_bonus" not in cfg  # boost is routing-only; no WRI score modification
 
     def test_T01_happy_path_premium(self):
-        """T01 — Premium provider gets 30 days, +20 WRI."""
+        """T01 — Premium provider gets 30-day Pioneer routing window (no WRI score change)."""
         provider = _FakeProvider(tier="premium", boost_used=False)
         service = _FakeService(coverage_tier=3, consecutive_failures=0)
         ok, reason = _can_activate_boost(provider, service)
         assert ok is True
         cfg = _BOOST_CONFIG["premium"]
         assert cfg["days"] == 30
-        assert cfg["wri_bonus"] == 20
+        assert "wri_bonus" not in cfg  # boost is routing-only; no WRI score modification
 
     def test_T02_blocked_boost_already_used(self):
         """T02 — boost_used=TRUE blocks activation unconditionally."""
@@ -167,29 +168,29 @@ class TestBoostActivation:
 
 class TestBoostAutoPause:
     def test_T04_pause_on_tier2_drop(self):
-        """T04 — Auto-pause logic triggers when service drops below Tier 2."""
+        """T04 — Auto-pause triggers when service drops below Tier 2 (routing paused, WRI unchanged)."""
         from datetime import datetime, timezone, timedelta
 
         provider = _FakeProvider(
             tier="intelligence", boost_used=True, boost_paused=False,
             boost_expires_at=datetime.now(timezone.utc) + timedelta(days=10),
-            boost_wri_bonus=10,
+            boost_wri_bonus=0,  # always 0 — boost is routing-only
         )
         service = _FakeService(coverage_tier=1, consecutive_failures=5)
 
         tier2_ok = (service.coverage_tier or 0) >= 2 and (service.consecutive_failures or 0) < 3
         assert not tier2_ok  # service degraded
 
-        # Simulate the auto-pause update
+        # Simulate the auto-pause update (mirrors _boost_auto_pause_loop in main.py)
         if not tier2_ok and not provider.boost_paused:
             provider.boost_paused = True
-            provider.boost_wri_bonus = 0
+            # boost_wri_bonus not touched — it stays 0; pause is routing-only
 
         assert provider.boost_paused is True
-        assert provider.boost_wri_bonus == 0
+        assert provider.boost_wri_bonus == 0  # unchanged: boost never modifies WRI
 
-    def test_T04_resume_restores_bonus(self):
-        """T04 — Recovery resumes boost with correct bonus; expires_at unchanged."""
+    def test_T04_resume_restores_routing_only(self):
+        """T04 — Recovery resumes Pioneer routing; expires_at unchanged; WRI score unaffected."""
         from datetime import datetime, timezone, timedelta
 
         original_expires = datetime.now(timezone.utc) + timedelta(days=10)
@@ -202,44 +203,48 @@ class TestBoostAutoPause:
         tier2_ok = (service.coverage_tier or 0) >= 2 and (service.consecutive_failures or 0) < 3
         assert tier2_ok
 
-        correct_bonus = _BOOST_CONFIG["intelligence"]["wri_bonus"]
+        # Simulate the auto-resume update (mirrors _boost_auto_pause_loop in main.py)
         if tier2_ok and provider.boost_paused:
             provider.boost_paused = False
-            provider.boost_wri_bonus = correct_bonus
+            # boost_wri_bonus not touched — resume is routing-only
 
         assert provider.boost_paused is False
-        assert provider.boost_wri_bonus == 10
-        # expires_at must NOT change
-        assert provider.boost_expires_at == original_expires
+        assert provider.boost_wri_bonus == 0  # unchanged: boost never modifies WRI
+        assert provider.boost_expires_at == original_expires  # clock not reset on resume
 
 
-class TestWRIBoostBonus:
-    def test_T05_boost_bonus_added_to_score(self):
-        """T05 — boost_wri_bonus is added to compute_wri_v2 score."""
+class TestWRIBoostIntegrity:
+    def test_T05_wri_is_not_modified_by_boost(self):
+        """T05 — compute_wri_v2 takes no boost parameter; Pioneer Boost is routing-only.
+
+        /integrity §11.5: paid boosts never modify the organic WayforthRank score.
+        The boost affects which result appears first (Pioneer routing bucket),
+        not the WRI value that users see or that feeds downstream ranking.
+        """
         from datetime import datetime, timezone, timedelta
+        import inspect
         last_seen = datetime.now(timezone.utc) - timedelta(days=3)
 
-        score_no_boost  = compute_wri_v2(60.0, 100, 200, last_seen, boost_wri_bonus=0)
-        score_with_boost = compute_wri_v2(60.0, 100, 200, last_seen, boost_wri_bonus=10)
-        assert score_with_boost > score_no_boost
-        assert score_with_boost - score_no_boost == pytest.approx(10.0, abs=0.2)
+        # Function accepts exactly 4 positional args — no boost parameter
+        sig = inspect.signature(compute_wri_v2)
+        params = list(sig.parameters.keys())
+        assert "boost_wri_bonus" not in params, (
+            "compute_wri_v2 must not accept boost_wri_bonus — boost is routing-only"
+        )
+        assert len(params) == 4, f"Expected 4 params (base_wri, payments, total_clicks, last_seen), got {params}"
+
+        # Score is deterministic from organic signals only
+        score_a = compute_wri_v2(60.0, 100, 200, last_seen)
+        score_b = compute_wri_v2(60.0, 100, 200, last_seen)
+        assert score_a == score_b
 
     def test_T05_score_capped_at_100(self):
-        """T05 — Score is capped at 100 even with large bonus."""
+        """T05 — Score is capped at 100 regardless of input signals."""
         from datetime import datetime, timezone, timedelta
         last_seen = datetime.now(timezone.utc) - timedelta(days=1)
 
-        score = compute_wri_v2(95.0, 1000, 1000, last_seen, boost_wri_bonus=20)
-        assert score == 100.0
-
-    def test_T05_zero_bonus_unchanged(self):
-        """T05 — boost_wri_bonus=0 (default) leaves score unchanged."""
-        from datetime import datetime, timezone, timedelta
-        last_seen = datetime.now(timezone.utc) - timedelta(days=5)
-
-        score_explicit = compute_wri_v2(50.0, 50, 100, last_seen, boost_wri_bonus=0)
-        score_default  = compute_wri_v2(50.0, 50, 100, last_seen)
-        assert score_explicit == score_default
+        score = compute_wri_v2(100.0, 1000, 1000, last_seen)
+        assert score <= 100.0
 
 
 def _drip_claim(user: _FakeUser, today) -> int:
