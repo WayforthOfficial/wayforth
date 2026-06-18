@@ -21,6 +21,25 @@ class OrgInviteRequest(BaseModel):
     role: str = "member"
 
 
+# AUTHZ-3: roles an admin may assign via invite. 'owner' is deliberately excluded
+# — ownership is set only at org creation and can never be granted by invitation.
+_INVITABLE_ROLES = {"member", "admin"}
+
+
+def _validated_invite_role(raw: str) -> str:
+    """Normalise + allow-list an invite role (AUTHZ-3). Raises 422 on anything
+    outside _INVITABLE_ROLES so a caller can never assign 'owner' or an arbitrary
+    string."""
+    role = (raw or "member").strip().lower()
+    if role not in _INVITABLE_ROLES:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_role",
+            "valid": sorted(_INVITABLE_ROLES),
+            "message": "role must be 'member' or 'admin' (owner cannot be assigned via invite).",
+        })
+    return role
+
+
 def _auth_key_hash(request: Request) -> str:
     raw = request.headers.get("X-Wayforth-API-Key", "")
     if not raw:
@@ -47,9 +66,13 @@ async def _get_user_org(db, user_id: str):
     """, user_id)
 
 
-async def _require_admin(db, user_id: str) -> None:
+async def _require_admin(db, user_id: str, org_id) -> None:
+    """AUTHZ-4: the admin check MUST be scoped to the org being operated on.
+    Previously it matched any membership row for the user, so a user who was
+    admin in org X but only a member in the target org passed the check."""
     member = await db.fetchrow(
-        "SELECT role FROM org_members WHERE user_id = $1::uuid", user_id
+        "SELECT role FROM org_members WHERE user_id = $1::uuid AND org_id = $2",
+        user_id, org_id,
     )
     if not member or member["role"] not in ("admin", "owner"):
         raise HTTPException(status_code=403, detail="org_admin_required")
@@ -75,10 +98,13 @@ async def create_org(body: OrgCreateRequest, request: Request, db=Depends(get_db
 @limiter.limit("10/minute")
 async def invite_org_member(body: OrgInviteRequest, request: Request, db=Depends(get_db)):
     user_id = await _get_user_id(db, _auth_key_hash(request))
-    await _require_admin(db, user_id)
     org = await _get_user_org(db, user_id)
     if not org:
         raise HTTPException(status_code=404, detail="no_org_found")
+    await _require_admin(db, user_id, org["id"])
+
+    # AUTHZ-3: never trust the caller-supplied role verbatim.
+    role = _validated_invite_role(body.role)
 
     invited = await db.fetchrow("SELECT id FROM users WHERE email = $1", body.email)
     if not invited:
@@ -93,9 +119,9 @@ async def invite_org_member(body: OrgInviteRequest, request: Request, db=Depends
 
     await db.execute(
         "INSERT INTO org_members (org_id, user_id, role, joined_at) VALUES ($1, $2, $3, NOW())",
-        org["id"], invited["id"], body.role,
+        org["id"], invited["id"], role,
     )
-    return {"invited": body.email, "role": body.role}
+    return {"invited": body.email, "role": role}
 
 
 @router.get("/org/members")
@@ -132,7 +158,7 @@ async def list_org_keys(request: Request, db=Depends(get_db)):
     org = await _get_user_org(db, user_id)
     if not org:
         raise HTTPException(status_code=404, detail="no_org_found")
-    await _require_admin(db, user_id)
+    await _require_admin(db, user_id, org["id"])
 
     rows = await db.fetch("""
         SELECT ak.id, LEFT(ak.key_hash, 8) AS key_prefix, ak.created_at, ak.active, u.email
@@ -149,10 +175,10 @@ async def list_org_keys(request: Request, db=Depends(get_db)):
 @limiter.limit("10/minute")
 async def remove_org_member(member_user_id: str, request: Request, db=Depends(get_db)):
     user_id = await _get_user_id(db, _auth_key_hash(request))
-    await _require_admin(db, user_id)
     org = await _get_user_org(db, user_id)
     if not org:
         raise HTTPException(status_code=404, detail="no_org_found")
+    await _require_admin(db, user_id, org["id"])
 
     if str(org["owner_user_id"]) == member_user_id:
         raise HTTPException(status_code=422, detail="cannot_remove_owner")
