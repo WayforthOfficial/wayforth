@@ -10,18 +10,26 @@ import asyncpg
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
+from core.rails import rail_live
 from core.rate_limit import limiter, _check_x402_rate_limit, _X402_RPM
 from routers.agent import _upsert_x402_identity
 
 logger = logging.getLogger("wayforth")
 
-# ── Rail kill-switch (v0.8.5 security hardening) ──────────────────────────────
-# The x402 rail performs NO real on-chain settlement (FINDING-001): verification
-# is pure client-side JSON parsing, so a forged X-PAYMENT header yields free
-# managed-service execution. The rail stays HARD-DISABLED until EIP-3009
-# settlement is wired via a funded CDP account (see Phase 3 TODO in
-# _verify_x402_payment). Default off; requires an explicit opt-in env to enable.
-X402_RAIL_ENABLED = os.environ.get("WAYFORTH_X402_ENABLED", "false").lower() == "true"
+# ── Rail live-status (single source of truth: core.rails) ─────────────────────
+# The x402 rail used to perform NO real on-chain settlement (FINDING-001):
+# verification was pure client-side JSON parsing, so a forged X-PAYMENT header
+# yielded free managed-service execution. That hole is now closed — verification
+# delegates to services.x402_client.verify_authorization, which recovers the
+# EIP-3009 signature and fails closed on any envelope not signed by `from`.
+#
+# Whether the rail is LIVE is decided in ONE place — core.rails.rail_live("x402")
+# — which requires both the launch flag (WAYFORTH_RAILS_LIVE / WAYFORTH_RAIL_X402,
+# legacy WAYFORTH_X402_ENABLED honored) AND a funded settlement path
+# (x402_settlement_ready). The flag is necessary but not sufficient: no launch
+# flag can light x402 without real settlement behind it.
+def _x402_rail_live() -> bool:
+    return rail_live("x402")
 
 
 def _x402_disabled_response() -> JSONResponse:
@@ -55,82 +63,52 @@ router = APIRouter()
 async def _verify_x402_payment(payment_header: str, payto: str, expected_price_str: str) -> dict:
     """Decode and verify an EIP-3009 X-PAYMENT authorization header.
 
-    ⚠️  FINDING-001 (v0.8.4 internal audit) — DO NOT RE-ENABLE THE x402 RAIL ⚠️
-    This function performs NO real settlement: it only parses the client-supplied
-    base64 JSON and checks the payee + amount fields. A forged envelope therefore
-    "verifies", which is why /x402/execute and /x402/search are hard-disabled
-    (503) via X402_RAIL_ENABLED. The result of this function is currently
-    unreachable from a live request.
+    FINDING-001 (resolved, v0.9.0): verification no longer trusts client JSON.
+    It delegates to services.x402_client.verify_authorization, which recovers the
+    EIP-712 signature over the USDC TransferWithAuthorization typed data and
+    rejects any envelope whose signer is not `from`. A forged envelope cannot be
+    signed, so it fails closed — that is what makes lighting the rail safe.
 
-    TODO (v0.9.0): wire real EIP-3009 settlement via the CDP facilitator before
-    flipping WAYFORTH_X402_ENABLED=true. Required steps:
-      1. Recover and verify the EIP-3009 signature (eth_account.recover_message)
-         over the typed-data authorization; reject if signer != `from`.
-      2. Call the CDP facilitator settle(authorization) to execute
-         transferWithAuthorization on Base.
+    On-chain settlement (steps 2-3 below) is performed by the caller via
+    services.x402_client.settle_authorization after this returns valid. The rail
+    only goes live when core.rails.rail_live("x402") is True (launch flag +
+    funded settlement path). Validate end-to-end on Base Sepolia
+    (BASE_CHAIN_ID=84532) with a funded relayer/CDP account before mainnet.
+      1. Recover + verify the EIP-3009 signature — DONE here.
+      2. Broadcast transferWithAuthorization via funded relayer/CDP facilitator.
       3. Await the on-chain receipt and require receipt.status == 1.
-      4. Only then return {"valid": True, ...}.
-      5. FINDING-017: derive x402 wallet reputation tiers from SETTLED on-chain
-         value only (this resolves automatically once 1–4 land).
-    Validate end-to-end on Base Sepolia with a funded CDP account first.
+      4. FINDING-017: derive x402 wallet reputation tiers from SETTLED on-chain
+         value only.
 
-    Returns {valid, from_address, amount_usdc}. When CDP signing keys are not
-    configured (dev/staging without a wallet), we still parse the header and
-    require it to be a well-formed JSON envelope with the expected payee +
-    amount — we just skip the on-chain attestation step.
+    Returns {valid, from_address, amount_usdc, received_micro, expected_micro,
+    signature, nonce, error}. Delegates to services.x402_client, which recovers
+    the EIP-712 signature and rejects anything not signed by `from`.
     """
-    cdp_key_name = os.environ.get("CDP_API_KEY_NAME", "")
-    cdp_private_key = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "")
-    cdp_configured = bool(cdp_key_name and cdp_private_key)
+    from services.x402_client import parse_payment_header, verify_authorization
+    from services.x402_pricing import to_micro_usdc
 
-    try:
-        import base64 as _b64, json as _json
-        # Payment header is base64-encoded JSON with EIP-3009 auth fields.
-        # Use validate=False to accept urlsafe variants; require successful decode.
-        raw = _b64.b64decode(payment_header + "==", validate=False)
-        decoded = _json.loads(raw.decode("utf-8"))
-        if not isinstance(decoded, dict):
-            raise ValueError("payment header is not a JSON object")
-        from_address = decoded.get("from") or decoded.get("authorization", {}).get("from", "")
-        to_address = (decoded.get("to") or decoded.get("authorization", {}).get("to") or "").lower()
-        # Amount is in micro-USDC; convert to USDC string for comparison
-        from services.x402_pricing import to_micro_usdc
-        expected_micro = int(to_micro_usdc(expected_price_str))
-        received_micro = int(decoded.get("value", decoded.get("authorization", {}).get("value", 0)))
-        # Validate payee matches: prevents accepting payments to attacker-controlled wallets.
-        if payto and to_address and to_address != payto.lower():
-            logger.warning("x402 payee mismatch: expected=%s received=%s", payto, to_address)
-            return {
-                "valid": False,
-                "from_address": from_address,
-                "amount_usdc": str(received_micro / 1_000_000),
-                "expected_micro": expected_micro,
-                "received_micro": received_micro,
-                "error": "payee_mismatch",
-            }
-        # Tightened from 2% to 0.5%. Gas variance does not apply to the
-        # USDC.transferWithAuthorization `value` field — `value` is the
-        # amount being authorized, not what's deducted after fees — so any
-        # meaningful underpayment is intentional.
-        within_tolerance = received_micro >= int(expected_micro * 0.995)
-        return {
-            "valid": within_tolerance,
-            "from_address": from_address,
-            "amount_usdc": str(received_micro / 1_000_000),
-            "expected_micro": expected_micro,
-            "received_micro": received_micro,
-        }
-    except Exception as _e:
-        # Previously this branch fell-open as {valid: True}. That allowed any
-        # malformed/garbage X-PAYMENT header to bypass payment entirely. Fail
-        # closed: an unparseable header is not a valid payment.
-        logger.warning("x402 payment header decode failed: %s", _e)
-        return {
-            "valid": False,
-            "from_address": None,
-            "amount_usdc": "0",
-            "error": "decode_failed",
-        }
+    expected_micro = int(to_micro_usdc(expected_price_str))
+    result = verify_authorization(payment_header, payto, expected_micro)
+
+    # Surface the signature alongside the verdict so the caller can settle the
+    # authorization on-chain after verification passes.
+    parsed = parse_payment_header(payment_header)
+    signature = parsed.get("signature") if parsed else None
+
+    received_micro = int(result.get("received_micro") or 0)
+    return {
+        "valid": bool(result.get("valid")),
+        "from_address": result.get("from_address"),
+        "amount_usdc": str(received_micro / 1_000_000),
+        "expected_micro": expected_micro,
+        "received_micro": received_micro,
+        "signature": signature,
+        "nonce": result.get("nonce"),
+        "valid_after": result.get("valid_after"),
+        "valid_before": result.get("valid_before"),
+        "to_address": result.get("to_address"),
+        "error": result.get("error"),
+    }
 
 
 async def _verify_payment_async(payment_header: str, service_slug: str):
@@ -221,7 +199,7 @@ async def x402_execute(request: Request):
     from services.managed import ADAPTERS, SERVICE_CONFIGS, SERVICE_ALTERNATIVES, SERVICE_DISPLAY_NAMES
 
     # FINDING-001: rail hard-disabled until real settlement lands.
-    if not X402_RAIL_ENABLED:
+    if not _x402_rail_live():
         return _x402_disabled_response()
 
     wayforth_wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
@@ -414,6 +392,38 @@ async def x402_execute(request: Request):
             "message": "This payment has already been settled. Each payment header can only be used once.",
         })
 
+    # On-chain settlement: broadcast transferWithAuthorization so the payer's
+    # signed authorization actually moves USDC to our wallet. We require a
+    # successful on-chain receipt BEFORE rendering the service — anything else
+    # would be free service against an unsettled signature.
+    from services.x402_client import settle_authorization, x402_settlement_ready
+    if x402_settlement_ready():
+        settlement = await asyncio.get_event_loop().run_in_executor(
+            None,
+            settle_authorization,
+            {
+                "valid": True,
+                "from_address": payer_address,
+                "to_address": wayforth_wallet,
+                "received_micro": verify_result.get("received_micro"),
+                "valid_after": verify_result.get("valid_after"),
+                "valid_before": verify_result.get("valid_before"),
+                "nonce": verify_result.get("nonce"),
+            },
+            verify_result.get("signature"),
+        )
+        if not settlement.get("settled"):
+            logger.warning(
+                "x402 settlement failed service=%s payer=%s reason=%s",
+                service_slug, payer_address, settlement.get("error"),
+            )
+            return JSONResponse(status_code=402, content={
+                "x402Version": 1,
+                "error": "Payment could not be settled on-chain. No service was rendered.",
+                "detail": settlement.get("error"),
+            })
+        logger.info("x402 settled service=%s tx=%s", service_slug, settlement.get("tx_hash"))
+
     # Execute service
     adapter = ADAPTERS[service_slug]
     result = None
@@ -574,6 +584,19 @@ def _search_402_response(wayforth_wallet: str, error: str = "Payment required") 
     return resp
 
 
+@router.get("/payments/rails")
+async def payments_rails():
+    """Single backend source of truth for payment-rail live status.
+
+    Every template, pay path, and client reads rail-live status from here. Each
+    rail's `live` is the value to trust: card/usdc reflect their launch flag;
+    x402.live is True only when its flag is on AND on-chain settlement is wired
+    and funded. Rails ship built present-tense but dark until launch flips them.
+    """
+    from core.rails import rails_status
+    return JSONResponse(content=rails_status())
+
+
 @router.get("/.well-known/x402")
 async def x402_well_known():
     """x402 v2 discovery document — lists only x402-enabled endpoints."""
@@ -614,7 +637,7 @@ async def x402_search(
     from fastapi import HTTPException
 
     # FINDING-001: rail hard-disabled until real settlement lands.
-    if not X402_RAIL_ENABLED:
+    if not _x402_rail_live():
         return _x402_disabled_response()
 
     wayforth_wallet = os.environ.get("WAYFORTH_BASE_WALLET", "")
