@@ -3,11 +3,16 @@ import hashlib
 import logging
 import math
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
 
 logger = logging.getLogger("wayforth")
+
+_RUN_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
+)
 
 ROUTING_FEE = 0.015  # 1.5% flat, all tiers
 
@@ -150,7 +155,14 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
     Returns (success, balance_after) normally, or (success, balance_after, tx_id)
     when return_tx_id=True. Callers that need the transaction ID for post-call
     signal enrichment should pass return_tx_id=True.
+
+    CLOUD-2: agent-driven 'execution' spend is checked against the hosted-agent
+    run's credit_cap as a live ceiling before any balance change. This is the
+    single choke point for /proxy and every /execute path; it raises 402 when the
+    cap would be exceeded and no-ops for all non-cloud traffic.
     """
+    if tx_type == "execution":
+        await check_run_credit_cap(db, agent_id, cost)
     async with db.transaction():
         row = await db.fetchrow(
             "SELECT credits_balance, pioneer_credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
@@ -196,6 +208,51 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
         if return_tx_id:
             return True, new_balance, tx_id
         return True, new_balance
+
+
+async def check_run_credit_cap(db, agent_id, additional_cost: int) -> None:
+    """CLOUD-2: enforce a hosted-agent run's credit_cap as a LIVE spend ceiling.
+
+    The pre-reserve/release model alone does not bound spend: an agent's own
+    /proxy (and /execute) calls deduct from the whole balance during the run, so
+    a capped agent could still burn far more than its cap in a single run. This
+    makes the cap a hard ceiling by refusing a call whose cost would push the
+    run's cumulative spend (proxy + compute) over the cap.
+
+    No-ops when agent_id is not a capped, active hosted-agent run, so ordinary
+    (non-cloud) proxy/execute traffic is unaffected. Raises HTTPException(402)
+    when the cap would be exceeded. Call it right before check_and_deduct_credits
+    on any path an agent can drive.
+    """
+    if not agent_id or not _RUN_UUID_RE.match(str(agent_id)):
+        return
+    run = await db.fetchrow(
+        "SELECT credits_reserved, status FROM agent_runs WHERE id = $1::uuid",
+        str(agent_id),
+    )
+    if not run or run["status"] not in ("queued", "running"):
+        return
+    cap = int(run["credits_reserved"] or 0)
+    if cap <= 0:
+        return  # uncapped run — nothing to enforce
+    spent = await db.fetchval(
+        "SELECT COALESCE(SUM(-amount), 0) FROM credit_transactions "
+        "WHERE agent_id = $1 AND amount < 0 AND type IN ('execution', 'cloud_compute')",
+        str(agent_id),
+    )
+    spent = int(spent or 0)
+    if spent + int(additional_cost) > cap:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=402, detail={
+            "error": "agent_credit_cap_exceeded",
+            "message": (
+                f"This run has reached its credit cap of {cap} "
+                f"({spent} already spent). Raise the agent's credit_cap to allow more."
+            ),
+            "credit_cap": cap,
+            "spent": spent,
+            "attempted": int(additional_cost),
+        })
 
 
 async def compute_calls_remaining(conn, api_key_id: str) -> int:
