@@ -1160,10 +1160,17 @@ async def execute_service(request: Request, db=Depends(get_db)):
             # the validated endpoint and prevent post-validation rebinding via
             # 30x to a private host.
             async with _httpx.AsyncClient(timeout=15.0, follow_redirects=False) as _client:
+                from core.url_validation import request_pinned
+                # EXEC-1: pin to the validated IP — follow_redirects=False blocks
+                # redirect-SSRF but NOT DNS rebinding between validation and connect.
                 if req_method in ("GET", "DELETE"):
-                    resp = await _client.request(req_method, req_endpoint, headers=call_headers, params=params)
+                    resp = await request_pinned(_client, req_method, req_endpoint,
+                                                headers=call_headers, params=params,
+                                                field_name="endpoint_url")
                 else:
-                    resp = await _client.request(req_method, req_endpoint, headers=call_headers, json=params)
+                    resp = await request_pinned(_client, req_method, req_endpoint,
+                                                headers=call_headers, json=params,
+                                                field_name="endpoint_url")
             upstream_status = resp.status_code
             _body_bytes = resp.content[:_BYOK_MAX_BYTES]
             _truncated = len(resp.content) > _BYOK_MAX_BYTES

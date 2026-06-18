@@ -1,7 +1,18 @@
 """conftest.py — session-finish summary hook + availability guard."""
+import os
+
 import httpx
 import pytest
 from tests.test_suite_v060 import API_KEY, BASE_URL, _500_errors, _forbidden_hits, _warnings
+
+
+# Recurrence guard (2026-06): the cloud E2E suite CREATES hosted_agents/agent_runs.
+# Run against the production gateway it pollutes prod and burns real E2B sandboxes
+# (this is what seeded the demo agents + 10k runs on a real account). These modules
+# must target a non-prod WAYFORTH_TEST_BASE_URL; running them at prod is refused
+# unless WAYFORTH_ALLOW_PROD_WRITES=true is set deliberately.
+_PROD_HOSTS = ("gateway.wayforth.io",)
+_CLOUD_WRITE_MODULES = ("test_cloud_idor.py",)
 
 
 _LIVE_TEST_MODULES = (
@@ -55,6 +66,26 @@ def _global_requires_api_key(request):
     )
     if any(m in module_path for m in auth_required_modules):
         pytest.skip("WAYFORTH_TEST_API_KEY not set — skipping auth-required test")
+
+
+@pytest.fixture(autouse=True)
+def _no_cloud_writes_against_prod(request):
+    """Refuse to run cloud-write E2E modules against the production gateway.
+
+    The cloud E2E suite creates hosted agents + dispatches real runs. Pointed at
+    prod it writes demo data to real accounts and burns E2B sandboxes. Require a
+    non-prod WAYFORTH_TEST_BASE_URL (override only with WAYFORTH_ALLOW_PROD_WRITES=true)."""
+    module_path = str(request.node.fspath)
+    if not any(m in module_path for m in _CLOUD_WRITE_MODULES):
+        return
+    hits_prod = any(h in BASE_URL for h in _PROD_HOSTS)
+    allowed = os.environ.get("WAYFORTH_ALLOW_PROD_WRITES", "").lower() == "true"
+    if hits_prod and not allowed:
+        pytest.skip(
+            f"Refusing cloud-write E2E against production ({BASE_URL}). Set "
+            "WAYFORTH_TEST_BASE_URL to a non-prod gateway "
+            "(or WAYFORTH_ALLOW_PROD_WRITES=true to override deliberately)."
+        )
 
 
 def pytest_sessionfinish(session, exitstatus):

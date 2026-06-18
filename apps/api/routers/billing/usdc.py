@@ -329,7 +329,8 @@ async def _usdc_renewal_reminder():
             for key in expiring:
                 plan = key["tier"]
                 plan_def = PLANS.get(plan, PLANS["free"])
-                bonus_calls = plan_def["usdc_bonus_credits"] // CREDITS_PER_CALL
+                # 5% USDC bonus, surfaced 1:1 in credits (matches the actual grant).
+                bonus_calls = plan_def["usdc_bonus_credits"]
                 new_ref = f"sub_usdc_{secrets.token_hex(8)}"
                 asyncio.create_task(_dispatch_webhooks(
                     str(key["user_id"]), "subscription.renewal_due", {
@@ -401,7 +402,8 @@ async def subscribe_usdc(request: Request, db=Depends(get_db)):
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
     amount_usdc = f"{plan_def['price_usdc']:.6f}"
     calls_included = plan_def["calls_included"]
-    bonus_calls = plan_def["usdc_bonus_credits"] // CREDITS_PER_CALL
+    # 5% USDC bonus, surfaced 1:1 in credits (matches the actual grant).
+    bonus_calls = plan_def["usdc_bonus_credits"]
 
     await db.execute("""
         INSERT INTO usdc_payments

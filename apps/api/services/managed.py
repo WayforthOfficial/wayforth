@@ -7,7 +7,7 @@ import time as _time
 import httpx
 from fastapi import HTTPException
 
-from core.url_validation import validate_external_url, validate_external_url_relaxed
+from core.url_validation import validate_external_url, validate_external_url_relaxed, request_pinned
 
 _httpx_log = logging.getLogger("httpx")
 logger = logging.getLogger(__name__)
@@ -372,7 +372,8 @@ async def call_assemblyai(params: dict, api_key: str) -> dict:
     # HEAD the URL to check size; allow through if Content-Length is absent or HEAD fails.
     try:
         async with httpx.AsyncClient(timeout=5.0) as head_client:
-            head_resp = await head_client.head(audio_url)
+            # EXEC-1: pin the size-probe HEAD to the validated IP (rebind defense).
+            head_resp = await request_pinned(head_client, "HEAD", audio_url, field_name="audio_url")
             content_length = head_resp.headers.get("content-length")
             if content_length is not None and int(content_length) > 12_000_000:
                 raise HTTPException(413, "Audio file exceeds Tier 1 limit (~10 min). Use BYOK for larger files.")

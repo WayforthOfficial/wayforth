@@ -23,25 +23,13 @@ router = APIRouter()
 @router.get("/admin/stats")
 @limiter.limit("20/minute")
 async def admin_stats(request: Request):
-    from main import app, ADMIN_KEY
-    # Header only — the legacy ?key= query param is no longer honored (keys in
-    # query strings leak into proxy/server access logs).
-    provided_key = request.headers.get("X-Admin-Key", "")
-    authed = ADMIN_KEY and provided_key and secrets.compare_digest(provided_key, ADMIN_KEY)
-    if not authed:
-        token = request.headers.get("X-Admin-Token", "")
-        if token:
-            token_hash = hashlib.sha256(token.encode()).hexdigest()
-            async with app.state.pool.acquire() as _c:
-                row = await _c.fetchrow(
-                    "SELECT s.expires_at, u.is_active FROM admin_sessions s "
-                    "JOIN admin_users u ON u.id = s.admin_user_id "
-                    "WHERE s.token_hash = $1 AND s.expires_at > NOW()",
-                    token_hash,
-                )
-            authed = bool(row and row["is_active"])
-    if not authed:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    # AUTHZ-1: session token OR gated break-glass key (admin_authed). The legacy
+    # ?key= query param is not honored (keys in query strings leak into logs).
+    from main import app
+    from core.admin_auth import admin_authed
+    async with app.state.pool.acquire() as _c:
+        if not await admin_authed(request, _c):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         async with app.state.pool.acquire() as conn:
             # --- developers ---
@@ -200,10 +188,11 @@ async def platform_stats(request: Request):
     Requires X-Admin-Key header. Returns subscriber counts by tier,
     monthly activity, credits consumed, and top services this month.
     """
-    from main import app, ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not provided_key or not secrets.compare_digest(provided_key, ADMIN_KEY):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from main import app
+    from core.admin_auth import admin_authed
+    async with app.state.pool.acquire() as _c:
+        if not await admin_authed(request, _c):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
         async with app.state.pool.acquire() as conn:

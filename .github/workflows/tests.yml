@@ -1,0 +1,46 @@
+name: tests
+
+# Minimal CI for the security batch (fast-follow). Runs the self-contained
+# security unit tests — no network, no DB, no secrets — so PRs get a
+# deterministic green/red signal. The live integration suites (test_suite_v0*.py)
+# require a deployed gateway + WAYFORTH_TEST_API_KEY and are intentionally not run
+# here; they remain a manual/clean-checkout step.
+
+on:
+  pull_request:
+  push:
+    branches: [main, "security/**"]
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          uv sync --frozen || uv sync
+          uv pip install pytest pytest-asyncio
+
+      - name: Run security unit tests
+        env:
+          ENVIRONMENT: development
+        run: |
+          uv run pytest -p no:cacheprovider -v \
+            tests/test_cloud7_agent_secret_failclosed.py \
+            tests/test_cloud2_run_cap.py \
+            tests/test_authz1_admin_killswitch.py \
+            tests/test_authz5_provider_upgrade.py \
+            tests/test_authz4_org_scope.py \
+            tests/test_authz3_invite_role.py \
+            tests/test_authz2_last_ceo.py \
+            tests/test_billing1_referral_redeem.py \
+            tests/test_exec1_request_pinned.py
