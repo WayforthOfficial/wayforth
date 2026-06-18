@@ -5,7 +5,8 @@ GET  /templates/{template_id}        — full template detail including readme
 POST /templates/{template_id}/deploy — create a hosted agent from a template
 
 Deploy creates an agent with code pre-loaded and status='ready' in one call.
-Requires cloud_agents tier gate (starter+). Auth via X-Wayforth-API-Key.
+Requires cloud_agents tier gate (starter+). Auth: session (dashboard) OR
+X-Wayforth-API-Key (SDK) — the same dependency /account/* and /cloud/* use.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.agent_secrets import encrypt_env
-from core.auth import _resolve_user, encrypt_api_key
+from core.auth import encrypt_api_key, resolve_dashboard_caller
 from core.db import get_db
 from core.tier_gates import require_tier
 from services.templates import get_template, list_templates
@@ -74,11 +75,17 @@ async def deploy_template(
 
     Required tier: starter+
     """
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
-    user_id, _, tier = await _resolve_user(db, api_key)
+    # Auth: session (browser dashboard) OR API key (SDK) — the SAME dependency
+    # /account/* and the /cloud/* write endpoints use, so CSRF/SameSite handling
+    # is identical. We never require the API key in the browser.
+    caller = await resolve_dashboard_caller(request, db)
+    user_id, tier = str(caller["user_id"]), caller["tier"]
     require_tier(tier, "cloud_agents")
+
+    # An API key is only present for SDK/programmatic callers; when supplied it is
+    # encrypted below as the runner key for future scheduled/webhook dispatch.
+    # Session (browser) callers won't send one — those runs skip until a key is set.
+    api_key = request.headers.get("X-Wayforth-API-Key", "")
 
     tmpl = get_template(template_id)
     if not tmpl:
