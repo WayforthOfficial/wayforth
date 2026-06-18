@@ -79,6 +79,23 @@ class UpdateAgentBody(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _resolve_run_key(header_key: str, agent: dict) -> str:
+    """Runtime key for a manual run's own gateway calls.
+
+    SDK callers pass it in the X-Wayforth-API-Key header; dashboard/session callers
+    don't, so fall back to the agent's stored runner key (provisioned server-side
+    at deploy). Returns "" if neither is available (run proceeds keyless)."""
+    if header_key:
+        return header_key
+    ct = agent.get("runner_key_encrypted")
+    if ct:
+        try:
+            return decrypt_api_key(ct, int(agent.get("runner_key_version") or 1))
+        except Exception:
+            return ""
+    return ""
+
+
 async def _get_agent_or_404(db, user_id: str, agent_id: str) -> dict:
     row = await db.fetchrow(
         "SELECT * FROM hosted_agents WHERE id = $1::uuid AND user_id = $2::uuid",
@@ -689,7 +706,10 @@ async def dispatch_run(
             "credit_cap": credit_cap,
         })
 
-    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
+    # Runtime key for the agent's own gateway calls: SDK header key, or (dashboard/
+    # session callers with no header) the agent's stored runner key — so manual
+    # runs are authenticated too, not just scheduled/webhook runs.
+    api_key_header = _resolve_run_key(request.headers.get("X-Wayforth-API-Key", ""), agent)
 
     from main import app
     run_id, credits_reserved = await _dispatch_run_internal(

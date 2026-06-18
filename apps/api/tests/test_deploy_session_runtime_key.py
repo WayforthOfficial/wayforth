@@ -16,6 +16,8 @@ from fastapi import HTTPException
 import core.auth as auth
 from core.auth import provision_runner_key
 import routers.templates as t
+import routers.cloud as cloud
+from routers.cloud import _resolve_run_key
 
 
 class _Req:
@@ -58,6 +60,35 @@ async def test_no_key_available_returns_none():
 
 
 # ── deploy auth: session (no API key) is accepted ────────────────────────────
+
+# ── _resolve_run_key (manual-run runtime key: header OR stored runner key) ────
+
+def test_run_key_uses_header_when_present(monkeypatch):
+    # Header key wins; the stored runner key is not decrypted.
+    called = {"n": 0}
+    monkeypatch.setattr(cloud, "decrypt_api_key", lambda *a: called.__setitem__("n", called["n"] + 1) or "X")
+    out = _resolve_run_key("wf_live_header", {"runner_key_encrypted": "CT", "runner_key_version": 1})
+    assert out == "wf_live_header" and called["n"] == 0
+
+
+def test_run_key_falls_back_to_stored_runner_key(monkeypatch):
+    # Dashboard/session manual run (no header) → decrypt the agent's runner key.
+    monkeypatch.setattr(cloud, "decrypt_api_key", lambda ct, ver: f"DECRYPTED::{ct}::{ver}")
+    out = _resolve_run_key("", {"runner_key_encrypted": "CT", "runner_key_version": 2})
+    assert out == "DECRYPTED::CT::2"
+
+
+def test_run_key_empty_when_no_header_no_runner_key():
+    assert _resolve_run_key("", {"runner_key_encrypted": None}) == ""
+    assert _resolve_run_key("", {}) == ""
+
+
+def test_run_key_empty_when_decrypt_fails(monkeypatch):
+    def _boom(*a):
+        raise ValueError("unknown key version")
+    monkeypatch.setattr(cloud, "decrypt_api_key", _boom)
+    assert _resolve_run_key("", {"runner_key_encrypted": "CT", "runner_key_version": 9}) == ""
+
 
 async def test_deploy_accepts_session_without_api_key(monkeypatch):
     async def _caller(request, db):
