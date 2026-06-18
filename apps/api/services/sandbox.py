@@ -150,12 +150,13 @@ class E2BSandboxProvider(SandboxProvider):
 def compute_credits_for_run(duration_ms: int) -> int:
     """Credits to charge for sandbox compute time.
 
-    Rate: 1 credit/minute, ceil to nearest minute, minimum 1 credit.
-    At Growth tier ($0.001246/credit): provably above E2B cost ($0.000975/min)
-    at every duration. Math verified before implementation.
+    Rate: 1.5 credits/minute, ceil to whole minutes (1-minute minimum). Credits
+    are integers, so the 1.5×minutes product is rounded UP so we never undercharge
+    (1 min → 2, 2 min → 3, 3 min → 5, 4 min → 6). At Growth tier ($0.001246/credit)
+    this stays provably above E2B cost ($0.000975/min) at every duration.
     """
     minutes = math.ceil(duration_ms / 60_000)
-    return max(1, minutes)
+    return max(1, math.ceil(1.5 * minutes))
 
 
 def get_provider(name: str) -> SandboxProvider:
