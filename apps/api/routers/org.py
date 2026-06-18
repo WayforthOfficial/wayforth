@@ -47,9 +47,13 @@ async def _get_user_org(db, user_id: str):
     """, user_id)
 
 
-async def _require_admin(db, user_id: str) -> None:
+async def _require_admin(db, user_id: str, org_id) -> None:
+    """AUTHZ-4: the admin check MUST be scoped to the org being operated on.
+    Previously it matched any membership row for the user, so a user who was
+    admin in org X but only a member in the target org passed the check."""
     member = await db.fetchrow(
-        "SELECT role FROM org_members WHERE user_id = $1::uuid", user_id
+        "SELECT role FROM org_members WHERE user_id = $1::uuid AND org_id = $2",
+        user_id, org_id,
     )
     if not member or member["role"] not in ("admin", "owner"):
         raise HTTPException(status_code=403, detail="org_admin_required")
@@ -75,10 +79,10 @@ async def create_org(body: OrgCreateRequest, request: Request, db=Depends(get_db
 @limiter.limit("10/minute")
 async def invite_org_member(body: OrgInviteRequest, request: Request, db=Depends(get_db)):
     user_id = await _get_user_id(db, _auth_key_hash(request))
-    await _require_admin(db, user_id)
     org = await _get_user_org(db, user_id)
     if not org:
         raise HTTPException(status_code=404, detail="no_org_found")
+    await _require_admin(db, user_id, org["id"])
 
     invited = await db.fetchrow("SELECT id FROM users WHERE email = $1", body.email)
     if not invited:
@@ -132,7 +136,7 @@ async def list_org_keys(request: Request, db=Depends(get_db)):
     org = await _get_user_org(db, user_id)
     if not org:
         raise HTTPException(status_code=404, detail="no_org_found")
-    await _require_admin(db, user_id)
+    await _require_admin(db, user_id, org["id"])
 
     rows = await db.fetch("""
         SELECT ak.id, LEFT(ak.key_hash, 8) AS key_prefix, ak.created_at, ak.active, u.email
@@ -149,10 +153,10 @@ async def list_org_keys(request: Request, db=Depends(get_db)):
 @limiter.limit("10/minute")
 async def remove_org_member(member_user_id: str, request: Request, db=Depends(get_db)):
     user_id = await _get_user_id(db, _auth_key_hash(request))
-    await _require_admin(db, user_id)
     org = await _get_user_org(db, user_id)
     if not org:
         raise HTTPException(status_code=404, detail="no_org_found")
+    await _require_admin(db, user_id, org["id"])
 
     if str(org["owner_user_id"]) == member_user_id:
         raise HTTPException(status_code=422, detail="cannot_remove_owner")
