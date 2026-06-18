@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.agent_secrets import encrypt_env
-from core.auth import _resolve_user, encrypt_api_key
+from core.auth import provision_runner_key, resolve_dashboard_caller
 from core.db import get_db
 from core.tier_gates import require_tier
 from services.templates import get_template, list_templates
@@ -74,10 +74,11 @@ async def deploy_template(
 
     Required tier: starter+
     """
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key required"})
-    user_id, _, tier = await _resolve_user(db, api_key)
+    # Auth: session (browser dashboard) OR API key (SDK) — the SAME dependency
+    # /account/* uses (resolve_dashboard_caller). The browser authenticates by
+    # Supabase session; we never require it to send a raw API key.
+    caller = await resolve_dashboard_caller(request, db)
+    user_id, tier = str(caller["user_id"]), caller["tier"]
     require_tier(tier, "cloud_agents")
 
     tmpl = get_template(template_id)
@@ -108,14 +109,10 @@ async def deploy_template(
     # Encrypt env vars the same way cloud.py does (Fernet via core.agent_secrets)
     env_encrypted = encrypt_env(body.env_vars) if body.env_vars else None
 
-    # Encrypt caller's API key for future scheduled/webhook dispatch
-    runner_key_ct: str | None = None
-    runner_key_ver: int = 1
-    if api_key:
-        try:
-            runner_key_ct, runner_key_ver = encrypt_api_key(api_key)
-        except Exception:
-            pass  # ENCRYPTION_KEY not set; schedule/webhook runs will skip
+    # Runtime key provisioned SERVER-SIDE: SDK header key, or (session/browser
+    # callers) the user's own stored key ciphertext — the browser never sends a
+    # raw key. Gives the deployed agent a runtime key for scheduled/webhook runs.
+    runner_key_ct, runner_key_ver = await provision_runner_key(request, db, user_id)
 
     # Deduplicate slug within this user's agents
     existing = await db.fetchrow(

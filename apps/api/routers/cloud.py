@@ -37,7 +37,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.agent_secrets import decrypt_env, encrypt_env
-from core.auth import _resolve_user, decrypt_api_key, encrypt_api_key, resolve_dashboard_caller
+from core.auth import _resolve_user, decrypt_api_key, encrypt_api_key, provision_runner_key, resolve_dashboard_caller
 from core.credits import check_and_deduct_credits
 from core.db import get_db
 from core.rate_limit import limiter
@@ -448,16 +448,10 @@ async def create_agent(
 
     env_encrypted = encrypt_env(body.env) if body.env else None
 
-    # Encrypt caller's API key for scheduler/webhook dispatch (runner key).
-    # Never stored decrypted — same Fernet key as BYOK key encryption.
-    runner_key_ct: str | None = None
-    runner_key_ver: int = 1
-    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
-    if api_key_header:
-        try:
-            runner_key_ct, runner_key_ver = encrypt_api_key(api_key_header)
-        except Exception:
-            pass  # ENCRYPTION_KEY not configured; scheduled/webhook runs will skip
+    # Runtime key for scheduler/webhook dispatch (runner key), provisioned
+    # SERVER-SIDE: SDK callers' header key is encrypted; session/browser callers
+    # reuse their own stored key ciphertext — the browser never sends a raw key.
+    runner_key_ct, runner_key_ver = await provision_runner_key(request, db, user_id)
 
     next_run_at = None
     if body.trigger_type == "schedule" and body.schedule:
