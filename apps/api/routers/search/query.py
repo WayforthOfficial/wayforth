@@ -435,13 +435,13 @@ async def tier3_status(request: Request, email: str):
 @limiter.limit("10/minute")
 async def tier3_admin(request: Request):
     """Admin view of Tier 3 applications filtered by KYB status."""
-    import secrets as _secrets
-    from main import app, ADMIN_KEY
-
-    # Header only — ?key= is no longer accepted (leaks into access logs).
-    provided_key = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not _secrets.compare_digest(provided_key, ADMIN_KEY):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    # AUTHZ-1: gate the static admin key on the kill-switch (session token OR gated
+    # break-glass key). This admin route previously compared ADMIN_KEY directly.
+    from main import app
+    from core.admin_auth import admin_authed
+    async with app.state.pool.acquire() as _authc:
+        if not await admin_authed(request, _authc):
+            raise HTTPException(status_code=401, detail="Unauthorized")
     async with app.state.pool.acquire() as db:
         apps = await db.fetch("""
             SELECT id, service_name, company_name, contact_email, endpoint_url,

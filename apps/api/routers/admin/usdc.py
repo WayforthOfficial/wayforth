@@ -29,9 +29,8 @@ async def admin_usdc_reconcile(request: Request, db=Depends(get_db)):
     # kill-switch so an operator can recover stranded funds even while the USDC
     # rail is disabled. It is admin-key gated (constant-time compare below) and
     # writes an audit log line on every successful use (see end of handler).
-    from main import ADMIN_KEY
-    provided = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not secrets.compare_digest(provided, ADMIN_KEY):
+    from core.admin_auth import admin_authed
+    if not await admin_authed(request, db):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     body = await request.json()

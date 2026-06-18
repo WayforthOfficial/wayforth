@@ -165,34 +165,52 @@ def _validate_external_url(url: str, field_name: str, allowed_schemes: tuple[str
     return resolved_ips
 
 
-async def post_pinned(
+async def request_pinned(
     client,
+    method: str,
     url: str,
     *,
+    params=None,
     content=None,
+    json=None,
     headers: dict | None = None,
     field_name: str = "url",
+    allow_http: bool = False,
 ):
-    """Validate `url`, then POST it with the TCP connection pinned to a
-    validated IP — actually closing the DNS-rebind TOCTOU (FINDING-008/102).
+    """Validate `url`, then issue `method` with the TCP connection pinned to a
+    validated IP — actually closing the DNS-rebind TOCTOU (FINDING-008/102, EXEC-1).
 
     `validate_external_url` resolves and screens every A/AAAA record. We then
-    rewrite the URL host to that exact IP *literal* and connect to it. Because
-    the host is now an IP literal, httpx/httpcore performs no second DNS lookup
-    at connect time, so a hostname that rebinds to 127.0.0.1 / 169.254.169.254
-    after validation can never be reached. The original hostname is preserved
-    for the TLS SNI, certificate verification, and the Host header, so TLS and
-    request routing behave exactly as for the un-pinned request.
+    rewrite the URL host to that exact IP *literal* and connect to it. Because the
+    host is now an IP literal, httpx/httpcore performs no second DNS lookup at
+    connect time, so a hostname that rebinds to 127.0.0.1 / 169.254.169.254 after
+    validation can never be reached. The original hostname is preserved for the
+    TLS SNI, certificate verification, and the Host header.
 
-    Raises HTTPException(422) if the URL fails validation (e.g. it has since
-    rebound to an internal address).
+    This is the ONLY safe way to make a server-side request to a user-supplied
+    URL. `validate_external_url` alone does NOT stop rebinding (httpx re-resolves
+    at connect), and `follow_redirects=False` only blocks redirect-based SSRF.
+
+    `allow_http=True` permits http:// targets (relaxed validator) for legitimate
+    content-fetch URLs; default is https-only. Raises HTTPException(422) if the
+    URL fails validation (e.g. it has since rebound to an internal address).
     """
-    ips = validate_external_url(url, field_name=field_name)
+    validator = validate_external_url_relaxed if allow_http else validate_external_url
+    ips = validator(url, field_name=field_name)
     parsed = urlparse(url)
     host = parsed.hostname or ""
+
+    body_kwargs: dict = {}
+    if params is not None:
+        body_kwargs["params"] = params
+    if content is not None:
+        body_kwargs["content"] = content
+    if json is not None:
+        body_kwargs["json"] = json
+
     if not ips or not host:
-        # Defensive fallback: validate_external_url returns >=1 IP on success.
-        return await client.post(url, content=content, headers=headers)
+        # Defensive fallback: the validator returns >=1 IP on success.
+        return await client.request(method, url, headers=headers, **body_kwargs)
 
     ip = ips[0]
     ip_host = f"[{ip}]" if ":" in ip else ip  # bracket IPv6 literals
@@ -204,7 +222,22 @@ async def post_pinned(
     # hostname, not by the pinned IP.
     merged["Host"] = f"{host}:{parsed.port}" if parsed.port else host
 
-    request = client.build_request("POST", pinned_url, content=content, headers=merged)
+    request = client.build_request(method, pinned_url, headers=merged, **body_kwargs)
     # TLS SNI + cert hostname verification use the real hostname, not the IP.
     request.extensions["sni_hostname"] = host
     return await client.send(request)
+
+
+async def post_pinned(
+    client,
+    url: str,
+    *,
+    content=None,
+    headers: dict | None = None,
+    field_name: str = "url",
+):
+    """POST `url` with the connection pinned to a validated IP. Thin wrapper over
+    request_pinned (kept for existing call sites)."""
+    return await request_pinned(
+        client, "POST", url, content=content, headers=headers, field_name=field_name
+    )

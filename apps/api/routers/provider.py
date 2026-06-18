@@ -19,6 +19,18 @@ logger = logging.getLogger("wayforth")
 
 router = APIRouter()
 
+
+def _block_free_provider_upgrade(is_prod: bool, price_id: str, stripe_mock: bool) -> bool:
+    """AUTHZ-5: decide whether a provider tier-upgrade request must be refused.
+
+    The mock branch grants the paid tier with NO payment. In production that must
+    never happen — a missing STRIPE_PRICE_PROVIDER_* env or an unconfigured Stripe
+    would otherwise hand out free Premium. Returns True (refuse) when running in
+    production and Stripe is mock/misconfigured for this tier.
+    """
+    return bool(is_prod and ((not price_id) or stripe_mock))
+
+
 _PROVIDER_TIERS = {"observer", "intelligence", "premium"}
 
 
@@ -1435,8 +1447,25 @@ async def provider_billing_upgrade(request: Request, db=Depends(get_db)):
         else _PROVIDER_TIER_MONTHLY_USD[target_tier]
     )
 
+    # AUTHZ-5: the mock branch grants the paid tier with NO payment, which is only
+    # acceptable in non-production. In production a missing price-id or an
+    # unconfigured Stripe must NOT silently upgrade the provider — otherwise a
+    # single unset STRIPE_PRICE_PROVIDER_* env var hands out free Premium (which
+    # unlocks competitor data + Pioneer Boost eligibility). Refuse instead.
+    _is_prod = os.environ.get("ENVIRONMENT", "development").lower() == "production"
+    if _block_free_provider_upgrade(_is_prod, price_id, STRIPE_MOCK):
+        logger.error(
+            "provider upgrade refused: Stripe misconfigured in production "
+            "(price_env=%s present=%s mock=%s) — NOT granting free tier",
+            price_env, bool(price_id), STRIPE_MOCK,
+        )
+        raise HTTPException(status_code=503, detail={
+            "error": "billing_not_configured",
+            "message": "Provider billing is temporarily unavailable. Please try again shortly.",
+        })
+
     if not price_id or STRIPE_MOCK:
-        # Mock mode: upgrade directly and record billing_interval
+        # Mock mode (non-production only): upgrade directly and record billing_interval
         await db.execute(
             "UPDATE providers SET tier = $1, billing_interval = $2 WHERE id = $3",
             target_tier, billing_interval, provider["provider_id"],

@@ -222,9 +222,13 @@ async def _deliver_wri_alert(
                        alert["id"], _log_safe_url(alert["notify_url"]), _vexc)
         return False
     try:
+        from core.url_validation import request_pinned
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
-            resp = await client.post(
-                alert["notify_url"],
+            # EXEC-1: pin to the validated IP so a DNS rebind between the check
+            # above and connect can't redirect this server-side POST to an
+            # internal/metadata target.
+            resp = await request_pinned(
+                client, "POST", alert["notify_url"],
                 content=body,
                 headers={
                     "Content-Type": "application/json",
@@ -232,6 +236,7 @@ async def _deliver_wri_alert(
                     "X-Wayforth-Timestamp": timestamp,
                     "X-Wayforth-Signature": f"sha256={sig}",
                 },
+                field_name="notify_url",
             )
         status_code = resp.status_code
         success = 200 <= status_code < 300

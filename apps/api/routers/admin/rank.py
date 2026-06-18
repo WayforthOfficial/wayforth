@@ -22,9 +22,9 @@ async def rank_recalculate(request: Request, db=Depends(get_db)):
 
     Proxies to the wayforth-rank private service (RANK_SERVICE_URL) so the
     v2 formula weights stay out of this public container."""
-    from main import app, ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+    from main import app
+    from core.admin_auth import admin_authed
+    if not await admin_authed(request, db):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     rank_url = os.environ.get("RANK_SERVICE_URL", "")
