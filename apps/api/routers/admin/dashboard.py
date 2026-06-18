@@ -30,6 +30,20 @@ ADMIN_ROLES = {
 }
 
 
+def _would_orphan_ceo(target_role: str, new_role, new_is_active, active_ceo_count: int) -> bool:
+    """AUTHZ-2: True if this PATCH would demote or deactivate the LAST active CEO.
+
+    Demoting a non-CEO, or changing a CEO while >1 active CEO remains, is fine.
+    """
+    if target_role != 'ceo':
+        return False
+    demoting = new_role is not None and new_role != 'ceo'
+    deactivating = new_is_active is False
+    if not (demoting or deactivating):
+        return False
+    return (active_ceo_count or 0) <= 1
+
+
 async def get_admin_session(request: Request, db):
     # X-Admin-Key grants full ceo-level access without a JWT session and without
     # MFA. This is a break-glass mechanism, gated on WAYFORTH_ADMIN_KEY_ENABLED
@@ -227,17 +241,56 @@ async def admin_update_member(
 
     body = await request.json()
 
+    target = await db.fetchrow(
+        "SELECT id, role, is_active FROM admin_users WHERE id=$1", member_id
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    # AUTHZ-2: validate the new role against the allow-list (was inserted verbatim,
+    # letting a CEO set any string and poison ADMIN_ROLES lookups).
+    new_role = body.get('role')
+    if new_role is not None and new_role not in ADMIN_ROLES:
+        raise HTTPException(status_code=400, detail={
+            "error": "invalid_role", "valid": sorted(ADMIN_ROLES),
+        })
+
+    new_is_active = body.get('is_active')
+
+    # AUTHZ-2: never demote or deactivate the last active CEO — it would orphan
+    # the admin control plane with no way back in.
+    if 'role' in body or 'is_active' in body:
+        active_ceos = await db.fetchval(
+            "SELECT COUNT(*) FROM admin_users WHERE role='ceo' AND is_active=TRUE"
+        )
+        if _would_orphan_ceo(target['role'], new_role, new_is_active, active_ceos):
+            raise HTTPException(status_code=409, detail={
+                "error": "last_ceo",
+                "message": "Cannot demote or deactivate the last active CEO.",
+            })
+
+    changes: dict = {}
     if 'is_active' in body:
         await db.execute(
             "UPDATE admin_users SET is_active=$1 WHERE id=$2",
-            body['is_active'], member_id
+            new_is_active, member_id
         )
-    if 'role' in body:
+        changes['is_active'] = new_is_active
+    if new_role is not None:
         await db.execute(
             "UPDATE admin_users SET role=$1 WHERE id=$2",
-            body['role'], member_id
+            new_role, member_id
         )
-    return {"status": "updated"}
+        changes['role'] = new_role
+
+    # AUTHZ-2: this mutation was previously unaudited, unlike its sibling handlers.
+    await log_admin_action(
+        db, session, "update_team_member",
+        target_resource=str(member_id),
+        payload=changes,
+        request=request,
+    )
+    return {"status": "updated", "changes": changes}
 
 
 # E1 (v0.7.8): degrade-but-don't-lie helpers for admin_overview. The previous
