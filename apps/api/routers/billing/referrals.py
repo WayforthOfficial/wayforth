@@ -62,33 +62,62 @@ async def get_referral(request: Request, db=Depends(get_db)):
     }
 
 
-@router.post("/account/referral/redeem")
-@limiter.limit("10/minute")
-async def redeem_referral(body: ReferralRedeemRequest, request: Request, db=Depends(get_db)):
-    caller = await resolve_dashboard_caller(request, db)
-    user_id = caller["user_id"]
+async def _redeem_in_tx(conn, user_id: str, code: str) -> None:
+    """BILLING-1: atomic referral redemption. Must run inside a transaction.
 
-    referral = await db.fetchrow("SELECT * FROM referrals WHERE code = $1", body.code)
+    The previous flow did SELECT-then-UPDATE with no row lock and no DB
+    uniqueness, so two concurrent redeems by one account both passed the
+    "already redeemed" check and both granted 500 credits — an unbounded farm.
+    Now:
+      * the redemption is claimed with a single conditional UPDATE
+        (... WHERE code = $code AND referred_user_id IS NULL RETURNING id);
+        a lost race returns no row → 422.
+      * a partial UNIQUE index on referred_user_id (migration 062) blocks the
+        same user claiming two different codes concurrently → UniqueViolationError
+        mapped to 422.
+      * the 500-credit grant runs ONLY after a successful claim, in the same
+        transaction, so it can never be double-applied.
+    """
+    import asyncpg
+
+    referral = await conn.fetchrow(
+        "SELECT referrer_user_id FROM referrals WHERE code = $1", code
+    )
     if not referral:
         raise HTTPException(status_code=404, detail="invalid_code")
-
     if str(referral["referrer_user_id"]) == user_id:
         raise HTTPException(status_code=400, detail="cannot_redeem_own_code")
 
-    already = await db.fetchrow(
+    already = await conn.fetchrow(
         "SELECT 1 FROM referrals WHERE referred_user_id = $1::uuid", user_id
     )
     if already:
         raise HTTPException(status_code=422, detail="already_redeemed")
 
-    await db.execute(
-        "UPDATE referrals SET referred_user_id = $1::uuid, redeemed_at = NOW() WHERE code = $2",
-        user_id, body.code,
-    )
-    # Give referred user 500 bonus monthly calls (via monthly_calls_count credit)
-    await db.execute("""
+    try:
+        claimed = await conn.fetchrow(
+            "UPDATE referrals SET referred_user_id = $1::uuid, redeemed_at = NOW() "
+            "WHERE code = $2 AND referred_user_id IS NULL RETURNING id",
+            user_id, code,
+        )
+    except asyncpg.UniqueViolationError:
+        # Concurrent redeem by the same user on a different code lost the race.
+        raise HTTPException(status_code=422, detail="already_redeemed")
+    if not claimed:
+        raise HTTPException(status_code=422, detail="already_redeemed")
+
+    # Grant 500 bonus monthly calls — only reached on a successful, unique claim.
+    await conn.execute("""
         UPDATE api_keys
         SET monthly_calls_count = GREATEST(0, monthly_calls_count - 500)
         WHERE user_id = $1::uuid AND active = true
     """, user_id)
+
+
+@router.post("/account/referral/redeem")
+@limiter.limit("10/minute")
+async def redeem_referral(body: ReferralRedeemRequest, request: Request, db=Depends(get_db)):
+    caller = await resolve_dashboard_caller(request, db)
+    async with db.transaction():
+        await _redeem_in_tx(db, caller["user_id"], body.code)
     return {"redeemed": True, "bonus_calls": 500}
