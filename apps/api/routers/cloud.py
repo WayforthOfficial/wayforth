@@ -999,6 +999,17 @@ async def update_agent(
     if body.trigger_type is not None:
         if body.trigger_type not in _VALID_TRIGGERS:
             raise HTTPException(status_code=422, detail={"error": "invalid_trigger_type"})
+        # CLOUD-9: enforce the same free-tier restriction as create_agent. Without
+        # this, a free user could create a 'manual' agent and then PATCH it to
+        # 'schedule'/'webhook', obtaining paid automation the create path blocks.
+        if tier == "free" and body.trigger_type != "manual":
+            raise HTTPException(status_code=403, detail={
+                "error": "trigger_type_not_allowed",
+                "trigger_type": body.trigger_type,
+                "message": "Free tier supports manual (on-demand) runs only. "
+                           "Upgrade to Starter or above to use scheduled or webhook triggers.",
+                "upgrade_url": "https://wayforth.io/pricing",
+            })
         vals.append(body.trigger_type)
         sets.append(f"trigger_type = ${len(vals)}")
 
