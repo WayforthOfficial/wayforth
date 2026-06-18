@@ -21,6 +21,25 @@ class OrgInviteRequest(BaseModel):
     role: str = "member"
 
 
+# AUTHZ-3: roles an admin may assign via invite. 'owner' is deliberately excluded
+# — ownership is set only at org creation and can never be granted by invitation.
+_INVITABLE_ROLES = {"member", "admin"}
+
+
+def _validated_invite_role(raw: str) -> str:
+    """Normalise + allow-list an invite role (AUTHZ-3). Raises 422 on anything
+    outside _INVITABLE_ROLES so a caller can never assign 'owner' or an arbitrary
+    string."""
+    role = (raw or "member").strip().lower()
+    if role not in _INVITABLE_ROLES:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_role",
+            "valid": sorted(_INVITABLE_ROLES),
+            "message": "role must be 'member' or 'admin' (owner cannot be assigned via invite).",
+        })
+    return role
+
+
 def _auth_key_hash(request: Request) -> str:
     raw = request.headers.get("X-Wayforth-API-Key", "")
     if not raw:
@@ -84,6 +103,9 @@ async def invite_org_member(body: OrgInviteRequest, request: Request, db=Depends
         raise HTTPException(status_code=404, detail="no_org_found")
     await _require_admin(db, user_id, org["id"])
 
+    # AUTHZ-3: never trust the caller-supplied role verbatim.
+    role = _validated_invite_role(body.role)
+
     invited = await db.fetchrow("SELECT id FROM users WHERE email = $1", body.email)
     if not invited:
         raise HTTPException(status_code=404, detail="user_not_found")
@@ -97,9 +119,9 @@ async def invite_org_member(body: OrgInviteRequest, request: Request, db=Depends
 
     await db.execute(
         "INSERT INTO org_members (org_id, user_id, role, joined_at) VALUES ($1, $2, $3, NOW())",
-        org["id"], invited["id"], body.role,
+        org["id"], invited["id"], role,
     )
-    return {"invited": body.email, "role": body.role}
+    return {"invited": body.email, "role": role}
 
 
 @router.get("/org/members")
