@@ -87,12 +87,13 @@ STRIPE_PACKAGES = {
                 "price_id": os.environ.get("STRIPE_PRICE_GROWTH", "")},
 }
 
-# Annual plans: 10 months price (2 months free). Credits replenished monthly.
+# Annual plans (clean round pricing). savings_usd = 12×monthly − annual.
+# Credits replenished monthly, not granted upfront.
 PLAN_ANNUAL_DETAILS: dict[str, dict] = {
-    "starter": {"price_usd_annual": 99.0,    "credits": 6_000,   "savings_usd": 45.0},
-    "builder": {"price_usd_annual": 290.0,   "credits": 21_000,  "savings_usd": 58.0},
-    "pro":     {"price_usd_annual": 990.0,   "credits": 72_000,  "savings_usd": 198.0},
-    "growth":  {"price_usd_annual": 2_990.0, "credits": 240_000, "savings_usd": 598.0},
+    "starter": {"price_usd_annual": 120.0,    "credits": 6_000,   "savings_usd": 24.0},
+    "builder": {"price_usd_annual": 300.0,    "credits": 21_000,  "savings_usd": 48.0},
+    "pro":     {"price_usd_annual": 1_020.0,  "credits": 72_000,  "savings_usd": 168.0},
+    "growth":  {"price_usd_annual": 3_000.0,  "credits": 240_000, "savings_usd": 588.0},
 }
 
 _PLAN_ANNUAL_PRICE_ENV: dict[str, str] = {
