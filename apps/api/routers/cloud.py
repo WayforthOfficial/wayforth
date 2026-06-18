@@ -309,28 +309,48 @@ async def _execute_run(
             timeout_seconds=min(timeout_s, _MAX_TIMEOUT),
         )
 
-        # Deduct compute charge (1 credit/min, ceil, min 1)
+        # Deduct compute charge (1 credit/min, ceil, min 1).
+        # CLOUD-1: the result of this deduction was previously discarded. When the
+        # balance can't cover compute, check_and_deduct_credits returns (False, …)
+        # WITHOUT charging — and since the sandbox has already run, silently
+        # ignoring it handed out free compute. Capture the result, log loudly, and
+        # record the uncollected amount on the run instead of dropping it.
         compute_credits = compute_credits_for_run(result.duration_ms)
         async with pool.acquire() as conn:
-            await check_and_deduct_credits(
+            compute_ok, _compute_bal = await check_and_deduct_credits(
                 conn, user_id, compute_credits,
                 f"/cloud/agents/{agent['id']}/runs",
                 service_id="cloud_compute",
                 tx_type="cloud_compute",
                 agent_id=run_id,
             )
+        compute_charged = compute_credits if compute_ok else 0
+        compute_uncollected = 0 if compute_ok else compute_credits
+        if not compute_ok:
+            logger.error(
+                "cloud compute charge UNCOLLECTED run=%s user=%s credits=%s "
+                "(insufficient balance after run) — recorded as unpaid",
+                run_id, user_id, compute_credits,
+            )
 
         # Reconcile WayforthRank signals from proxy calls during this run
         signals = await _reconcile_run_signals(pool, run_id, user_id)
         proxy_credits = signals["credits_proxy"]
 
-        # Release unused pre-reserve: reserved - (proxy + compute), min 0
-        actual_spend = proxy_credits + compute_credits
+        # Release unused pre-reserve: reserved - (proxy + compute actually charged),
+        # min 0. Only credits actually spent reduce the release — uncollected
+        # compute must NOT inflate the amount returned to the balance.
+        actual_spend = proxy_credits + compute_charged
         credits_released = max(0, credits_reserved - actual_spend)
         if credits_released > 0:
             await _release_reserve(pool, user_id, credits_released, run_id)
 
         log_combined = f"=== STDOUT ===\n{result.stdout}\n=== STDERR ===\n{result.stderr}"
+        if compute_uncollected > 0:
+            log_combined += (
+                f"\n=== WAYFORTH ===\nWARNING: {compute_uncollected} compute credit(s) "
+                "could not be charged (insufficient balance) and were recorded as unpaid."
+            )
         log_tail = log_combined[-4096:] if len(log_combined) > 4096 else log_combined
 
         final_status = "completed" if result.exit_code == 0 else "failed"
@@ -351,7 +371,7 @@ async def _execute_run(
             exit_code=result.exit_code,
             sandbox_id=result.sandbox_id,
             credits_reserved=credits_reserved,
-            credits_compute=compute_credits,
+            credits_compute=compute_charged,
             credits_proxy=proxy_credits,
             credits_total=actual_spend,
             credits_released=credits_released,
