@@ -64,20 +64,22 @@ STRIPE_PACKAGES = {
                 "price_id": os.environ.get("STRIPE_PRICE_GROWTH", "")},
 }
 
-# Annual plans: 10 months price (2 months free). Credits replenished monthly, not upfront.
+# Annual plans (clean round pricing). price_cents is the exact annual charge and
+# MUST equal the Stripe annual Price object. savings_usd = 12×monthly − annual.
+# Credits replenished monthly, not upfront.
 STRIPE_ANNUAL_PACKAGES = {
-    "starter_annual": {"price_cents": 9900,   "credits": 6_000,   "label": "Starter Annual",
+    "starter_annual": {"price_cents": 12000,  "credits": 6_000,   "label": "Starter Annual",
                        "price_id": os.environ.get("STRIPE_PRICE_STARTER_ANNUAL", ""),
-                       "savings_usd": 45.0,  "base_plan": "starter"},
-    "builder_annual": {"price_cents": 29000,  "credits": 21_000,  "label": "Builder Annual",
+                       "savings_usd": 24.0,  "base_plan": "starter"},
+    "builder_annual": {"price_cents": 30000,  "credits": 21_000,  "label": "Builder Annual",
                        "price_id": os.environ.get("STRIPE_PRICE_BUILDER_ANNUAL", ""),
-                       "savings_usd": 58.0,  "base_plan": "builder"},
-    "pro_annual":     {"price_cents": 99000,  "credits": 72_000,  "label": "Pro Annual",
+                       "savings_usd": 48.0,  "base_plan": "builder"},
+    "pro_annual":     {"price_cents": 102000, "credits": 72_000,  "label": "Pro Annual",
                        "price_id": os.environ.get("STRIPE_PRICE_PRO_ANNUAL", ""),
-                       "savings_usd": 198.0, "base_plan": "pro"},
-    "growth_annual":  {"price_cents": 299000, "credits": 240_000, "label": "Growth Annual",
+                       "savings_usd": 168.0, "base_plan": "pro"},
+    "growth_annual":  {"price_cents": 300000, "credits": 240_000, "label": "Growth Annual",
                        "price_id": os.environ.get("STRIPE_PRICE_GROWTH_ANNUAL", ""),
-                       "savings_usd": 598.0, "base_plan": "growth"},
+                       "savings_usd": 588.0, "base_plan": "growth"},
 }
 
 # ── Models ────────────────────────────────────────────────────────────────────
