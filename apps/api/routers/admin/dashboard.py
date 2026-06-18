@@ -31,32 +31,16 @@ ADMIN_ROLES = {
 
 
 async def get_admin_session(request: Request, db):
-    import os as _os
-    from main import ADMIN_KEY
     # X-Admin-Key grants full ceo-level access without a JWT session and without
-    # MFA. This is a break-glass mechanism — gate it on an explicit env opt-in
-    # so it cannot be used in a hardened production deploy. Always log when it
-    # IS used, so abuse leaves a trail (sessioned admin paths produce one too).
-    admin_key = request.headers.get("X-Admin-Key", "")
-    if admin_key and ADMIN_KEY:
-        # S2 (v0.7.8): default to disabled. Break-glass requires explicit
-        # WAYFORTH_ADMIN_KEY_ENABLED=true in the deploy env. Set it on Railway
-        # production only when you need break-glass access; unset it after.
-        admin_key_enabled = _os.environ.get("WAYFORTH_ADMIN_KEY_ENABLED", "false").lower() == "true"
-        env_name = _os.environ.get("ENVIRONMENT", "development").lower()
-        if not admin_key_enabled:
-            logger.warning("X-Admin-Key presented but disabled by WAYFORTH_ADMIN_KEY_ENABLED=false")
-            raise HTTPException(status_code=404, detail="Not found")
-        if secrets.compare_digest(admin_key, ADMIN_KEY):
-            logger.warning(
-                "ADMIN_KEY break-glass used env=%s ip=%s ua=%s path=%s",
-                env_name,
-                request.client.host if request.client else "?",
-                request.headers.get("user-agent", "?")[:80],
-                request.url.path,
-            )
-            return {"role": "ceo", "email": "admin", "full_name": "Admin", "is_active": True,
-                    "admin_user_id": None}
+    # MFA. This is a break-glass mechanism, gated on WAYFORTH_ADMIN_KEY_ENABLED
+    # (default off) and audit-logged inside admin_key_ok (AUTHZ-1). A presented
+    # but disabled/invalid key returns False here and falls through to the token
+    # path, which 404s when no session token is present — preserving the prior
+    # endpoint-enumeration protection.
+    from core.admin_auth import admin_key_ok
+    if admin_key_ok(request):
+        return {"role": "ceo", "email": "admin", "full_name": "Admin", "is_active": True,
+                "admin_user_id": None}
 
     token = request.headers.get("X-Admin-Token", "")
     if not token:

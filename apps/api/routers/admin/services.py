@@ -10,31 +10,18 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from core.admin_auth import admin_authed
 from core.db import get_db
 from core.rate_limit import limiter
 from services.managed import SERVICE_CONFIGS
 
 
 async def _admin_ok(request: Request, db, key: str = "") -> bool:
-    """Accept either static ADMIN_KEY (X-Admin-Key header only) or a valid
-    X-Admin-Token session. The legacy ?key= query param is no longer honored —
-    keys in query strings leak into proxy/server access logs."""
-    from main import ADMIN_KEY
-    provided = request.headers.get("X-Admin-Key", "")
-    if ADMIN_KEY and provided and secrets.compare_digest(provided, ADMIN_KEY):
-        return True
-    token = request.headers.get("X-Admin-Token", "")
-    if token:
-        token_hash = hashlib.sha256(token.encode()).hexdigest()
-        row = await db.fetchrow(
-            "SELECT s.expires_at, u.is_active FROM admin_sessions s "
-            "JOIN admin_users u ON u.id = s.admin_user_id "
-            "WHERE s.token_hash = $1 AND s.expires_at > NOW()",
-            token_hash,
-        )
-        if row and row["is_active"]:
-            return True
-    return False
+    """Authenticated admin: a valid X-Admin-Token session OR the gated break-glass
+    X-Admin-Key. AUTHZ-1: the static key is gated on WAYFORTH_ADMIN_KEY_ENABLED via
+    core.admin_auth.admin_authed(); the legacy ?key= query param is not honored
+    (keys in query strings leak into access logs)."""
+    return await admin_authed(request, db)
 
 logger = logging.getLogger("wayforth")
 
@@ -130,9 +117,7 @@ async def admin_services(request: Request, key: str = "", db=Depends(get_db)):
 @router.get("/admin/catalog/misses")
 @limiter.limit("10/minute")
 async def catalog_misses(request: Request, key: str = "", db=Depends(get_db)):
-    from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+    if not await _admin_ok(request, db):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         total = await db.fetchval("""
@@ -203,9 +188,7 @@ async def catalog_misses(request: Request, key: str = "", db=Depends(get_db)):
 @router.get("/admin/catalog/gaps")
 @limiter.limit("10/minute")
 async def catalog_gaps(request: Request, key: str = "", db=Depends(get_db)):
-    from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+    if not await _admin_ok(request, db):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         svc_rows = await db.fetch("""
@@ -249,9 +232,7 @@ async def catalog_gaps(request: Request, key: str = "", db=Depends(get_db)):
 @limiter.limit("10/minute")
 async def admin_subscriptions_debug(request: Request, db=Depends(get_db)):
     """Show all api_keys rows where subscription_status='active', with stripe_subscription_id."""
-    from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+    if not await _admin_ok(request, db):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     rows = await db.fetch("""
         SELECT owner_email, subscription_status, stripe_subscription_id, tier, created_at::date AS joined
@@ -269,9 +250,7 @@ async def admin_subscriptions_debug(request: Request, db=Depends(get_db)):
 @limiter.limit("20/minute")
 async def admin_revenue(request: Request, db=Depends(get_db)):
     """Revenue summary: credits sold, MRR, top users by spend."""
-    from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+    if not await _admin_ok(request, db):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     total_credits_sold = await db.fetchval(
@@ -345,9 +324,7 @@ async def admin_revenue(request: Request, db=Depends(get_db)):
 @limiter.limit("20/minute")
 async def admin_signals(request: Request, db=Depends(get_db)):
     """Search signal analytics: per-service conversion rates and WRI v2 scores."""
-    from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+    if not await _admin_ok(request, db):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     total_searches = await db.fetchval("SELECT COUNT(*) FROM search_analytics") or 0
@@ -409,9 +386,7 @@ async def admin_signals(request: Request, db=Depends(get_db)):
 @limiter.limit("20/minute")
 async def admin_api_health(request: Request, db=Depends(get_db)):
     """Managed service health: last tested, success rate, avg response time."""
-    from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+    if not await _admin_ok(request, db):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     # Execution stats per managed service from credit_transactions
@@ -473,9 +448,7 @@ async def admin_api_health(request: Request, db=Depends(get_db)):
 @router.post("/admin/catalog/probe", tags=["Admin"])
 async def catalog_probe(request: Request, db=Depends(get_db)):
     """Probe real service endpoints in a category and update tier/health."""
-    from main import ADMIN_KEY
-    provided_key = request.headers.get("X-Admin-Key", "")
-    if not ADMIN_KEY or not secrets.compare_digest(provided_key, ADMIN_KEY):
+    if not await _admin_ok(request, db):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
