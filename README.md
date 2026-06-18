@@ -103,11 +103,11 @@ Wayforth routes agent traffic to providers at scale.
 
 **Provider plans:**
 
-| Plan | Monthly | Annual (17% off) |
-|------|---------|-----------------|
+| Plan | Monthly | Annual |
+|------|---------|--------|
 | Observer | Free | Free |
-| Intelligence | $99/mo | $82/mo · $984/yr |
-| Premium | $299/mo | $249/mo · $2,988/yr |
+| Intelligence | $99/mo | $85/mo · $1,020/yr (save $168) |
+| Premium | $299/mo | $250/mo · $3,000/yr (save $588) |
 
 Register your API: [wayforth.io/providers](https://wayforth.io/providers)
 
@@ -223,9 +223,8 @@ Full spec: [gateway.wayforth.io/wayforthql-spec](https://gateway.wayforth.io/way
 - 190+ tests passing, zero failures
 - 99.97% uptime
 - **Health monitoring** — all 16 managed services probed and tracked every 6h; never-succeeded services excluded from the `/system/status` degraded aggregate
-- **Credits system** — per-service credit costs enforced (Groq 3 cr, DeepL 20 cr, Stability AI 86 cr, etc.). Monthly quotas in credits: Free 100 · Builder 6,000 · Starter 21,000 · Pro 72,000 · Growth 240,000
+- **Credits system** — per-service credit costs enforced (Groq 3 cr, DeepL 20 cr, Stability AI 86 cr, etc.). Monthly quotas in credits: Free 100 · Starter 6,000 · Builder 21,000 · Pro 72,000 · Growth 240,000
 - **Pioneer Program** — indefinite enrollment, daily credit drip by tier, 7-day rejoin cooldown. Search responses include `pioneer_routing`, `pioneer_routed_to_boosted`, and `signal_weight` fields for opted-in developers
-- **Provider annual billing** — 17% discount for annual subscriptions (Intelligence $82/mo · Premium $249/mo)
 - **LLM gateway** — `POST /v1/chat/completions` OpenAI-compatible endpoint with Groq → Together AI → Mistral failover and streaming
 - **Tier 1 input caps** — DeepL 2,000 chars, AssemblyAI ~10 min, Stability AI 1 image per call
 - **API key encryption versioning** — versioned Fernet keys, zero-downtime rotation
@@ -239,8 +238,8 @@ Full spec: [gateway.wayforth.io/wayforthql-spec](https://gateway.wayforth.io/way
 | Plan | Credits/month | Price |
 |------|--------------|-------|
 | Free | 100 | Free |
-| Builder | 6,000 | $12/mo |
-| Starter | 21,000 | $29/mo |
+| Starter | 6,000 | $12/mo |
+| Builder | 21,000 | $29/mo |
 | Pro | 72,000 | $99/mo |
 | Growth | 240,000 | $299/mo |
 | Enterprise | 1,000,000 | Custom |

@@ -28,7 +28,7 @@ _EXPECT = {
         "agent_limit":      3,
         "concurrent_runs":  1,
         "rpm":              120,
-        "annual_price_usd": 99.0,
+        "annual_price_usd": 120.0,
         "stripe_price_env": "STRIPE_PRICE_STARTER",
         "annual_price_env": "STRIPE_PRICE_STARTER_ANNUAL",
         # Features: compare/analytics/wayforthql should NOT be included
@@ -44,7 +44,7 @@ _EXPECT = {
         "agent_limit":      5,
         "concurrent_runs":  2,
         "rpm":              300,
-        "annual_price_usd": 290.0,
+        "annual_price_usd": 300.0,
         "stripe_price_env": "STRIPE_PRICE_BUILDER",
         "annual_price_env": "STRIPE_PRICE_BUILDER_ANNUAL",
         # Features: compare/analytics/wayforthql SHOULD be included

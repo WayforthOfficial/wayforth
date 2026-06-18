@@ -16,7 +16,7 @@ Security model:
   - Secrets: AES-256-GCM at rest, decrypt-at-dispatch, never logged
   - Network: RFC-1918 + metadata egress denied at sandbox level
   - Credits: proxy calls deduct from owner's balance normally;
-    compute charge (1 credit/min, ceil) deducted at run completion
+    compute charge (1.5 credits/actual-min, ceil, 1-credit min) at completion
 
 WayforthRank data path:
   At run completion, credit_transactions WHERE agent_id = run_id are
@@ -37,7 +37,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.agent_secrets import decrypt_env, encrypt_env
-from core.auth import _resolve_user, decrypt_api_key, encrypt_api_key, resolve_dashboard_caller
+from core.auth import _resolve_user, decrypt_api_key, encrypt_api_key, provision_runner_key, resolve_dashboard_caller
 from core.credits import check_and_deduct_credits
 from core.db import get_db
 from core.rate_limit import limiter
@@ -78,6 +78,23 @@ class UpdateAgentBody(BaseModel):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _resolve_run_key(header_key: str, agent: dict) -> str:
+    """Runtime key for a manual run's own gateway calls.
+
+    SDK callers pass it in the X-Wayforth-API-Key header; dashboard/session callers
+    don't, so fall back to the agent's stored runner key (provisioned server-side
+    at deploy). Returns "" if neither is available (run proceeds keyless)."""
+    if header_key:
+        return header_key
+    ct = agent.get("runner_key_encrypted")
+    if ct:
+        try:
+            return decrypt_api_key(ct, int(agent.get("runner_key_version") or 1))
+        except Exception:
+            return ""
+    return ""
+
 
 async def _get_agent_or_404(db, user_id: str, agent_id: str) -> dict:
     row = await db.fetchrow(
@@ -250,7 +267,7 @@ async def _execute_run(
     Pre-reserve model:
       credits_reserved  — deducted from balance at dispatch (= credit_cap when set, else 0)
       credits_proxy     — proxy call deductions during the run (from credit_transactions)
-      credits_compute   — 1 credit/min compute charge, deducted at completion
+      credits_compute   — 1.5 credits/actual-min (ceil, 1-credit min) at completion
       credits_released  — max(0, reserved - proxy - compute), returned to balance at completion
     """
 
@@ -309,7 +326,7 @@ async def _execute_run(
             timeout_seconds=min(timeout_s, _MAX_TIMEOUT),
         )
 
-        # Deduct compute charge (1 credit/min, ceil, min 1).
+        # Deduct compute charge (1.5 credits/actual-min, ceil, min 1).
         # CLOUD-1: the result of this deduction was previously discarded. When the
         # balance can't cover compute, check_and_deduct_credits returns (False, …)
         # WITHOUT charging — and since the sandbox has already run, silently
@@ -468,16 +485,10 @@ async def create_agent(
 
     env_encrypted = encrypt_env(body.env) if body.env else None
 
-    # Encrypt caller's API key for scheduler/webhook dispatch (runner key).
-    # Never stored decrypted — same Fernet key as BYOK key encryption.
-    runner_key_ct: str | None = None
-    runner_key_ver: int = 1
-    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
-    if api_key_header:
-        try:
-            runner_key_ct, runner_key_ver = encrypt_api_key(api_key_header)
-        except Exception:
-            pass  # ENCRYPTION_KEY not configured; scheduled/webhook runs will skip
+    # Runtime key for scheduler/webhook dispatch (runner key), provisioned
+    # SERVER-SIDE: SDK callers' header key is encrypted; session/browser callers
+    # reuse their own stored key ciphertext — the browser never sends a raw key.
+    runner_key_ct, runner_key_ver = await provision_runner_key(request, db, user_id)
 
     next_run_at = None
     if body.trigger_type == "schedule" and body.schedule:
@@ -715,7 +726,10 @@ async def dispatch_run(
             "credit_cap": credit_cap,
         })
 
-    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
+    # Runtime key for the agent's own gateway calls: SDK header key, or (dashboard/
+    # session callers with no header) the agent's stored runner key — so manual
+    # runs are authenticated too, not just scheduled/webhook runs.
+    api_key_header = _resolve_run_key(request.headers.get("X-Wayforth-API-Key", ""), agent)
 
     from main import app
     run_id, credits_reserved = await _dispatch_run_internal(

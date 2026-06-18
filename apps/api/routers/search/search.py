@@ -579,7 +579,11 @@ async def pricing_json(request: Request):
     tiers = []
     for name, p in PLANS.items():
         rpm = _TIER_RPM.get(name, 10)
-        bonus_calls = p["usdc_bonus_credits"] // CREDITS_PER_CALL if p["usdc_bonus_credits"] else 0
+        # usdc_bonus_credits is the 5% USDC bonus in credits (== the granted bonus,
+        # and == the actual amount: base × 0.05). Surface it 1:1 — quotas are
+        # credit-denominated (calls_included == monthly_credits), so dividing by
+        # CREDITS_PER_CALL here understated the bonus 6× (50 vs 300 for Starter).
+        bonus_calls = p["usdc_bonus_credits"]
         tiers.append({
             "name": name.capitalize(),
             "price_monthly_usd": p["price_usd"],

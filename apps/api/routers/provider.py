@@ -49,9 +49,8 @@ _PROVIDER_TIER_PRICES = {
     "premium":      "STRIPE_PRICE_PROVIDER_PREMIUM",
 }
 
-# Annual prices: 17% discount (10 months pricing = 2 months free).
-# Intelligence: $99/mo × 10 = $990/yr → $984 billed annually
-# Premium:      $299/mo × 10 = $2,990/yr → $2,988 billed annually
+# Annual provider prices (clean round pricing). The annual USD MUST equal the
+# Stripe annual Price object. Effective monthly = annual / 12 (display only).
 _PROVIDER_TIER_PRICES_ANNUAL = {
     "intelligence": "STRIPE_PRICE_PROVIDER_INTELLIGENCE_ANNUAL",
     "premium":      "STRIPE_PRICE_PROVIDER_PREMIUM_ANNUAL",
@@ -62,8 +61,8 @@ _PROVIDER_TIER_MONTHLY_USD = {
     "premium":      299,
 }
 _PROVIDER_TIER_ANNUAL_USD = {
-    "intelligence": 984,    # $82/mo × 12
-    "premium":      2_988,  # $249/mo × 12
+    "intelligence": 1_020,  # $85/mo effective
+    "premium":      3_000,  # $250/mo effective
 }
 
 
@@ -1405,9 +1404,9 @@ async def provider_billing_upgrade(request: Request, db=Depends(get_db)):
       tier: "intelligence" | "premium"
       billing_interval: "month" | "year"  (default: "month")
 
-    Annual billing: 17% discount (10 months pricing).
-      Intelligence: $984/yr ($82/mo)
-      Premium:      $2,988/yr ($249/mo)
+    Annual billing (clean round pricing):
+      Intelligence: $1,020/yr ($85/mo effective)
+      Premium:      $3,000/yr ($250/mo effective)
 
     The Launch Boost (15-day / 30-day) is tied to tier, not billing interval —
     annual subscribers get the same boost as monthly subscribers of the same tier.

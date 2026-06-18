@@ -500,6 +500,42 @@ async def _load_dashboard_user(db, user_id: str, allow_pending_deletion: bool = 
     }
 
 
+async def provision_runner_key(request: Request, db, user_id: str) -> tuple[str | None, int]:
+    """Resolve the runtime API key for a hosted agent, WITHOUT requiring the
+    browser to send a raw key.
+
+    Returns (runner_key_ciphertext, key_version) to store in
+    hosted_agents.runner_key_encrypted — the same Fernet format the scheduler and
+    webhook dispatch decrypt at run time, so the deployed agent gets a runtime key
+    for its own gateway calls.
+
+      * SDK / programmatic caller (X-Wayforth-API-Key header present): encrypt that
+        key for storage.
+      * Session / browser caller (no header): reuse the user's OWN stored key
+        ciphertext server-side (api_keys.encrypted_key) — the raw key never leaves
+        the server and the browser never sends one.
+
+    Returns (None, 1) if no key is available (e.g. encryption unconfigured, or the
+    account has no key with a recoverable ciphertext) — scheduled/webhook runs then
+    skip, exactly as before.
+    """
+    header_key = request.headers.get("X-Wayforth-API-Key", "")
+    if header_key:
+        try:
+            return encrypt_api_key(header_key)
+        except Exception:
+            return None, 1
+    row = await db.fetchrow(
+        "SELECT encrypted_key, key_version FROM api_keys "
+        "WHERE user_id = $1::uuid AND active = TRUE AND encrypted_key IS NOT NULL "
+        "ORDER BY created_at DESC LIMIT 1",
+        user_id,
+    )
+    if row and row["encrypted_key"]:
+        return row["encrypted_key"], int(row["key_version"] or 1)
+    return None, 1
+
+
 def canonicalize_email(email: str) -> str:
     """Return a canonical form of `email` for uniqueness checks (FINDING-011).
 
