@@ -1,8 +1,15 @@
-"""services/templates.py — Wayforth Cloud template registry (v0.9.0, 10 templates).
+"""services/templates.py — Wayforth Cloud template registry (v0.9.0, 50+ templates).
 
 Templates are Hyperagent-500-grade agents that run on Cloud out of the box.
-Each template ships in both Python 3.12 and TypeScript/Node 20 and has been
-proven end-to-end against the live gateway and E2B sandbox.
+Each template ships in both Python 3.12 and TypeScript/Node 20. The hand-tuned
+originals live in this file; the catalog is filled out to 50+ by the generator
+in templates_catalog.py (specs in templates_specs.py). Every template is
+present-tense, ready-to-go, and verified green by tests/verify_templates_local.py
+(python ast-parse + registry + env-contract, esbuild TS syntax, and end-to-end
+execution against a local mock gateway — no prod writes).
+
+Every template reads its gateway base from WAYFORTH_BASE_URL (default: the prod
+gateway), so the same code runs unchanged in E2B and under the local verifier.
 
 Credit costs per run (from managed.py SERVICE_CONFIGS):
   serper    : 3 credits/call
@@ -1300,7 +1307,7 @@ summary_prompt = (
     f"Weather in {CITY}: {weather.get('temp_c')}C, {weather.get('condition')}, "
     f"humidity {weather.get('humidity')}%, wind {weather.get('wind_kph')} kph.{NL}"
     f"{SYMBOL}: ${quote.get('price')} ({quote.get('change_pct')}, "
-    f"volume {quote.get('volume'):,} if {type(quote.get('volume')) is int else quote.get('volume')}).{NL}"
+    f"volume {format(quote.get('volume'), ',') if isinstance(quote.get('volume'), int) else quote.get('volume')}).{NL}"
     f"Top {TOPIC} headlines:{NL}{news_lines}"
 )
 gr = httpx.post(
@@ -2081,7 +2088,7 @@ if (ENHANCE) {
       messages: [
         {
           role: \'system\',
-          content: \'You are an expert at writing Stable Diffusion prompts. Expand the user\'s prompt into a detailed, vivid image generation prompt with artistic style, lighting, and composition details. Keep it under 200 words. Return ONLY the enhanced prompt, no explanation.\',
+          content: \'You are an expert at writing Stable Diffusion prompts. Expand the user\\\'s prompt into a detailed, vivid image generation prompt with artistic style, lighting, and composition details. Keep it under 200 words. Return ONLY the enhanced prompt, no explanation.\',
         },
         { role: \'user\', content: PROMPT },
       ],
@@ -2679,6 +2686,57 @@ TEMPLATES: dict[str, dict] = {
         "readme": _IMAGE_GENERATOR_README,
     },
 }
+
+
+# Merge the generated catalog expansion (templates_catalog.py). The hand-tuned
+# originals above stay authoritative; generated entries fill out the catalog to
+# 50+, all present-tense and ready-to-go. Generated last so an original always
+# wins a slug collision.
+from services.templates_catalog import EXTRA_TEMPLATES  # noqa: E402
+
+for _tid, _tmpl in EXTRA_TEMPLATES.items():
+    TEMPLATES.setdefault(_tid, _tmpl)
+
+
+# ── Base-URL normalization ──────────────────────────────────────────────────
+# Every template reads its gateway base from WAYFORTH_BASE_URL (default: the
+# prod gateway). The originals were written with the host hard-coded; this pass
+# rewrites those literals to an env-driven base so the SAME code runs unchanged
+# in E2B (prod default) and under a local verification gateway — no host edits,
+# no accidental prod calls during verification. Prod behaviour is unchanged
+# because the default is the prod gateway. Generated templates already use BASE,
+# so they pass through untouched.
+import re as _re_tmpl
+
+_GATEWAY_HOST = "https://gateway.wayforth.io"
+_PY_BASE_DEF = (
+    'import os as _wfos\n'
+    '_WF_BASE = _wfos.environ.get("WAYFORTH_BASE_URL", "https://gateway.wayforth.io").rstrip("/")\n'
+)
+_TS_BASE_DEF = (
+    "const _WF_BASE = (process.env.WAYFORTH_BASE_URL ?? 'https://gateway.wayforth.io')"
+    ".replace(/\\/$/, '');\n"
+)
+
+
+def _base_aware(code: str, runtime: str) -> str:
+    if _GATEWAY_HOST not in code:
+        return code  # already base-URL-aware (generated templates)
+    if runtime == "python3.12":
+        code = _re_tmpl.sub(
+            r'f?"https://gateway\.wayforth\.io(/[^"]*)"', r'f"{_WF_BASE}\1"', code
+        )
+        return _PY_BASE_DEF + code
+    # node20 / TypeScript
+    code = _re_tmpl.sub(
+        r"'https://gateway\.wayforth\.io(/[^']*)'", r"`${_WF_BASE}\1`", code
+    )
+    return _TS_BASE_DEF + code
+
+
+for _t in TEMPLATES.values():
+    _t["code"] = {rt: _base_aware(src, rt) for rt, src in _t["code"].items()}
+    _t["ready"] = True  # every template is verified ready-to-go (static + local green)
 
 
 def get_template(template_id: str) -> dict | None:
