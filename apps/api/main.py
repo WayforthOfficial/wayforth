@@ -645,6 +645,14 @@ async def lifespan(app: FastAPI):
                     UNIQUE(provider_id, service_slug)
                 )
             """)
+            # Tier 3 applications move from the public email-keyed form into the
+            # provider dashboard — bind each application to the submitting provider
+            # and one of their services. Mirrored in 063_tier3_provider_link.sql.
+            await _mconn.execute("""
+                ALTER TABLE IF EXISTS tier3_applications
+                    ADD COLUMN IF NOT EXISTS provider_id  UUID REFERENCES providers(id),
+                    ADD COLUMN IF NOT EXISTS service_slug TEXT
+            """)
             await _mconn.execute("""
                 CREATE TABLE IF NOT EXISTS provider_sessions (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

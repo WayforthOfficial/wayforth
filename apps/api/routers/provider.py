@@ -65,6 +65,39 @@ _PROVIDER_TIER_ANNUAL_USD = {
     "premium":      3_000,  # $250/mo effective
 }
 
+# Provider PACKAGE ordering (the provider billing model — NOT the consumer billing
+# tiers in /billing/packages). observer is the free default; intelligence/premium
+# are paid (see _PROVIDER_TIER_PRICES, /provider/billing/upgrade). Tier 3
+# application requires a package of intelligence or above.
+_PROVIDER_TIER_ORDER = {"observer": 0, "intelligence": 1, "premium": 2}
+_TIER3_MIN_PACKAGE = "intelligence"
+
+
+def _provider_package_rank(tier: str | None) -> int:
+    return _PROVIDER_TIER_ORDER.get((tier or "observer").lower(), 0)
+
+
+def _tier3_eligibility(provider) -> tuple[bool, str]:
+    """Return (eligible, reason); reason ∈ {ok, not_verified, package_too_low}.
+
+    Eligible only when the provider's domain-verified flag is true (set by
+    /provider/verify) AND the package tier is intelligence or above.
+    """
+    if not provider.get("verified"):
+        return False, "not_verified"
+    if _provider_package_rank(provider.get("tier")) < _provider_package_rank(_TIER3_MIN_PACKAGE):
+        return False, "package_too_low"
+    return True, "ok"
+
+
+def _tier3_application_status(kyb_status: str | None) -> str:
+    """Map tier3_applications.kyb_status → dashboard enum: none|pending|approved|rejected."""
+    if not kyb_status:
+        return "none"
+    if kyb_status in ("approved", "rejected"):
+        return kyb_status
+    return "pending"  # 'pending' or 'in_review'
+
 
 async def _get_provider(request: Request, db):
     """Resolve X-Provider-Token → provider row. Raises 401 if invalid/expired.
@@ -1515,4 +1548,128 @@ async def provider_billing_upgrade(request: Request, db=Depends(get_db)):
         "checkout_url": session["url"],
         "billing_interval": billing_interval,
         "amount_usd": amount_display,
+    }
+
+
+# ── Tier 3 application (provider-gated; replaces the public /tier3/apply form) ──
+
+@router.get("/provider/tier3/status", tags=["Provider"])
+@limiter.limit("30/minute")
+async def provider_tier3_status(request: Request, db=Depends(get_db)):
+    """Eligibility + application status for the dashboard's Tier 3 option.
+
+    The dashboard renders the Tier 3 apply action only when tier3_eligible is true.
+    Returns:
+      { tier3_eligible: bool,
+        reason: "ok" | "not_verified" | "package_too_low",
+        application_status: "none" | "pending" | "approved" | "rejected" }
+    """
+    provider = await _get_provider(request, db)
+    eligible, reason = _tier3_eligibility(provider)
+
+    row = await db.fetchrow(
+        "SELECT kyb_status FROM tier3_applications WHERE provider_id = $1 "
+        "ORDER BY created_at DESC LIMIT 1",
+        provider["provider_id"],
+    )
+    return {
+        "tier3_eligible":     eligible,
+        "reason":             reason,
+        "application_status": _tier3_application_status(row["kyb_status"] if row else None),
+    }
+
+
+@router.post("/provider/tier3/apply", tags=["Provider"])
+@limiter.limit("5/minute")
+async def provider_tier3_apply(request: Request, db=Depends(get_db)):
+    """Apply for Tier 3 (KYB + SLA) for one of the provider's OWN services.
+
+    Provider-authed and gated: requires the domain-verified flag (set by
+    /provider/verify) and a package of intelligence or above. The application is
+    bound to the authenticated provider + a service they own; service_name /
+    company_name / contact_email / endpoint_url are derived server-side from the
+    provider and that service — never taken as free text — so a provider can't
+    apply on behalf of a service they don't own.
+
+    Body: { service_slug, monthly_volume_usd, sla_uptime_target }
+    """
+    from main import app as _app
+    from notifications import send_tier3_application_notification
+
+    provider = await _get_provider(request, db)
+    eligible, reason = _tier3_eligibility(provider)
+    if not eligible:
+        raise HTTPException(status_code=403, detail={
+            "error": reason,
+            "message": (
+                "Verify your service before applying for Tier 3."
+                if reason == "not_verified" else
+                "Tier 3 application requires the Intelligence provider package or above."
+            ),
+        })
+
+    body = await request.json()
+    service_slug = (body.get("service_slug") or "").strip().lower()
+    if not service_slug:
+        raise HTTPException(status_code=422, detail={"error": "service_slug_required"})
+    try:
+        monthly_volume_usd = float(body.get("monthly_volume_usd") or 0)
+        sla_uptime_target = float(body.get("sla_uptime_target") or 99.9)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail={"error": "invalid_numeric_field"})
+    if not (0 <= sla_uptime_target <= 100) or monthly_volume_usd < 0:
+        raise HTTPException(status_code=422, detail={"error": "value_out_of_range"})
+
+    # Bind to a service the provider OWNS — derive identity from it, not the body.
+    svc = await db.fetchrow(
+        "SELECT service_slug, service_name FROM provider_services "
+        "WHERE provider_id = $1 AND service_slug = $2",
+        provider["provider_id"], service_slug,
+    )
+    if not svc:
+        raise HTTPException(status_code=404, detail={
+            "error": "service_not_owned",
+            "message": "You can only apply for a service registered to your provider account.",
+        })
+
+    # endpoint_url is derived from the catalog entry for the owned service.
+    cat = await db.fetchrow("SELECT endpoint_url FROM services WHERE slug = $1 LIMIT 1", service_slug)
+    endpoint_url = (cat["endpoint_url"] if cat else None) or ""
+
+    # One application per (provider, service).
+    existing = await db.fetchrow(
+        "SELECT id, kyb_status FROM tier3_applications "
+        "WHERE provider_id = $1 AND service_slug = $2",
+        provider["provider_id"], service_slug,
+    )
+    if existing:
+        return {
+            "status": "already_applied",
+            "application_id": str(existing["id"]),
+            "kyb_status": existing["kyb_status"],
+            "message": "An application for this service is already on file.",
+        }
+
+    app_id = await db.fetchval("""
+        INSERT INTO tier3_applications
+            (provider_id, service_slug, service_id, service_name, company_name,
+             contact_email, endpoint_url, monthly_volume_usdc, sla_uptime_target, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        RETURNING id
+    """, provider["provider_id"], service_slug, service_slug,
+        svc["service_name"], provider["company_name"], provider["email"],
+        endpoint_url, monthly_volume_usd, sla_uptime_target)
+
+    if os.getenv("RESEND_API_KEY"):
+        import asyncio as _asyncio
+        _asyncio.create_task(_asyncio.to_thread(
+            send_tier3_application_notification,
+            provider["email"], svc["service_name"], provider["company_name"], str(app_id),
+        ))
+
+    return {
+        "status": "submitted",
+        "application_id": str(app_id),
+        "service_slug": service_slug,
+        "message": "Application received. Our team will review your KYB documentation and contact you within 2 business days.",
     }

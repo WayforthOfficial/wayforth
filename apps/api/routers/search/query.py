@@ -51,16 +51,6 @@ class MemoryItem(BaseModel):
     agent_id: str = ""
 
 
-class Tier3Application(BaseModel):
-    service_name: str
-    company_name: str
-    contact_email: str
-    website: str = ""
-    endpoint_url: str
-    monthly_volume_usd: float = 0.0
-    sla_uptime_target: float = 99.9
-
-
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/query")
@@ -363,72 +353,30 @@ async def get_memory(request: Request, q: str = "", db=Depends(get_db)):
     return {"services": [dict(r) for r in rows], "total": len(rows)}
 
 
-@router.post("/tier3/apply")
+# The public, email-keyed Tier 3 form has moved into the verified-provider
+# dashboard (POST /provider/tier3/apply, gated on verified + Intelligence package).
+# These stubs return 410 Gone — not a hard 404 — so any lingering caller gets a
+# clear migration signal pointing at the provider flow. Hidden from the schema.
+
+@router.post("/tier3/apply", include_in_schema=False)
 @limiter.limit("5/minute")
-async def tier3_apply(request: Request, body: Tier3Application):
-    """Apply for Tier 3 verification — KYB + SLA. Institutional-grade. Manual review required."""
-    from main import app
-    from notifications import send_tier3_application_notification
-
-    async with app.state.pool.acquire() as db:
-        existing = await db.fetchrow("""
-            SELECT id, kyb_status FROM tier3_applications
-            WHERE contact_email = $1 AND endpoint_url = $2
-        """, body.contact_email, body.endpoint_url)
-
-        if existing:
-            return {
-                "status": "already_applied",
-                "kyb_status": existing["kyb_status"],
-                "message": "Application already on file. We'll contact you at the email provided.",
-            }
-
-        app_id = await db.fetchval("""
-            INSERT INTO tier3_applications
-            (service_name, company_name, contact_email, website, endpoint_url,
-             monthly_volume_usdc, sla_uptime_target, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-            RETURNING id
-        """, body.service_name, body.company_name, body.contact_email,
-            body.website, body.endpoint_url, body.monthly_volume_usd,
-            body.sla_uptime_target)
-
-    if os.getenv("RESEND_API_KEY"):
-        asyncio.create_task(asyncio.to_thread(
-            send_tier3_application_notification,
-            body.contact_email, body.service_name, body.company_name, str(app_id),
-        ))
-
-    return {
-        "status": "submitted",
-        "application_id": str(app_id),
-        "message": "Application received. Our team will review your KYB documentation and contact you within 2 business days.",
-        "next_steps": [
-            "We will email you a KYB documentation checklist",
-            "SLA terms will be negotiated based on your uptime target",
-            "Tier 3 badge appears on your service within 24h of approval",
-        ],
-    }
+async def tier3_apply_moved(request: Request):
+    raise HTTPException(status_code=410, detail={
+        "error": "moved",
+        "message": "Tier 3 application has moved to the provider dashboard. Sign in "
+                   "as a verified Intelligence provider and use POST /provider/tier3/apply.",
+        "new_endpoint": "POST /provider/tier3/apply",
+    })
 
 
-@router.get("/tier3/status")
+@router.get("/tier3/status", include_in_schema=False)
 @limiter.limit("10/minute")
-async def tier3_status(request: Request, email: str):
-    """Check Tier 3 application status by email."""
-    from main import app
-
-    async with app.state.pool.acquire() as db:
-        apps = await db.fetch("""
-            SELECT id, service_name, company_name, kyb_status, created_at
-            FROM tier3_applications WHERE contact_email = $1
-            ORDER BY created_at DESC
-        """, email)
-    if not apps:
-        return {"status": "not_found", "message": "No application found for this email."}
-    return {
-        "applications": [dict(a) for a in apps],
-        "total": len(apps),
-    }
+async def tier3_status_moved(request: Request):
+    raise HTTPException(status_code=410, detail={
+        "error": "moved",
+        "message": "Tier 3 status is now provider-authed. Use GET /provider/tier3/status.",
+        "new_endpoint": "GET /provider/tier3/status",
+    })
 
 
 @router.get("/tier3/admin", include_in_schema=False)
