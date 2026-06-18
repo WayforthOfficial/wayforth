@@ -9,7 +9,7 @@ Credit costs per run (from managed.py SERVICE_CONFIGS):
   deepl     : 20 credits/call
   resend    : 3 credits/call
   openweather: 2 credits/call
-  compute   : 1 credit/min (ceil, min 1)
+  compute   : 1.5 credits/actual-min (ceil, min 1; sub-~40s run = 1 credit)
 
 All template code is stored as plain strings so the deploy endpoint can
 insert it into hosted_agents.code with a single DB write — no filesystem reads

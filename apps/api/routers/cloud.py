@@ -16,7 +16,7 @@ Security model:
   - Secrets: AES-256-GCM at rest, decrypt-at-dispatch, never logged
   - Network: RFC-1918 + metadata egress denied at sandbox level
   - Credits: proxy calls deduct from owner's balance normally;
-    compute charge (1 credit/min, ceil) deducted at run completion
+    compute charge (1.5 credits/actual-min, ceil, 1-credit min) at completion
 
 WayforthRank data path:
   At run completion, credit_transactions WHERE agent_id = run_id are
@@ -267,7 +267,7 @@ async def _execute_run(
     Pre-reserve model:
       credits_reserved  — deducted from balance at dispatch (= credit_cap when set, else 0)
       credits_proxy     — proxy call deductions during the run (from credit_transactions)
-      credits_compute   — 1 credit/min compute charge, deducted at completion
+      credits_compute   — 1.5 credits/actual-min (ceil, 1-credit min) at completion
       credits_released  — max(0, reserved - proxy - compute), returned to balance at completion
     """
 
@@ -326,7 +326,7 @@ async def _execute_run(
             timeout_seconds=min(timeout_s, _MAX_TIMEOUT),
         )
 
-        # Deduct compute charge (1 credit/min, ceil, min 1)
+        # Deduct compute charge (1.5 credits/actual-min, ceil, min 1)
         compute_credits = compute_credits_for_run(result.duration_ms)
         async with pool.acquire() as conn:
             await check_and_deduct_credits(
