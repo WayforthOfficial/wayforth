@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from core.auth import resolve_dashboard_caller
 from core.credits import PLANS, CREDITS_PER_CALL, _dispatch_webhooks, _maybe_grant_founding_bonus
 from core.db import get_db
 from core.rate_limit import limiter
@@ -633,18 +634,19 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
 async def get_billing_settings(request: Request, db=Depends(get_db)):
     """Return current billing permission settings for the authenticated API key."""
     from core.credits import compute_calls_remaining
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-
+    # Session-OR-key (PR #25 pattern): the dashboard billing-settings page uses the
+    # wf_session cookie. Resolve the caller, then read their primary key row.
+    caller = await resolve_dashboard_caller(request, db)
+    if not caller.get("api_key_id"):
+        raise HTTPException(status_code=404, detail="no_active_api_key")
     key_record = await db.fetchrow("""
         SELECT id, user_id, tier, payment_rail,
                billing_permission, topup_trigger_calls,
                topup_amount_usd, monthly_topup_limit_usd,
                monthly_topup_spent_usd, monthly_topup_reset_at
         FROM api_keys
-        WHERE key_hash = $1 AND active = true
-    """, hashlib.sha256(api_key.encode()).hexdigest())
+        WHERE id = $1 AND active = true
+    """, caller["api_key_id"])
 
     if not key_record:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -685,14 +687,14 @@ async def get_billing_settings(request: Request, db=Depends(get_db)):
 @limiter.limit("10/minute")
 async def update_billing_settings(request: Request, db=Depends(get_db)):
     """Update billing permission settings for the authenticated API key."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-
+    # Session-OR-key (PR #25 pattern): dashboard billing-settings save uses the cookie.
+    caller = await resolve_dashboard_caller(request, db)
+    if not caller.get("api_key_id"):
+        raise HTTPException(status_code=404, detail="no_active_api_key")
     key_record = await db.fetchrow(
         "SELECT id, topup_amount_usd, monthly_topup_limit_usd FROM api_keys "
-        "WHERE key_hash = $1 AND active = true",
-        hashlib.sha256(api_key.encode()).hexdigest(),
+        "WHERE id = $1 AND active = true",
+        caller["api_key_id"],
     )
     if not key_record:
         raise HTTPException(status_code=401, detail="Invalid API key")

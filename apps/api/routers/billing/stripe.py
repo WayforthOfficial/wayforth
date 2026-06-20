@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from core.auth import _resolve_user
+from core.auth import _resolve_user, resolve_dashboard_caller
 from core.tier_gates import require_tier
 from core.credits import _dispatch_webhooks, _maybe_grant_founding_bonus
 from core.db import get_db
@@ -403,15 +403,16 @@ async def create_checkout(request: Request, db=Depends(get_db)):
 @limiter.limit("5/minute")
 async def billing_cancel(request: Request, db=Depends(get_db)):
     """Cancel the caller's Stripe subscription at period end."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-
+    # Session-OR-key (PR #25 pattern): the dashboard "cancel subscription" button
+    # authenticates by wf_session cookie. Resolve the caller, then read their key row.
+    caller = await resolve_dashboard_caller(request, db)
+    if not caller.get("api_key_id"):
+        raise HTTPException(status_code=404, detail="no_active_api_key")
     key_record = await db.fetchrow("""
         SELECT k.user_id, k.stripe_subscription_id, u.email
         FROM api_keys k JOIN users u ON u.id = k.user_id
-        WHERE k.key_hash = $1 AND k.active = true
-    """, hashlib.sha256(api_key.encode()).hexdigest())
+        WHERE k.id = $1 AND k.active = true
+    """, caller["api_key_id"])
 
     if not key_record:
         raise HTTPException(status_code=401, detail="Invalid API key")
