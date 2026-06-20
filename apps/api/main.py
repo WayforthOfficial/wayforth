@@ -1721,9 +1721,14 @@ async def security_policy_html():
     return HTMLResponse(_SECURITY_POLICY_HTML)
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 @limiter.limit("60/minute")
 async def health(request: Request):
+    # Health endpoints are commonly probed with HEAD (it's the default method for
+    # several uptime monitors). HEAD wants a cheap liveness signal, not the full
+    # catalog payload — return a bare 200 with an empty body and skip the DB work.
+    if request.method == "HEAD":
+        return Response(status_code=200)
     from core.db import get_pool_stats
     pool = getattr(request.app.state, "pool", None)
     # Section 6 (v0.7.8): rename catalog fields to disambiguate. The old shape
