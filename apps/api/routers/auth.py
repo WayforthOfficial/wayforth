@@ -242,22 +242,17 @@ async def create_api_key(request: Request, body: ApiKeyRequest, db=Depends(get_d
 @router.get("/keys/usage")
 @limiter.limit("10/minute")
 async def key_usage(request: Request, db=Depends(get_db)):
-    raw_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not raw_key:
-        raise HTTPException(status_code=401, detail="X-Wayforth-API-Key header required")
-
-    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    # Session-OR-key (PR #25 pattern): the dashboard usage widget authenticates by
+    # wf_session cookie. Resolve the caller, then read their primary active key row.
+    caller = await resolve_dashboard_caller(request, db)
+    if not caller.get("api_key_id"):
+        raise HTTPException(status_code=404, detail="no_active_api_key")
     key = await db.fetchrow("""
         SELECT key_prefix, tier, rate_limit_per_minute, monthly_quota,
                usage_this_month, quota_reset_at, created_at, last_used_at
-        FROM api_keys WHERE key_hash = $1 AND active = TRUE
-    """, key_hash)
-
+        FROM api_keys WHERE id = $1 AND active = TRUE
+    """, caller["api_key_id"])
     if not key:
-        logger.info(
-            "auth_failure reason=invalid_api_key path=/auth/key-usage key_hash_prefix=%s",
-            key_hash[:12],
-        )
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     quota_pct = (
@@ -424,22 +419,17 @@ async def register_user(request: Request, db=Depends(get_db)):
 @router.post("/auth/regenerate-key")
 @limiter.limit("3/minute")
 async def regenerate_api_key(request: Request, db=Depends(get_db)):
-    raw_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not raw_key:
-        logger.info("auth_failure reason=missing_api_key path=/auth/regenerate-key")
-        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
-
-    old_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    # Session-OR-key (PR #25 pattern): the dashboard "regenerate key" button
+    # authenticates by wf_session cookie and rotates the user's primary active key.
+    caller = await resolve_dashboard_caller(request, db)
+    if not caller.get("api_key_id"):
+        raise HTTPException(status_code=404, detail={"error": "no_active_api_key"})
     row = await db.fetchrow("""
         SELECT id, tier, user_id, owner_email, rate_limit_per_minute, monthly_quota
-        FROM api_keys WHERE key_hash = $1 AND active = TRUE
-    """, old_hash)
+        FROM api_keys WHERE id = $1 AND active = TRUE
+    """, caller["api_key_id"])
 
     if not row:
-        logger.info(
-            "auth_failure reason=invalid_api_key path=/auth/regenerate-key key_hash_prefix=%s",
-            old_hash[:12],
-        )
         raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
 
     new_raw = "wf_live_" + secrets.token_urlsafe(32)

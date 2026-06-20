@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.requests import Request
 from pydantic import BaseModel
 
-from core.auth import _resolve_user
+from core.auth import _resolve_user, resolve_dashboard_caller
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier
@@ -422,10 +422,11 @@ async def list_webhooks(request: Request, db=Depends(get_db)):
 @limiter.limit("20/minute")
 async def create_wri_alert(request: Request, db=Depends(get_db)):
     """Register a webhook that fires when any service crosses a WRI score threshold."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    user_id, api_key_id, _tier = await _resolve_user(db, api_key)
+    # Session-OR-key (PR #25 pattern): the dashboard alerts UI uses the wf_session
+    # cookie; API clients still send X-Wayforth-API-Key. resolve_dashboard_caller
+    # accepts both and yields the same (user_id, api_key_id, tier).
+    caller = await resolve_dashboard_caller(request, db)
+    user_id, api_key_id, _tier = caller["user_id"], caller["api_key_id"], caller["tier"]
     require_tier(_tier, "wri_alerts")
 
     body = await request.json()
@@ -477,10 +478,11 @@ async def create_wri_alert(request: Request, db=Depends(get_db)):
 @limiter.limit("30/minute")
 async def list_wri_alerts(request: Request, db=Depends(get_db)):
     """List all WRI alert webhooks registered to this API key."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    user_id, api_key_id, _tier = await _resolve_user(db, api_key)
+    # Session-OR-key (PR #25 pattern): the dashboard alerts UI uses the wf_session
+    # cookie; API clients still send X-Wayforth-API-Key. resolve_dashboard_caller
+    # accepts both and yields the same (user_id, api_key_id, tier).
+    caller = await resolve_dashboard_caller(request, db)
+    user_id, api_key_id, _tier = caller["user_id"], caller["api_key_id"], caller["tier"]
     require_tier(_tier, "wri_alerts")
 
     rows = await db.fetch("""
@@ -514,10 +516,11 @@ async def list_wri_alerts(request: Request, db=Depends(get_db)):
 @limiter.limit("20/minute")
 async def delete_wri_alert(request: Request, alert_id: str, db=Depends(get_db)):
     """Deactivate a WRI alert webhook by ID."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    user_id, api_key_id, _tier = await _resolve_user(db, api_key)
+    # Session-OR-key (PR #25 pattern): the dashboard alerts UI uses the wf_session
+    # cookie; API clients still send X-Wayforth-API-Key. resolve_dashboard_caller
+    # accepts both and yields the same (user_id, api_key_id, tier).
+    caller = await resolve_dashboard_caller(request, db)
+    user_id, api_key_id, _tier = caller["user_id"], caller["api_key_id"], caller["tier"]
     require_tier(_tier, "wri_alerts")
 
     row = await db.fetchrow(
@@ -642,11 +645,10 @@ async def retry_webhook(request: Request, webhook_id: str, db=Depends(get_db)):
 @router.delete("/webhooks/{webhook_id}")
 @limiter.limit("10/minute")
 async def delete_webhook(request: Request, webhook_id: str, db=Depends(get_db)):
-    """Deactivate a registered webhook. Requires the API key of the registrant."""
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail={"error": "api_key_required"})
-    user_id, _api_key_id, _tier = await _resolve_user(db, api_key)
+    """Deactivate a registered webhook. Auth: wf_session cookie OR the API key of the registrant."""
+    # Session-OR-key (PR #25 pattern): dashboard webhook management uses the cookie.
+    caller = await resolve_dashboard_caller(request, db)
+    user_id, _api_key_id, _tier = caller["user_id"], caller["api_key_id"], caller["tier"]
 
     owner = await db.fetchrow(
         "SELECT owner_email FROM api_keys WHERE user_id = $1 AND active = true LIMIT 1", user_id

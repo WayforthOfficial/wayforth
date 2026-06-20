@@ -177,19 +177,18 @@ async def put_billing_permissions(request: Request, db=Depends(get_db)):
 @router.get("/dashboard")
 @limiter.limit("30/minute")
 async def dashboard(request: Request, db=Depends(get_db)):
-    raw_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not raw_key:
-        raise HTTPException(status_code=401, detail="API key required")
-
-    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-
+    # Session-OR-key (PR #25 pattern): the dashboard authenticates by wf_session
+    # cookie. Resolve the caller, then read their primary active key + user row.
+    caller = await resolve_dashboard_caller(request, db)
+    if not caller.get("api_key_id"):
+        raise HTTPException(status_code=404, detail="no_active_api_key")
     key = await db.fetchrow("""
         SELECT k.*, u.email, u.created_at as account_created,
                u.stripe_customer_id
         FROM api_keys k
         LEFT JOIN users u ON u.id = k.user_id
-        WHERE k.key_hash = $1
-    """, key_hash)
+        WHERE k.id = $1
+    """, caller["api_key_id"])
 
     if not key:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -255,24 +254,33 @@ async def dashboard(request: Request, db=Depends(get_db)):
 @router.get("/billing/balance")
 @limiter.limit("30/minute")
 async def get_balance(request: Request, db=Depends(get_db)):
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
+    # PR #25 pattern: accept session-OR-key auth (resolve_dashboard_caller), not
+    # key-only. The dashboard's balance widget authenticates by wf_session cookie
+    # and has no raw API key to send; the old "API key required" check 401'd it,
+    # and the UI fell back to a hardcoded balance (showed 100 while the account
+    # was actually Growth/240k). Auth source for tier/credits is user_credits.
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
 
-    key_record = await db.fetchrow("""
-        SELECT k.id, k.user_id, k.tier, k.payment_rail,
-               k.quota_reset_at, k.subscription_expires_at,
-               k.monthly_calls_count, k.monthly_calls_reset_at
-        FROM api_keys k
-        WHERE k.key_hash = $1 AND k.active = true
-    """, hashlib.sha256(api_key.encode()).hexdigest())
+    # Billing-display fields (payment rail, reset dates, monthly usage) live on
+    # the user's active api_key row. resolve_dashboard_caller already resolved the
+    # primary key id (None only for the rare keyless account).
+    key_record = None
+    if caller.get("api_key_id"):
+        key_record = await db.fetchrow("""
+            SELECT k.payment_rail, k.quota_reset_at, k.subscription_expires_at,
+                   k.monthly_calls_count, k.monthly_calls_reset_at
+            FROM api_keys k
+            WHERE k.id = $1 AND k.active = true
+        """, caller["api_key_id"])
 
-    if not key_record:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    def _kr(field, default=None):
+        v = key_record[field] if key_record is not None else None
+        return v if v is not None else default
 
     credits = await db.fetchrow(
         "SELECT credits_balance, pioneer_credits_balance, package_tier, payment_method FROM user_credits WHERE user_id = $1",
-        key_record["user_id"],
+        user_id,
     )
     balance = credits["credits_balance"] if credits else 0
     pioneer_balance = credits["pioneer_credits_balance"] if credits else 0
@@ -281,9 +289,9 @@ async def get_balance(request: Request, db=Depends(get_db)):
     tier = _credits_to_tier(balance, pkg_tier)
 
     plan_def = PLANS.get(tier, PLANS["free"])
-    resets_at = key_record.get("subscription_expires_at") or key_record.get("quota_reset_at")
-    monthly_reset_at = key_record.get("monthly_calls_reset_at")
-    payment_rail = key_record.get("payment_rail") or "card"
+    resets_at = _kr("subscription_expires_at") or _kr("quota_reset_at")
+    monthly_reset_at = _kr("monthly_calls_reset_at")
+    payment_rail = _kr("payment_rail", "card")
 
     base_credits = plan_def["monthly_credits"]
     multiplier = PAYMENT_MULTIPLIERS.get(payment_method, 1.00)
@@ -295,7 +303,7 @@ async def get_balance(request: Request, db=Depends(get_db)):
 
     # Forecast — daily average in credits (not calls). Returns null if < 3 days history.
     forecast = None
-    monthly_credits_consumed = key_record.get("monthly_calls_count") or 0
+    monthly_credits_consumed = _kr("monthly_calls_count", 0) or 0
     if monthly_reset_at:
         now_utc = datetime.now(timezone.utc)
         period_start = monthly_reset_at.replace(tzinfo=timezone.utc) - timedelta(days=30)
@@ -1005,17 +1013,18 @@ async def get_invoice_alias(year_month: str, request: Request, db=Depends(get_db
 @router.get("/billing/invoice/{year}/{month}")
 @limiter.limit("10/minute")
 async def get_invoice(year: int, month: int, request: Request, db=Depends(get_db)):
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
     if not (1 <= month <= 12):
         raise HTTPException(status_code=400, detail="invalid_month")
-
+    # Session-OR-key (PR #25 pattern): the dashboard billing/invoice view uses
+    # the wf_session cookie. Resolve the caller, then read their primary key row.
+    caller = await resolve_dashboard_caller(request, db)
+    if not caller.get("api_key_id"):
+        raise HTTPException(status_code=404, detail="no_active_api_key")
     key_record = await db.fetchrow("""
         SELECT k.id, k.user_id, k.tier, u.email
         FROM api_keys k JOIN users u ON u.id = k.user_id
-        WHERE k.key_hash = $1 AND k.active = true
-    """, hashlib.sha256(api_key.encode()).hexdigest())
+        WHERE k.id = $1 AND k.active = true
+    """, caller["api_key_id"])
     if not key_record:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
