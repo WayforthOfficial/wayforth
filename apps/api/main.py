@@ -1927,15 +1927,18 @@ async def system_status_v075(db=Depends(get_db)):
     except Exception:
         components["payments"] = "outage"
 
-    # uptime_30d / incidents: there is NO platform-uptime measurement or incident
-    # history behind these yet. The previous code claimed a hardcoded 99.97 and an
-    # empty incidents list — a fabricated "99.97% uptime, zero incidents" that was
-    # false (the prior query referenced service_probes.outcome/created_at columns
-    # that do not exist, so it errored every call and always returned the literal).
-    # Report null/unmeasured until a real source exists (see status_checks recorder
-    # follow-up). `status` + `components` above ARE real, live-measured signals.
-    uptime_30d = None
-    incidents = None
+    # uptime_30d / incidents: real values from UptimeRobot (the chosen source),
+    # cached ~5 min. NO hardcoded number — the previous code returned a fabricated
+    # 99.97 + empty incidents (its query hit service_probes.outcome/created_at,
+    # columns that don't exist, so it errored every call and fell back to the
+    # literal). When UptimeRobot is unconfigured/unreachable this returns
+    # uptime_30d=None / incidents=None ("unmeasured") — never a fabricated value.
+    # `status` + `components` above are independent, live-measured signals.
+    from services.uptime import get_uptime_snapshot
+    _uptime = await get_uptime_snapshot()
+    uptime_30d = _uptime["uptime_30d"]
+    incidents = _uptime["incidents"]
+    uptime_source = _uptime["uptime_source"]
 
     # Overall rollup:
     # "outage" = only when the api component itself is unreachable (gateway down).
@@ -1953,9 +1956,9 @@ async def system_status_v075(db=Depends(get_db)):
     return {
         "status": overall,
         "components": components,
-        "uptime_30d": uptime_30d,        # null until real uptime is instrumented
-        "uptime_source": "unmeasured",   # no platform-uptime history source yet
-        "incidents": incidents,          # null = unmeasured (NOT an empty list / "zero incidents")
+        "uptime_30d": uptime_30d,        # real (UptimeRobot) or null when unmeasured
+        "uptime_source": uptime_source,  # "uptimerobot" | "unmeasured"
+        "incidents": incidents,          # real down-events, or null when unmeasured (never a fake [])
     }
 
 
