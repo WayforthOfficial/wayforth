@@ -1800,6 +1800,19 @@ async def system_status(db=Depends(get_db)):
         SELECT COUNT(*) FROM search_analytics
         WHERE created_at > NOW() - INTERVAL '24h'
     """)
+    # Rail-live status from the single source of truth (core.rails). A public
+    # endpoint must NEVER advertise a rail as live while its launch flag is off —
+    # same honesty rule as the status banner. x402's rail_live additionally folds
+    # in the funded-settlement check. Until RAILS_LIVE flips, all three read false.
+    from core.rails import rail_live
+    _card_live = rail_live("card")
+    _usdc_live = rail_live("usdc")
+    _x402_live = rail_live("x402")
+    _any_rail_live = _card_live or _usdc_live or _x402_live
+    try:
+        _base_chain_id = int(os.environ.get("BASE_CHAIN_ID", "8453"))
+    except ValueError:
+        _base_chain_id = 8453
     return {
         "status": "operational",
         "version": VERSION,
@@ -1817,17 +1830,20 @@ async def system_status(db=Depends(get_db)):
         "api": "operational",
         "database": "operational",
         "payment_rails": {
-            "card": True,
-            "usdc_subscription": True,
-            "x402_pay_per_call": bool(os.environ.get("WAYFORTH_BASE_WALLET")),
-            "cross_rail_conversion": True,
-            "agent_auto_topup": True,
+            "card": _card_live,
+            "usdc_subscription": _usdc_live,
+            "x402_pay_per_call": _x402_live,
+            # Conversion / auto-topup can only function once some rail can charge.
+            "cross_rail_conversion": _any_rail_live,
+            "agent_auto_topup": _any_rail_live,
         },
         "agent_billing_permissions": ["none", "auto_topup", "full"],
         "x402": {
-            "network": "Base (eip155:8453)",
-            "testnet_active": True,
-            "mainnet_active": False,
+            "live": _x402_live,
+            "network": f"Base (eip155:{_base_chain_id})",
+            # Only claim a network active when the rail is actually live there.
+            "mainnet_active": _x402_live and _base_chain_id == 8453,
+            "testnet_active": _x402_live and _base_chain_id == 84532,
             "services_in_catalog": stats["total_services"],
             "managed_services_x402": _active_managed_count(),
         },
@@ -1911,20 +1927,15 @@ async def system_status_v075(db=Depends(get_db)):
     except Exception:
         components["payments"] = "outage"
 
-    # uptime_30d from service_probes if the table exists
-    uptime_30d = 99.97
-    try:
-        row = await db.fetchrow("""
-            SELECT
-                COUNT(*) FILTER (WHERE outcome = 'success') AS ok,
-                COUNT(*) AS total
-            FROM service_probes
-            WHERE created_at >= NOW() - INTERVAL '30 days'
-        """)
-        if row and row["total"] > 0:
-            uptime_30d = round(100.0 * row["ok"] / row["total"], 2)
-    except Exception:
-        pass  # non-critical: uptime metric falls back to default 99.97
+    # uptime_30d / incidents: there is NO platform-uptime measurement or incident
+    # history behind these yet. The previous code claimed a hardcoded 99.97 and an
+    # empty incidents list — a fabricated "99.97% uptime, zero incidents" that was
+    # false (the prior query referenced service_probes.outcome/created_at columns
+    # that do not exist, so it errored every call and always returned the literal).
+    # Report null/unmeasured until a real source exists (see status_checks recorder
+    # follow-up). `status` + `components` above ARE real, live-measured signals.
+    uptime_30d = None
+    incidents = None
 
     # Overall rollup:
     # "outage" = only when the api component itself is unreachable (gateway down).
@@ -1942,8 +1953,9 @@ async def system_status_v075(db=Depends(get_db)):
     return {
         "status": overall,
         "components": components,
-        "uptime_30d": uptime_30d,
-        "incidents": [],
+        "uptime_30d": uptime_30d,        # null until real uptime is instrumented
+        "uptime_source": "unmeasured",   # no platform-uptime history source yet
+        "incidents": incidents,          # null = unmeasured (NOT an empty list / "zero incidents")
     }
 
 

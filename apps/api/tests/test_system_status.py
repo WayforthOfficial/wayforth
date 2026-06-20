@@ -30,15 +30,21 @@ class TestSystemStatusShape:
         assert "uptime_30d" in body
         assert "incidents" in body
 
-    def test_incidents_is_list(self):
-        r = httpx.get(f"{BASE_URL}/system/status", timeout=15.0)
-        assert isinstance(r.json()["incidents"], list)
+    def test_incidents_null_or_list(self):
+        # incidents is null while unmeasured (no incident-history source). It must
+        # NEVER be a fabricated empty list, which would assert "zero incidents".
+        # When a real source lands it may become a list.
+        incidents = httpx.get(f"{BASE_URL}/system/status", timeout=15.0).json()["incidents"]
+        assert incidents is None or isinstance(incidents, list)
 
-    def test_uptime_30d_is_numeric(self):
-        r = httpx.get(f"{BASE_URL}/system/status", timeout=15.0)
-        uptime = r.json()["uptime_30d"]
-        assert isinstance(uptime, (int, float))
-        assert 0.0 <= uptime <= 100.0
+    def test_uptime_30d_null_or_numeric(self):
+        # uptime_30d is null until platform uptime is actually instrumented — no
+        # hardcoded number. When a real source lands it is a 0-100 measurement.
+        body = httpx.get(f"{BASE_URL}/system/status", timeout=15.0).json()
+        uptime = body["uptime_30d"]
+        assert uptime is None or (isinstance(uptime, (int, float)) and 0.0 <= uptime <= 100.0)
+        if uptime is None:
+            assert body.get("uptime_source") == "unmeasured"
 
     def test_components_has_api_key(self):
         r = httpx.get(f"{BASE_URL}/system/status", timeout=15.0)
