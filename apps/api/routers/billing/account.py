@@ -1037,25 +1037,26 @@ async def get_invoice(year: int, month: int, request: Request, db=Depends(get_db
     now_utc = datetime.now(timezone.utc)
     is_current_month = (year == now_utc.year and month == now_utc.month)
 
-    if is_current_month:
-        # Current month: monthly_calls_count on api_keys is always authoritative
-        key_usage = await db.fetchrow(
-            "SELECT monthly_calls_count FROM api_keys WHERE id = $1", key_record["id"]
-        )
-        calls_used = int((key_usage["monthly_calls_count"] or 0) if key_usage else 0)
-        if calls_used == 0:
-            raise HTTPException(status_code=404, detail="no_activity_in_period")
-    else:
-        # Past month: count from credit_transactions (execution + cross_rail)
-        row = await db.fetchrow("""
-            SELECT COUNT(*) AS tx_count
-            FROM credit_transactions
-            WHERE user_id = $1 AND type IN ('execution', 'cross_rail')
-              AND created_at >= $2 AND created_at < $3
-        """, key_record["user_id"], period_start, period_end)
-        calls_used = int((row["tx_count"] or 0) if row else 0)
-        if calls_used == 0:
-            raise HTTPException(status_code=404, detail="no_activity_in_period")
+    # Credits used = the AUTHORITATIVE ledger (user_credits ⇄ credit_transactions),
+    # summed over the period. Previously this read api_keys.monthly_calls_count for
+    # the current month and COUNT(*) of transactions for past months — two non-
+    # authoritative figures: monthly_calls_count is a denormalized per-key counter
+    # maintained by a SEPARATE non-atomic path (_increment_calls) that drifts low
+    # (it never counts /search debits — those carry NULL api_key_id — and the LLM
+    # path under-increments), and COUNT(*) is a call count, not credits. Both
+    # under-reported vs the real spend (e.g. June: 416/72 shown vs 861 actually
+    # deducted). Summing -amount from the immutable ledger ties the invoice out to
+    # the user_credits balance delta exactly — the only number real money may use.
+    row = await db.fetchrow("""
+        SELECT COALESCE(SUM(-amount), 0) AS credits_used
+        FROM credit_transactions
+        WHERE user_id = $1 AND amount < 0
+          AND type IN ('execution', 'cross_rail', 'cloud_compute')
+          AND created_at >= $2 AND created_at < $3
+    """, key_record["user_id"], period_start, period_end)
+    calls_used = int((row["credits_used"] or 0) if row else 0)
+    if calls_used == 0:
+        raise HTTPException(status_code=404, detail="no_activity_in_period")
 
     tier = key_record["tier"] or "free"
     plan_def = PLANS.get(tier, PLANS["free"])
