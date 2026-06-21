@@ -1251,21 +1251,44 @@ app.add_middleware(SlowAPIMiddleware)
 #   and drop the wildcard regex. Auth is primarily header-based
 #   (X-Wayforth-API-Key), so cookie CSRF surface is limited, but tightening
 #   this is defense in depth.
+# Single source of truth for the allow-listed browser origins — used by both
+# CORSMiddleware (the normal path) and the 500 handler below (the error path that
+# bypasses CORSMiddleware). Keep them identical so error responses carry the same
+# CORS contract as success responses.
+_CORS_ALLOWED_ORIGINS = [
+    "https://wayforth.io",
+    "https://www.wayforth.io",
+    "https://gateway.wayforth.io",
+    "https://mcp.wayforth.io",
+    "https://zeropointaccess.com",
+    "https://www.zeropointaccess.com",
+    "https://intent-exchange.lovable.app",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://wayforth.io",
-        "https://www.wayforth.io",
-        "https://gateway.wayforth.io",
-        "https://mcp.wayforth.io",
-        "https://zeropointaccess.com",
-        "https://www.zeropointaccess.com",
-        "https://intent-exchange.lovable.app",
-    ],
+    allow_origins=_CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS", "DELETE", "PUT"],
     allow_headers=["*"],
 )
+
+
+def _cors_error_headers(request: "Request") -> dict:
+    """CORS headers for error responses that bypass CORSMiddleware.
+
+    Unhandled 500s are rendered by Starlette's ServerErrorMiddleware, which sits
+    OUTSIDE CORSMiddleware — so a raw 500 carries no Access-Control-* headers and
+    the browser surfaces a generic CORS/"Load failed" error that masks EVERY
+    gateway 5xx. Re-apply the same allow-credentials CORS contract here: echo the
+    request Origin iff it is allow-listed (never '*' with credentials)."""
+    origin = request.headers.get("origin", "")
+    if origin in _CORS_ALLOWED_ORIGINS:
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        }
+    return {}
 
 
 # Request body size limits (defense-in-depth against memory exhaustion / JSON
@@ -1536,6 +1559,22 @@ async def _payment_required_handler(request: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 app.add_exception_handler(HTTPException, _payment_required_handler)
+
+
+# Unhandled-exception (500) handler. Starlette routes Exception/500 to
+# ServerErrorMiddleware, which renders OUTSIDE CORSMiddleware — so without this,
+# every 5xx reaches the browser with no Access-Control-* headers and looks like a
+# CORS failure ("Load failed"), masking the real server error. We render a clean
+# 500 and re-attach the CORS headers ourselves so the frontend can read it.
+async def _internal_error_handler(request: Request, exc: Exception):
+    logger.exception("unhandled_error path=%s method=%s", request.url.path, request.method)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "internal_error"},
+        headers=_cors_error_headers(request),
+    )
+
+app.add_exception_handler(Exception, _internal_error_handler)
 
 
 # FINDING-010 cleanup (v0.8.5): the duplicate check_auth that lived here was
