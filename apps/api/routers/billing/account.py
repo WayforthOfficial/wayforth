@@ -1335,6 +1335,7 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
     pioneer_calls_made = 0
     pioneer_calls_this_month = 0
     credits_earned_this_month = 0
+    drip_days_this_cycle = 0
     try:
         pioneer_calls_made = await db.fetchval("""
             SELECT COUNT(DISTINCT sa.id)
@@ -1365,8 +1366,23 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
                AND type = 'pioneer_drip'
                AND created_at >= date_trunc('month', NOW())
         """, user_id) or 0
+
+        # Distinct Pacific calendar days dripped this cycle — DERIVED from the
+        # immutable pioneer_drip ledger, not the denormalized
+        # users.pioneer_drip_days_this_cycle column. The denormalized column can
+        # orphan (it survived a full-account reset that wiped the pool + ledger,
+        # leaving "15,600 / 13 days" with zero backing rows). Deriving from the
+        # ledger means the figure can never disagree with the credits actually
+        # dripped again.
+        drip_days_this_cycle = await db.fetchval("""
+            SELECT COUNT(DISTINCT (created_at AT TIME ZONE 'America/Los_Angeles')::date)
+              FROM credit_transactions
+             WHERE user_id = $1::uuid
+               AND type = 'pioneer_drip'
+               AND created_at >= date_trunc('month', NOW())
+        """, user_id) or 0
     except Exception:
-        pass  # non-critical: credits_earned_this_month display falls back to 0
+        pass  # non-critical: pioneer drip displays fall back to 0
 
     now = datetime.now(timezone.utc)
     tier = await _resolve_pioneer_tier(db, user_id)
@@ -1402,8 +1418,10 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
         "credits_earned_this_month":             int(credits_earned_this_month),  # backward compat alias
         # Task 10 display fields
         "days_enrolled":                         int((now - user["pioneer_opted_in_at"]).days) if user["pioneer_opted_in_at"] else 0,
-        "drip_credits_this_cycle":               int(user["pioneer_drip_credits_this_cycle"] or 0),
-        "drip_days_this_cycle":                  int(user["pioneer_drip_days_this_cycle"] or 0),
+        # Derived from the pioneer_drip ledger (same source as credits_earned_this_month),
+        # NOT the denormalized users.pioneer_drip_* columns which can orphan.
+        "drip_credits_this_cycle":               int(credits_earned_this_month),
+        "drip_days_this_cycle":                  int(drip_days_this_cycle),
         "daily_drip_rate":                       _PIONEER_DAILY_CREDITS.get(tier, 0),
         "rollover_note":                         "Credits reset with your monthly subscription. Unused credits do not carry over.",
         # Searches that were in the 60% boosted bucket AND had a boosted provider

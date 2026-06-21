@@ -956,21 +956,48 @@ async def _monthly_topup_reset():
                 for _rk in reset_keys:
                     _p = PLANS.get(_rk["tier"], PLANS["free"])
                     _monthly = _p["monthly_credits"]
-                    await db.execute("""
-                        UPDATE user_credits
-                           SET credits_balance  = GREATEST(credits_balance, $1),
+                    # Capture the pioneer pool BEFORE zeroing so the reset leaves a
+                    # ledger trail — the pool must never drop to 0 without a
+                    # credit_transactions row (previously this was a silent UPDATE).
+                    # RETURNING fires only when the month-gate actually matches, so a
+                    # no-op reset writes no forfeiture row and zeroes no counters.
+                    _reset_row = await db.fetchrow("""
+                        WITH before AS (
+                            SELECT pioneer_credits_balance AS old_pioneer
+                              FROM user_credits WHERE user_id = $2::uuid
+                        )
+                        UPDATE user_credits uc
+                           SET credits_balance  = GREATEST(uc.credits_balance, $1),
                                pioneer_credits_balance = 0,
                                last_credited_at = NOW(),
                                updated_at       = NOW()
-                         WHERE user_id = $2::uuid
+                          FROM before
+                         WHERE uc.user_id = $2::uuid
                            AND (
-                               last_credited_at IS NULL
-                               OR date_trunc('month', last_credited_at AT TIME ZONE 'UTC')
+                               uc.last_credited_at IS NULL
+                               OR date_trunc('month', uc.last_credited_at AT TIME ZONE 'UTC')
                                   < date_trunc('month', NOW() AT TIME ZONE 'UTC')
                            )
+                        RETURNING before.old_pioneer
                     """, _monthly, _rk["user_id"])
+                    if _reset_row is None:
+                        continue  # gate didn't match (already credited this month)
+                    _forfeited = int(_reset_row["old_pioneer"] or 0)
+                    if _forfeited > 0:
+                        # Ledger trail for the forfeited pioneer overflow. balance_after
+                        # is the pioneer pool after the reset (0), matching how
+                        # pioneer_drip rows record that pool.
+                        await db.execute("""
+                            INSERT INTO credit_transactions
+                              (user_id, amount, balance_after, type, description, api_endpoint)
+                            VALUES ($1::uuid, $2, 0, 'pioneer_reset', $3, '/account/pioneer/reset')
+                        """, _rk["user_id"], -_forfeited,
+                            f"pioneer cycle reset: {_forfeited} unused pioneer credits "
+                            f"forfeited at subscription renewal")
                     # Zero per-cycle pioneer drip counters so the dashboard shows
                     # "earned this cycle" from day 1 of the new subscription month.
+                    # (These columns are now display-vestigial — pioneer_status
+                    # derives the figures from the ledger — but keep them clean.)
                     # Lifetime enrollment days are derived at query time from
                     # pioneer_opted_in_at and are never reset.
                     await db.execute("""
