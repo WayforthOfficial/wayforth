@@ -256,16 +256,42 @@ async def check_run_credit_cap(db, agent_id, additional_cost: int) -> None:
         })
 
 
+async def credits_used_this_cycle(conn, user_id: str) -> int:
+    """Authoritative credits consumed this billing cycle (calendar month) for a
+    user — summed from the immutable credit_transactions ledger.
+
+    Replaces the drift-prone api_keys.monthly_calls_count for every display/quota
+    surface. monthly_calls_count was maintained by a separate non-atomic path
+    (_increment_calls) that under-counted — it never saw NULL-api_key debits like
+    /search and the LLM path under-incremented — so any figure derived from it
+    (remaining quota, "used this cycle", invoice) disagreed with the real spend.
+    Summing the ledger ties every surface to user_credits.credits_balance."""
+    used = await conn.fetchval("""
+        SELECT COALESCE(SUM(-amount), 0)
+          FROM credit_transactions
+         WHERE user_id = $1::uuid AND amount < 0
+           AND type IN ('execution', 'cross_rail', 'cloud_compute')
+           AND created_at >= date_trunc('month', NOW())
+    """, user_id)
+    return int(used or 0)
+
+
 async def compute_calls_remaining(conn, api_key_id: str) -> int:
-    """Single source of truth for calls_remaining. Reads monthly_calls_count directly — never uses credit math."""
+    """Credits remaining in the cycle allotment — DERIVED from the ledger.
+
+    = plan allotment − credits_used_this_cycle (ledger sum), per USER (not per
+    key), so it captures all spend including NULL-key /search debits. No longer
+    reads api_keys.monthly_calls_count, which drifted low and over-stated
+    remaining (the pre-money quota under-count)."""
     row = await conn.fetchrow(
-        "SELECT monthly_calls_count, tier FROM api_keys WHERE id = $1::uuid",
+        "SELECT user_id, tier FROM api_keys WHERE id = $1::uuid",
         api_key_id,
     )
     if not row:
         return 0
     p = PLANS.get(row["tier"], PLANS["free"])
-    return max(0, p["calls_included"] - row["monthly_calls_count"])
+    used = await credits_used_this_cycle(conn, str(row["user_id"]))
+    return max(0, p["calls_included"] - used)
 
 
 async def _maybe_send_usage_warning_email(pool, user_id: str, calls_remaining: int, percent_used: int, tier: str) -> None:

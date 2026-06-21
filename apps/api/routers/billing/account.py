@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.auth import resolve_dashboard_caller
-from core.credits import PLANS, CREDITS_PER_CALL, ROUTING_FEE, PAYMENT_MULTIPLIERS, compute_calls_remaining
+from core.credits import PLANS, CREDITS_PER_CALL, ROUTING_FEE, PAYMENT_MULTIPLIERS, compute_calls_remaining, credits_used_this_cycle
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier, _get_redis
@@ -303,7 +303,8 @@ async def get_balance(request: Request, db=Depends(get_db)):
 
     # Forecast — daily average in credits (not calls). Returns null if < 3 days history.
     forecast = None
-    monthly_credits_consumed = _kr("monthly_calls_count", 0) or 0
+    # Ledger-derived (NOT api_keys.monthly_calls_count, which drifts low).
+    monthly_credits_consumed = await credits_used_this_cycle(db, user_id)
     if monthly_reset_at:
         now_utc = datetime.now(timezone.utc)
         period_start = monthly_reset_at.replace(tzinfo=timezone.utc) - timedelta(days=30)
@@ -455,7 +456,9 @@ async def account_analytics(request: Request, db=Depends(get_db)):
         "WHERE user_id=$1 AND type='execution' AND created_at >= date_trunc('month', NOW()) "
         "AND service_id IS NOT NULL GROUP BY service_id ORDER BY count DESC LIMIT 10", user_id)
 
-    # ── Calls — source of truth: monthly_calls_count on api_keys ─────────────
+    # ── Credits used this cycle — source of truth: the credit_transactions
+    # ledger (NOT api_keys.monthly_calls_count, which drifts low and under-counts
+    # NULL-key /search debits). Ties this "used this cycle" figure to the balance.
     today = _datetime.date.today()
     if today.month == 12:
         reset = _datetime.date(today.year + 1, 1, 1)
@@ -520,7 +523,7 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     plan_tier = credits["package_tier"] if credits else "free"
     plan_def = PLANS.get(plan_tier, PLANS["free"])
     credits_included = plan_def["calls_included"]   # calls_included == monthly_credits after fix
-    credits_used = caller["monthly_calls_count"] or 0
+    credits_used = await credits_used_this_cycle(db, user_id)
     credits_remaining = max(0, credits_included - credits_used)
     reset_at_str = (
         caller["monthly_calls_reset_at"].date().isoformat()
