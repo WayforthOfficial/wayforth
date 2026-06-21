@@ -96,7 +96,21 @@ def _resolve_run_key(header_key: str, agent: dict) -> str:
     return ""
 
 
+def _valid_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 async def _get_agent_or_404(db, user_id: str, agent_id: str) -> dict:
+    # A malformed id (e.g. the frontend sending "undefined") can never identify an
+    # agent. Guard it as a clean 404 — passing it to a `$1::uuid` query otherwise
+    # raises asyncpg InvalidTextRepresentationError, which surfaced as an
+    # unhandled 500 (and, lacking CORS headers, looked like a CORS failure).
+    if not _valid_uuid(agent_id):
+        raise HTTPException(status_code=404, detail={"error": "agent_not_found"})
     row = await db.fetchrow(
         "SELECT * FROM hosted_agents WHERE id = $1::uuid AND user_id = $2::uuid",
         agent_id, user_id,
@@ -805,6 +819,8 @@ async def get_run(
     require_tier(tier, "cloud_agents")
 
     await _get_agent_or_404(db, user_id, agent_id)
+    if not _valid_uuid(run_id):
+        raise HTTPException(status_code=404, detail={"error": "run_not_found"})
 
     row = await db.fetchrow("""
         SELECT id, status, trigger, sandbox_id, started_at, completed_at, duration_ms,
@@ -875,6 +891,8 @@ async def get_run_logs(
     require_tier(tier, "cloud_agents")
 
     await _get_agent_or_404(db, user_id, agent_id)
+    if not _valid_uuid(run_id):
+        raise HTTPException(status_code=404, detail={"error": "run_not_found"})
 
     row = await db.fetchrow(
         "SELECT status, log_tail FROM agent_runs WHERE id = $1::uuid AND hosted_agent_id = $2::uuid",
@@ -961,6 +979,8 @@ async def cancel_run(
     require_tier(tier, "cloud_agents")
 
     await _get_agent_or_404(db, user_id, agent_id)
+    if not _valid_uuid(run_id):
+        raise HTTPException(status_code=404, detail={"error": "run_not_found"})
 
     row = await db.fetchrow(
         "SELECT status FROM agent_runs WHERE id = $1::uuid AND hosted_agent_id = $2::uuid",
