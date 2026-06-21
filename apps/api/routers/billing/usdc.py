@@ -633,7 +633,6 @@ async def topup_usdc(request: Request, db=Depends(get_db)):
 @limiter.limit("30/minute")
 async def get_billing_settings(request: Request, db=Depends(get_db)):
     """Return current billing permission settings for the authenticated API key."""
-    from core.credits import compute_calls_remaining
     # Session-OR-key (PR #25 pattern): the dashboard billing-settings page uses the
     # wf_session cookie. Resolve the caller, then read their primary key row.
     caller = await resolve_dashboard_caller(request, db)
@@ -671,8 +670,10 @@ async def get_billing_settings(request: Request, db=Depends(get_db)):
         "monthly_topup_spent_usd": round(spent, 2),
         "monthly_topup_remaining_usd": round(limit - spent, 2),
         "monthly_topup_reset_at": reset_at.date().isoformat() if reset_at else None,
-        "credits_remaining": await compute_calls_remaining(db, str(key_record["id"])),
-        "calls_remaining": await compute_calls_remaining(db, str(key_record["id"])),  # backward compat
+        # User-facing remaining = authoritative spendable balance (hold-aware),
+        # not allotment-remaining (internal quota math).
+        "credits_remaining": balance,
+        "calls_remaining": balance,  # backward compat
         "plan": tier,
         "payment_rail": payment_rail,
         "usdc_bonus_rate": 0.05,

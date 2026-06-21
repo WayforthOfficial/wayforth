@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.auth import resolve_dashboard_caller
-from core.credits import PLANS, CREDITS_PER_CALL, ROUTING_FEE, PAYMENT_MULTIPLIERS, compute_calls_remaining, credits_used_this_cycle
+from core.credits import PLANS, CREDITS_PER_CALL, ROUTING_FEE, PAYMENT_MULTIPLIERS, credits_used_this_cycle
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier, _get_redis
@@ -360,19 +360,15 @@ async def account_credits(request: Request, db=Depends(get_db)):
     pkg_tier = credits['package_tier'] if credits else 'free'
     tier = _credits_to_tier(lifetime, pkg_tier)
 
-    calls_remaining = (
-        await compute_calls_remaining(db, str(caller["api_key_id"]))
-        if caller["api_key_id"] else 0
-    )
-
+    # User-facing "remaining" = the authoritative spendable balance (hold-aware) —
+    # NOT allotment-remaining (compute_calls_remaining), which is internal quota
+    # math and differs by in-flight reserve holds. One consistent number everywhere.
     return {
         "plan": tier,
-        "credits_remaining": calls_remaining,
-        "credits_included": PLANS.get(tier, PLANS["free"])["calls_included"],
-        "calls_remaining": calls_remaining,   # backward compat
-        "calls_included": PLANS.get(tier, PLANS["free"])["calls_included"],  # backward compat
-        # Dashboard-only credit detail (not shown in public docs)
         "credits_remaining": balance,
+        "credits_included": PLANS.get(tier, PLANS["free"])["calls_included"],
+        "calls_remaining": balance,   # backward compat alias of credits_remaining
+        "calls_included": PLANS.get(tier, PLANS["free"])["calls_included"],  # backward compat
         "credits_total": lifetime,
         "tier": tier,
         "email": caller["email"],
@@ -524,7 +520,9 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     plan_def = PLANS.get(plan_tier, PLANS["free"])
     credits_included = plan_def["calls_included"]   # calls_included == monthly_credits after fix
     credits_used = await credits_used_this_cycle(db, user_id)
-    credits_remaining = max(0, credits_included - credits_used)
+    # User-facing "remaining" = authoritative spendable balance (hold-aware), the
+    # same number shown everywhere — not allotment-remaining (included − used).
+    credits_remaining = credits["credits_balance"] if credits else 0
     reset_at_str = (
         caller["monthly_calls_reset_at"].date().isoformat()
         if caller["monthly_calls_reset_at"] else reset.isoformat()
@@ -1105,10 +1103,9 @@ async def account_alerts(request: Request, db=Depends(get_db)):
     pkg_tier = credits["package_tier"] if credits else "free"
     tier = _credits_to_tier(balance, pkg_tier)
 
-    calls_remaining = (
-        await compute_calls_remaining(db, str(caller["api_key_id"]))
-        if caller["api_key_id"] else 0
-    )
+    # Low-credit alerts fire off the authoritative spendable balance (hold-aware),
+    # not allotment-remaining — a user "running low" is about real spendable credits.
+    calls_remaining = balance
     plan_def = PLANS.get(tier, PLANS["free"])
     calls_included = plan_def["calls_included"]
 
@@ -1117,7 +1114,8 @@ async def account_alerts(request: Request, db=Depends(get_db)):
 
     will_exhaust = False
     days_remaining = None
-    monthly_count = caller.get("monthly_calls_count") or 0
+    # Daily burn from the ledger (settled cycle spend), not the drift-prone counter.
+    monthly_count = await credits_used_this_cycle(db, caller["user_id"])
     monthly_reset_at = caller.get("monthly_calls_reset_at")
     if monthly_reset_at and monthly_count > 0:
         now_utc = datetime.now(timezone.utc)
