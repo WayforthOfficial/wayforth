@@ -595,18 +595,27 @@ async def list_agents(request: Request, db=Depends(get_db)) -> dict:
     user_id, _, tier = await _resolve_caller(request, db)
     require_tier(tier, "cloud_agents")
 
+    # credits_30d is DERIVED from the credit_transactions ledger (the authoritative
+    # spend record), not SUM(agent_runs.credits_total) — a denormalized per-run
+    # column that can lag/zero out and drift from what was actually billed. Cloud
+    # run debits are tagged with the run id (X_WAYFORTH_AGENT_ID), so we join the
+    # ledger to the agent's runs.
     rows = await db.fetch("""
         SELECT
             ha.id, ha.name, ha.slug, ha.runtime, ha.status,
             ha.trigger_type, ha.schedule, ha.credit_cap,
             ha.last_run_at, ha.created_at,
-            COALESCE(SUM(ar.credits_total) FILTER (
-                WHERE ar.created_at >= NOW() - INTERVAL '30 days'
+            COALESCE((
+                SELECT SUM(-ct.amount)
+                  FROM credit_transactions ct
+                  JOIN agent_runs ar ON ct.agent_id = ar.id::text
+                 WHERE ar.hosted_agent_id = ha.id
+                   AND ct.amount < 0
+                   AND ct.type IN ('execution', 'cloud_compute', 'cross_rail')
+                   AND ct.created_at >= NOW() - INTERVAL '30 days'
             ), 0) AS credits_30d
         FROM hosted_agents ha
-        LEFT JOIN agent_runs ar ON ar.hosted_agent_id = ha.id
         WHERE ha.user_id = $1::uuid
-        GROUP BY ha.id
         ORDER BY ha.created_at DESC
         LIMIT 100
     """, user_id)
@@ -640,6 +649,20 @@ async def get_agent(request: Request, agent_id: str, db=Depends(get_db)) -> dict
 
     agent = await _get_agent_or_404(db, user_id, agent_id)
 
+    # CREDITS (30D) for the detail page — DERIVED from the credit_transactions
+    # ledger (authoritative spend), not a denormalized column. This field was
+    # previously absent from the detail endpoint entirely, so the dashboard had
+    # nothing to read and showed 0. Cloud run debits are tagged with the run id.
+    credits_30d = await db.fetchval("""
+        SELECT COALESCE(SUM(-ct.amount), 0)
+          FROM credit_transactions ct
+          JOIN agent_runs ar ON ct.agent_id = ar.id::text
+         WHERE ar.hosted_agent_id = $1::uuid
+           AND ct.amount < 0
+           AND ct.type IN ('execution', 'cloud_compute', 'cross_rail')
+           AND ct.created_at >= NOW() - INTERVAL '30 days'
+    """, agent_id)
+
     # Last run summary
     last_run = await db.fetchrow("""
         SELECT id, status, trigger, started_at, completed_at, duration_ms,
@@ -659,6 +682,7 @@ async def get_agent(request: Request, agent_id: str, db=Depends(get_db)) -> dict
         "schedule":       agent["schedule"],
         "credit_cap":     agent["credit_cap"],
         "concurrent_max": agent.get("concurrent_max") or 1,
+        "credits_30d":    int(credits_30d or 0),
         "sandbox_provider": agent["sandbox_provider"],
         "webhook_id":     str(agent["webhook_id"]) if agent.get("webhook_id") else None,
         "next_run_at":    agent["next_run_at"].isoformat() if agent.get("next_run_at") else None,
