@@ -277,12 +277,14 @@ async def credits_used_this_cycle(conn, user_id: str) -> int:
 
 
 async def compute_calls_remaining(conn, api_key_id: str) -> int:
-    """Credits remaining in the cycle allotment — DERIVED from the ledger.
+    """INTERNAL quota math — allotment remaining this cycle. NOT for user display.
 
-    = plan allotment − credits_used_this_cycle (ledger sum), per USER (not per
-    key), so it captures all spend including NULL-key /search debits. No longer
-    reads api_keys.monthly_calls_count, which drifted low and over-stated
-    remaining (the pre-money quota under-count)."""
+    = plan allotment − credits_used_this_cycle (ledger sum), per USER. Differs from
+    the spendable balance by any in-flight reserve hold, so it must NOT be shown to
+    users (every user-facing "remaining"/balance surface reads
+    user_credits.credits_balance instead). Kept for internal quota logic (e.g.
+    usage-warning thresholds). Ledger-derived — never reads the drift-prone
+    api_keys.monthly_calls_count."""
     row = await conn.fetchrow(
         "SELECT user_id, tier FROM api_keys WHERE id = $1::uuid",
         api_key_id,

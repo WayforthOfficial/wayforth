@@ -24,7 +24,6 @@ from core.credits import (
     _increment_calls,
     _maybe_dispatch_credits_low,
     check_and_deduct_credits,
-    compute_calls_remaining,
     ROUTING_FEE,
 )
 from core.db import get_db
@@ -1626,13 +1625,18 @@ async def execute_batch(request: Request, db=Depends(get_db)):
     )
 
     total_ms = round((_time_mod.time() - batch_start) * 1000)
-    calls_remaining = await compute_calls_remaining(db, str(_api_key_id))
+    # User-facing remaining = authoritative spendable balance after the batch
+    # (hold-aware), not allotment-remaining (internal quota math).
+    _bal_row = await db.fetchrow(
+        "SELECT credits_balance FROM user_credits WHERE user_id = $1::uuid", str(user_id)
+    )
+    credits_remaining = _bal_row["credits_balance"] if _bal_row else 0
 
     return {
         "results": list(results),
         "total_execution_ms": total_ms,
-        "credits_remaining": calls_remaining,
-        "calls_remaining": calls_remaining,  # backward compat
+        "credits_remaining": credits_remaining,
+        "calls_remaining": credits_remaining,  # backward compat
     }
 
 
