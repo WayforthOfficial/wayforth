@@ -23,8 +23,8 @@ from services.managed import SERVICE_CONFIGS
 
 class TestVersion:
 
-    def test_version_is_090(self):
-        assert VERSION == "0.9.0"
+    def test_version_is_091(self):
+        assert VERSION == "0.9.1"
 
     def test_version_is_string(self):
         assert isinstance(VERSION, str)

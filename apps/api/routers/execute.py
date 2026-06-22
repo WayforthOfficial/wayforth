@@ -1394,6 +1394,7 @@ async def execute_service(request: Request, response: Response, db=Depends(get_d
     )
 
     _execute_fallback_from: str | None = None
+    _execute_substituted_model: tuple[str, str] | None = None
     _original_failure_code: str | None = None
     if error_msg and _classify_error(error_msg) == "service_failure":
         _original_failure_code = _classify_failure(None, error_msg)
@@ -1431,6 +1432,7 @@ async def execute_service(request: Request, response: Response, db=Depends(get_d
                     "calls_remaining": outcome.balance_after,  # backward compat
                 })
             _execute_fallback_from = outcome.fallback_from
+            _execute_substituted_model = outcome.substituted_model
             service_slug = outcome.served_slug
             credit_cost = outcome.cost
             balance_after = outcome.balance_after
@@ -1495,6 +1497,10 @@ async def execute_service(request: Request, response: Response, db=Depends(get_d
     # Visible self-heal surface (parity with /proxy).
     response.headers["X-Wayforth-Served-By"] = service_slug
     response.headers["X-Wayforth-Fallback"] = "true" if _execute_fallback_from else "false"
+    if _execute_substituted_model:
+        response.headers["X-Wayforth-Substituted-Model"] = (
+            f"{_execute_substituted_model[0]} -> {_execute_substituted_model[1]}"
+        )
 
     resp = {
         "status": "ok",
@@ -1523,6 +1529,10 @@ async def execute_service(request: Request, response: Response, db=Depends(get_d
         resp["fallback_reason"] = _FAILURE_REASON_LABELS.get(_original_failure_code, "service_unavailable")
     else:
         resp["failover"] = {"triggered": False}
+    if _execute_substituted_model:
+        resp["substituted_model"] = {
+            "pinned": _execute_substituted_model[0], "served": _execute_substituted_model[1],
+        }
     return resp
 
 
