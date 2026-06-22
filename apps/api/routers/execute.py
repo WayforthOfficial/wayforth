@@ -316,6 +316,69 @@ async def _try_execute_managed(
     return result, error_msg, round((_time_mod.time() - t0) * 1000)
 
 
+# Settlement classes for the substitution/failover engine (core/substitution.py).
+#   pre_send            — the request never reached the upstream or the upstream
+#                         replied with an error before doing billable work
+#                         (connection refused, connect-timeout, HTTP 5xx/429).
+#                         Safe to fail over: no duplicate upstream cost.
+#   post_send_ambiguous — the request was sent and the response was lost, or a
+#                         200 came back with an unusable body. The upstream MAY
+#                         have done (and billed) the work → failing over risks a
+#                         duplicate upstream charge / on-chain double-settlement.
+_SETTLEMENT_PRE = "pre_send"
+_SETTLEMENT_POST = "post_send_ambiguous"
+
+
+async def _try_execute_managed_ex(
+    slug: str, params: dict, key: str, *, timeout: float = 10.0
+) -> tuple[object, str | None, int, str]:
+    """Like _try_execute_managed but ALSO returns a settlement_class.
+
+    Distinguishes pre-settlement failures (safe to fail over) from
+    post-send-ambiguous ones (the upstream may have settled). httpx raises typed
+    exceptions which we catch BEFORE the asyncio.TimeoutError catch-all so the
+    distinction survives. No retry here — the engine owns retry/failover policy.
+    """
+    adapter = ADAPTERS[slug]
+    result = None
+    error_msg = None
+    settlement = _SETTLEMENT_PRE
+    t0 = _time_mod.time()
+    # Generous outer guard only against a hung adapter; the typed httpx
+    # exceptions below fire first for the cases we care about.
+    _guard = 40.0 if slug == "assemblyai" else max(timeout + 5.0, 15.0)
+    try:
+        result = await asyncio.wait_for(adapter(params, key), timeout=_guard)
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+        # No TCP connection was established (ConnectError/ConnectTimeout) or none
+        # was ever acquired from the pool (PoolTimeout) → the request never left
+        # the box → zero upstream work → SAFE to fail over.
+        error_msg = "Connection failed"
+        settlement = _SETTLEMENT_PRE
+    except (httpx.ReadTimeout, httpx.WriteError, httpx.WriteTimeout):
+        # ReadTimeout: the request WAS sent and the response was lost. Write* : a
+        # partial write may have reached AND been processed by the upstream. Both
+        # are ambiguous — the upstream may have done (and billed) the work — so
+        # NEVER blind-failover. This is the core of the #5 idempotency guarantee.
+        error_msg = "Timeout/write error after send"
+        settlement = _SETTLEMENT_POST
+    except (asyncio.TimeoutError, TimeoutError):
+        # Outer guard fired mid-call — we can't prove the upstream didn't run.
+        error_msg = "Service timeout"
+        settlement = _SETTLEMENT_POST
+    except Exception as _e:
+        msg = str(_e)
+        error_msg = msg[:300]
+        _m = re.search(r"\b([45]\d{2})\b", msg)
+        if _m and _m.group(1) in ("500", "502", "503", "504", "429"):
+            settlement = _SETTLEMENT_PRE          # upstream errored before/without billable work
+        elif _m and _m.group(1).startswith("4"):
+            settlement = _SETTLEMENT_PRE          # client error — won't be chained anyway
+        else:
+            settlement = _SETTLEMENT_POST         # unclassifiable → fail safe
+    return result, error_msg, round((_time_mod.time() - t0) * 1000), settlement
+
+
 # Per-key concurrent SSE stream cap. SSE connections hold a worker open for the
 # full upstream response duration; an unbounded number per key would let one
 # caller exhaust connection capacity for everyone else.
