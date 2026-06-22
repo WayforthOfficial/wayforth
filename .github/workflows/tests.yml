@@ -28,13 +28,12 @@ jobs:
       - name: Install dependencies
         run: |
           uv sync --frozen || uv sync
-          uv pip install pytest pytest-asyncio
 
       - name: Run security unit tests
         env:
           ENVIRONMENT: development
         run: |
-          uv run pytest -p no:cacheprovider -v \
+          uv run --with pytest --with pytest-asyncio pytest -p no:cacheprovider -v \
             tests/test_cloud7_agent_secret_failclosed.py \
             tests/test_cloud2_run_cap.py \
             tests/test_authz1_admin_killswitch.py \
