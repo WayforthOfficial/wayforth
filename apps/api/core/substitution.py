@@ -52,6 +52,18 @@ _SEED_GROUPS: dict[str, list[tuple[str, int]]] = {
 
 _LLM_SLUGS = frozenset({"groq", "together", "mistral", "gemini", "perplexity"})
 
+# Providers that honor a client idempotency key on retry (so a same-provider
+# retry after a post-send-ambiguous failure is server-side deduped, not a second
+# billable call). EMPTY today — no managed adapter passes one yet. When a provider
+# gains support, add its slug here AND pass the key in the retry call below. Until
+# then, a post-send retry would CREATE the duplicate cost it is meant to prevent,
+# so it is skipped (we go straight to the cost-capped, instrumented substitution).
+_IDEMPOTENCY_KEY_PROVIDERS: frozenset[str] = frozenset()
+
+
+def _supports_idempotency_key(slug: str) -> bool:
+    return slug in _IDEMPOTENCY_KEY_PROVIDERS
+
 # Per-category in-process cache of the ordered chain (TTL bounded). Keyed by
 # category; value = (expiry_monotonic, [ordered_slugs]).
 _CHAIN_CACHE: dict[str, tuple[float, list[str]]] = {}
@@ -269,9 +281,13 @@ async def run_with_failover(
 
     # 2. Retry-first on the SAME provider, BEFORE refunding — the primary charge
     #    stands, so a successful retry never double-charges and avoids touching a
-    #    substitute (and its duplicate-upstream risk). Idempotency keys (where a
-    #    provider supports one) would go here; none today.
-    if policy.retry_primary_on_transient:
+    #    substitute (and its duplicate-upstream risk). A pre_send retry is always
+    #    safe (no upstream work happened). A POST-send retry repeats a call the
+    #    upstream may have already run+billed, so it is only safe when the provider
+    #    honors an idempotency key — otherwise we SKIP it (going straight to the
+    #    cost-capped, instrumented substitution) rather than create duplicate cost.
+    _retry_safe = settlement == _SETTLEMENT_PRE or _supports_idempotency_key(primary_slug)
+    if policy.retry_primary_on_transient and _retry_safe:
         retried = True
         _mapped, _miss = map_params(primary_slug, user_params)
         r_res, r_err, r_ms, r_settle = await _try_execute_managed_ex(primary_slug, _mapped, primary_svc_key)

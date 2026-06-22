@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from core import substitution as sub
 from core.substitution import FailoverPolicy, run_with_failover
+import routers.execute as _ex
 from routers.execute import _SETTLEMENT_PRE, _SETTLEMENT_POST
 
 
@@ -78,6 +80,38 @@ async def _run(primary="serper", primary_err="Service timeout",
         primary_cost=3, primary_balance_after=997, primary_tx_id="tx_serper",
         primary_svc_key="KEY", rail=rail, policy=policy,
     )
+
+
+# ── 0. classification matrix (the #5 idempotency core) ────────────────────────
+
+@pytest.mark.parametrize("exc,expected", [
+    (httpx.ConnectError("x"),   _SETTLEMENT_PRE),   # no TCP connection
+    (httpx.ConnectTimeout("x"), _SETTLEMENT_PRE),   # never connected
+    (httpx.PoolTimeout("x"),    _SETTLEMENT_PRE),   # never acquired a connection
+    (httpx.ReadTimeout("x"),    _SETTLEMENT_POST),  # sent, response lost
+    (httpx.WriteError("x"),     _SETTLEMENT_POST),  # partial write may have landed
+    (httpx.WriteTimeout("x"),   _SETTLEMENT_POST),  # partial write may have landed
+])
+def test_classification_matrix_httpx(monkeypatch, exc, expected):
+    async def boom(params, key):
+        raise exc
+    monkeypatch.setitem(_ex.ADAPTERS, "serper", boom)
+    _r, err, _ms, settle = asyncio.run(_ex._try_execute_managed_ex("serper", {"query": "x"}, "K"))
+    assert err and settle == expected
+
+
+@pytest.mark.parametrize("msg,expected", [
+    ("Brave Search error 503: down", _SETTLEMENT_PRE),   # 5xx received → fail-over-safe
+    ("error 500 internal",           _SETTLEMENT_PRE),
+    ("rate limited 429",             _SETTLEMENT_PRE),    # 429 received → fail-over-safe
+    ("totally weird no status",      _SETTLEMENT_POST),   # unclassifiable → fail safe
+])
+def test_classification_matrix_http_status(monkeypatch, msg, expected):
+    async def boom(params, key):
+        raise Exception(msg)
+    monkeypatch.setitem(_ex.ADAPTERS, "serper", boom)
+    _r, err, _ms, settle = asyncio.run(_ex._try_execute_managed_ex("serper", {"query": "x"}, "K"))
+    assert err and settle == expected
 
 
 # ── 1. group ordering (real loader, seed + wri) ────────────────────────────────
@@ -194,6 +228,9 @@ def test_post_send_over_cost_cap_skips_expensive(harness):
     assert out.served_slug is None
     assert ("stability", 86) not in harness["deducts"]
     assert ("stability", "over_post_send_cost_cap") in out.providers_tried
+    # Refund safety: the primary is STILL refunded even though nothing served —
+    # the user is never charged-with-no-result-and-no-refund.
+    assert "elevenlabs" in [r[0] for r in harness["refunds"]]
 
 
 def test_post_send_flag_off_strict(harness):
@@ -206,15 +243,31 @@ def test_post_send_flag_off_strict(harness):
 
 # ── 5. retry-first on read-timeout ────────────────────────────────────────────
 
-def test_retry_first_succeeds_keeps_primary_charge(harness):
+def test_retry_first_pre_send_succeeds_keeps_primary_charge(harness):
+    # pre_send retry is always safe (no upstream work happened on the first try).
     harness["set_chain"]("web-search", ["brave"])
-    # the retry on the SAME primary succeeds → serve primary, no substitute, no refund
     harness["set_exec"]({"serper": (_OK_SEARCH, None, 9, _SETTLEMENT_PRE)})
-    out = asyncio.run(_run(primary_settlement=_SETTLEMENT_POST,
+    out = asyncio.run(_run(primary_settlement=_SETTLEMENT_PRE,
                            policy=FailoverPolicy(retry_primary_on_transient=True)))
     assert out.served_slug == "serper" and out.retried_primary is True
     assert harness["refunds"] == []  # primary charge stands; nothing refunded
     assert harness["deducts"] == []  # no substitute deducted
+
+
+def test_post_send_retry_skipped_without_idempotency_key(harness):
+    # post_send + no provider idempotency key → retry-first is SKIPPED (it would
+    # create the duplicate cost it's meant to prevent) → substitute instead. The
+    # served provider is the substitute, NOT a retried primary.
+    harness["set_chain"]("web-search", ["brave"])
+    harness["set_exec"]({
+        "serper": (_OK_SEARCH, None, 9, _SETTLEMENT_PRE),  # would serve IF retried
+        "brave": (_OK_SEARCH, None, 5, _SETTLEMENT_PRE),
+    })
+    out = asyncio.run(_run(primary_settlement=_SETTLEMENT_POST, rail="managed",
+                           policy=FailoverPolicy(retry_primary_on_transient=True)))
+    assert out.served_slug == "brave"          # substitute served, not a retried serper
+    assert ("brave", 6) in harness["deducts"]
+    assert out.retried_primary is False        # retry never ran
 
 
 # ── 6. invalid body after 200 → treated as post-send ──────────────────────────

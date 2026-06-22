@@ -349,13 +349,18 @@ async def _try_execute_managed_ex(
     _guard = 40.0 if slug == "assemblyai" else max(timeout + 5.0, 15.0)
     try:
         result = await asyncio.wait_for(adapter(params, key), timeout=_guard)
-    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.WriteError, httpx.WriteTimeout):
-        # Connection never established / send never completed → no upstream work.
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+        # No TCP connection was established (ConnectError/ConnectTimeout) or none
+        # was ever acquired from the pool (PoolTimeout) → the request never left
+        # the box → zero upstream work → SAFE to fail over.
         error_msg = "Connection failed"
         settlement = _SETTLEMENT_PRE
-    except (httpx.ReadTimeout, httpx.PoolTimeout):
-        # Request was sent; response never arrived → may have settled upstream.
-        error_msg = "Read timeout after send"
+    except (httpx.ReadTimeout, httpx.WriteError, httpx.WriteTimeout):
+        # ReadTimeout: the request WAS sent and the response was lost. Write* : a
+        # partial write may have reached AND been processed by the upstream. Both
+        # are ambiguous — the upstream may have done (and billed) the work — so
+        # NEVER blind-failover. This is the core of the #5 idempotency guarantee.
+        error_msg = "Timeout/write error after send"
         settlement = _SETTLEMENT_POST
     except (asyncio.TimeoutError, TimeoutError):
         # Outer guard fired mid-call — we can't prove the upstream didn't run.
