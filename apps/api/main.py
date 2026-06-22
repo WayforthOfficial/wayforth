@@ -1196,6 +1196,31 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS idx_subst_events_category
                     ON substitution_events (category, created_at DESC)
             """)
+            # 065 — A2A Agent Card signing keys (Option C: encrypted-in-DB EC P-256).
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS a2a_signing_keys (
+                    id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+                    kid                   TEXT        NOT NULL UNIQUE,
+                    alg                   TEXT        NOT NULL DEFAULT 'ES256',
+                    crv                   TEXT        NOT NULL DEFAULT 'P-256',
+                    public_jwk            JSONB       NOT NULL,
+                    encrypted_private_key TEXT        NOT NULL,
+                    key_version           INTEGER     NOT NULL DEFAULT 1,
+                    status                TEXT        NOT NULL DEFAULT 'active',
+                    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    activated_at          TIMESTAMPTZ DEFAULT NOW(),
+                    retired_at            TIMESTAMPTZ
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_a2a_signing_keys_status
+                    ON a2a_signing_keys (status, created_at DESC)
+            """)
+            # At most one active signing key at a time (enforced, not assumed).
+            await _mconn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_a2a_signing_keys_one_active
+                    ON a2a_signing_keys (status) WHERE status = 'active'
+            """)
     except Exception as e:
         logger.error("STARTUP ERROR: %s: %s", type(e).__name__, e, exc_info=True)
         logger.critical("DB pool creation or migrations failed: %s — exiting so the orchestrator can restart cleanly", e)
