@@ -135,3 +135,17 @@ def test_malformed_json_is_parse_error(client):
 def test_id_echoed_on_error(client):
     resp = _rpc(client, "message/send", rid="abc-123")
     assert resp["id"] == "abc-123"
+
+
+def test_streaming_capability_matches_implementation(client):
+    # The card must never advertise streaming while the stream method is
+    # UNSUPPORTED. Guards the PR-A gap so it can't outlive PR B silently: when
+    # streaming lands, the method stops returning UNSUPPORTED and this still holds;
+    # if someone flips the flag without implementing, this fails.
+    card = client.get("/.well-known/agent-card.json").json()
+    advertises_streaming = card["capabilities"].get("streaming", False)
+    resp = _rpc(client, "message/stream", {"message": {"role": "user", "parts": []}})
+    method_unsupported = resp.get("error", {}).get("code") == -32004
+    assert not (advertises_streaming and method_unsupported), (
+        "Agent Card advertises streaming:true but the stream method is UNSUPPORTED — "
+        "implement streaming or set streaming:false until it lands.")

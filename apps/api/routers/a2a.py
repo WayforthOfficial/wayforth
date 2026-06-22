@@ -40,6 +40,12 @@ router = APIRouter()
 _GATEWAY_BASE = os.environ.get("WAYFORTH_GATEWAY_BASE", "https://gateway.wayforth.io").rstrip("/")
 _A2A_ENDPOINT = f"{_GATEWAY_BASE}/a2a"
 
+# The card must not claim a capability the dispatcher doesn't honor. PR A
+# implements no execution method, so streaming is advertised FALSE — flipped to
+# True in PR B when the stream method lands. test_a2a_router enforces this can't
+# drift (card streaming flag ↔ actual message-stream support).
+_STREAMING_SUPPORTED = False
+
 # Wayforth's advertised skill set. Structural only (AgentSkill shape is identical
 # across A2A versions), so it carries no version-variant literal.
 _SKILLS = [
@@ -78,6 +84,7 @@ async def agent_card(db=Depends(get_db)):
         url=_A2A_ENDPOINT,
         version=_agent_version(),
         skills=_SKILLS,
+        streaming=_STREAMING_SUPPORTED,
         documentation_url=f"{_GATEWAY_BASE}/docs",
     )
     # Served from the gateway; cacheable. content-type per A2A well-known convention.
