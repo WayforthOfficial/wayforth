@@ -150,6 +150,44 @@ def test_signature_header_carries_apex_jku():
     assert header["jku"] == "https://wayforth.io/.well-known/jwks.json"
 
 
+# ── SDK-aligned canonicalization (the byte-exactness contract) ────────────────
+
+def test_canonical_strips_sdk_defaults_and_empties():
+    # The signing payload must match what the a2a-sdk verifier reconstructs:
+    # default-equal fields (protocolVersion=0.3.0, preferredTransport=JSONRPC) and
+    # empty values are removed; required content stays.
+    canon = json.loads(SIGN.canonicalize_agent_card(_card()))
+    assert "protocolVersion" not in canon       # == SDK default → stripped
+    assert "preferredTransport" not in canon     # == SDK default → stripped
+    assert "extensions" not in canon["capabilities"]   # empty [] → _clean_empty
+    assert canon["capabilities"] == {"streaming": True}
+    # Nested model default: the securityScheme `type` discriminator is stripped
+    # (the divergence the bidirectional SDK round-trip caught). Locked here so it
+    # can't regress without the SDK venv.
+    assert "type" not in canon["securitySchemes"]["wayforth-api-key"]
+    assert canon["securitySchemes"]["wayforth-api-key"] == {
+        "in": "header", "name": "X-Wayforth-API-Key"}
+    # Required, non-default content survives.
+    for k in ("name", "description", "url", "version", "skills"):
+        assert k in canon
+
+
+def test_ap2_empty_slot_carries_no_signed_meaning_until_populated():
+    # Empty AP2 slot is absent from the signed bytes; populating it changes them.
+    empty = SIGN.canonicalize_agent_card(_card())
+    assert "extensions" not in empty
+
+    populated = build_agent_card(
+        name="WF", description="d", url="https://gateway.wayforth.io/a2a",
+        version="0.9.2", skills=_SKILLS)
+    populated["capabilities"]["extensions"] = [
+        {"uri": "https://ap2.org/ext", "required": False}]
+    canon = json.loads(SIGN.canonicalize_agent_card(populated))
+    assert canon["capabilities"]["extensions"] == [
+        {"uri": "https://ap2.org/ext", "required": False}]
+    assert SIGN.canonicalize_agent_card(populated) != empty   # signed bytes change
+
+
 # ── DB lifecycle: provision / rotate / jwks invariants ────────────────────────
 
 def test_provision_is_idempotent_one_active():

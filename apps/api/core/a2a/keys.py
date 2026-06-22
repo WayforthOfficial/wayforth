@@ -27,6 +27,7 @@ import base64
 import hashlib
 import json
 
+import asyncpg
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -118,10 +119,12 @@ async def provision_signing_key(db) -> dict:
             kid, SIGNING_ALG, SIGNING_CRV, json.dumps(public_jwk), ciphertext, version,
         )
         return public_jwk
-    except Exception:
-        # Lost a provisioning race (one-active unique index rejected us). The
-        # winner's key is the truth — re-read and return it. Never silently
-        # proceed with our un-persisted private key.
+    except asyncpg.UniqueViolationError:
+        # ONLY the genuine race is swallowed: the one-active partial unique index
+        # rejected us because a concurrent provision won. Its key is the truth —
+        # re-read and return it; never proceed with our un-persisted private key.
+        # Any OTHER error (bad data, connection, encoding) propagates — masking it
+        # here would be a silent failure on a security-critical path.
         won = await db.fetchrow(
             "SELECT public_jwk FROM a2a_signing_keys WHERE status = 'active' LIMIT 1")
         if won:

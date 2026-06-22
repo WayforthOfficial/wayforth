@@ -71,7 +71,11 @@ def build_agent_card(
         "capabilities": {
             "streaming": streaming,
             # Empty AP2 slot. AgentExtension entries (uri/description/required/
-            # params) drop in here later with no card-schema change.
+            # params) drop in here later with no card-schema change. NOTE: an
+            # empty extensions[] is removed by the signing canonicalizer
+            # (_clean_empty in sign.py), so the empty slot carries NO signed
+            # meaning — the signed bytes legitimately change when AP2 populates it
+            # and the card is re-signed. See sign.py's AP2 note.
             "extensions": [],
         },
         "securitySchemes": {
@@ -144,3 +148,42 @@ def _is_jsonrpc(transport: str | None) -> bool:
         return False
     t = transport.strip().lower().replace("-", "").replace("_", "")
     return t in ("jsonrpc", "jsonrpc2", "jsonrpc20")
+
+
+# ── SDK signing-canonicalization defaults (card-structure knowledge) ──────────
+# Which card fields the a2a-sdk's exclude_defaults strips before signing. This is
+# card-structure knowledge (which fields carry model defaults), so it lives here,
+# not in sign.py — sign.py stays pure JWS/JCS mechanics. Enumerated from the SDK
+# models; the bidirectional interop check proves the set complete.
+#   • AgentCard.protocolVersion default == the version we emit (WIRE_PROTOCOL_VERSION
+#     in the v0.3.0 era) and preferredTransport default == JSONRPC.
+#   • each SecurityScheme's `type` discriminator equals its own variant default,
+#     so `type` is always stripped from a scheme entry.
+_SDK_AGENTCARD_DEFAULTS = {
+    "protocolVersion": WIRE_PROTOCOL_VERSION,
+    "preferredTransport": _TRANSPORT_JSONRPC,
+}
+_SDK_SECURITY_SCHEME_TYPE_DEFAULTS = frozenset(
+    {"apiKey", "http", "oauth2", "openIdConnect", "mutualTLS"})
+
+
+def strip_sdk_signing_defaults(card: dict) -> dict:
+    """Drop signatures + every field equal to its a2a-sdk model default (the
+    exclude_defaults half of the SDK signing canonicalization). Default knowledge
+    is nested, so it is applied by location: top-level AgentCard fields and the
+    `type` discriminator inside each securitySchemes entry. sign.py calls this,
+    then applies the structure-agnostic empty-cleaning + canonical JSON."""
+    out = {
+        k: v for k, v in card.items()
+        if k != "signatures"
+        and not (k in _SDK_AGENTCARD_DEFAULTS and v == _SDK_AGENTCARD_DEFAULTS[k])
+    }
+    schemes = out.get("securitySchemes")
+    if isinstance(schemes, dict):
+        out["securitySchemes"] = {
+            name: ({k: v for k, v in scheme.items()
+                    if not (k == "type" and v in _SDK_SECURITY_SCHEME_TYPE_DEFAULTS)}
+                   if isinstance(scheme, dict) else scheme)
+            for name, scheme in schemes.items()
+        }
+    return out
