@@ -281,7 +281,7 @@ def test_invalid_body_after_200_does_not_serve(harness):
     assert "brave" in [r[0] for r in harness["refunds"]]
 
 
-# ── 6b. pinned-model honesty (surface, don't strip/default) ───────────────────
+# ── 6b. pinned-model self-heal (curated tier-equivalent map) ──────────────────
 
 async def _run_llm(primary="groq", user_params=None, settlement=_SETTLEMENT_PRE, policy=None):
     if policy is None:
@@ -295,15 +295,56 @@ async def _run_llm(primary="groq", user_params=None, settlement=_SETTLEMENT_PRE,
     )
 
 
-def test_pinned_model_surfaces_not_substituted(harness):
+def test_pinned_model_self_heals_to_tier_equivalent(harness, monkeypatch):
+    # A pinned model WITH a curated tier-equivalent self-heals: the substitute is
+    # served with its OWN tier model (not the pinned vendor name, not its default),
+    # and the swap is surfaced honestly on the outcome.
+    harness["set_chain"]("llm-inference", ["mistral", "together"])
+    sent: dict = {}
+
+    async def capturing(slug, params, key, **kw):
+        sent[slug] = dict(params)
+        return ({"content": "hi"}, None, 5, _SETTLEMENT_PRE)
+    monkeypatch.setattr(sub, "_try_execute_managed_ex", capturing)
+
+    out = asyncio.run(_run_llm(user_params={
+        "messages": [{"role": "user", "content": "hi"}], "model": "llama-3.3-70b-versatile"}))
+    assert out.served_slug == "mistral"
+    # large-tier groq model → mistral's large-tier equivalent, recorded + actually sent.
+    assert out.substituted_model == ("llama-3.3-70b-versatile", "mistral-large-latest")
+    assert sent["mistral"]["model"] == "mistral-large-latest"
+    assert "groq" in [r[0] for r in harness["refunds"]]  # primary still refunded
+
+
+def test_pinned_model_no_equivalent_surfaces(harness):
+    # A pinned model with NO curated equivalent still surfaces a clean error — we
+    # never silently serve a guessed model.
     harness["set_chain"]("llm-inference", ["mistral", "together"])
     harness["set_exec"]({"mistral": ({"content": "hi"}, None, 5, _SETTLEMENT_PRE)})
     out = asyncio.run(_run_llm(user_params={
-        "messages": [{"role": "user", "content": "hi"}], "model": "llama-3.3-70b-versatile"}))
+        "messages": [{"role": "user", "content": "hi"}], "model": "some-unlisted-model-v9"}))
     assert out.served_slug is None
-    assert out.client_error and "model" in out.client_error  # clean, explanatory error
-    assert ("mistral", 4) not in harness["deducts"]           # substitute NOT attempted (no silent default)
-    assert "groq" in [r[0] for r in harness["refunds"]]       # primary still refunded
+    assert out.client_error and "no curated equivalent" in out.client_error
+    assert not harness["deducts"]                          # no substitute attempted
+    assert "groq" in [r[0] for r in harness["refunds"]]    # primary still refunded
+
+
+def test_pinned_model_skips_candidate_without_equivalent(harness, monkeypatch):
+    # Mixed chain: a candidate lacking a tier model for the pinned model is skipped
+    # ("no_model_equivalent"); the next candidate that HAS one serves.
+    harness["set_chain"]("llm-inference", ["perplexity", "mistral"])  # perplexity not in tier map
+    sent: dict = {}
+
+    async def capturing(slug, params, key, **kw):
+        sent[slug] = dict(params)
+        return ({"content": "hi"}, None, 5, _SETTLEMENT_PRE)
+    monkeypatch.setattr(sub, "_try_execute_managed_ex", capturing)
+
+    out = asyncio.run(_run_llm(user_params={
+        "messages": [{"role": "user", "content": "hi"}], "model": "llama-3.3-70b-versatile"}))
+    assert out.served_slug == "mistral"
+    assert "perplexity" not in sent                        # skipped, never billed
+    assert ("perplexity", "no_model_equivalent") in out.providers_tried
 
 
 def test_unpinned_llm_self_heals(harness):
@@ -311,6 +352,7 @@ def test_unpinned_llm_self_heals(harness):
     harness["set_exec"]({"mistral": ({"content": "pong"}, None, 5, _SETTLEMENT_PRE)})
     out = asyncio.run(_run_llm(user_params={"messages": [{"role": "user", "content": "hi"}]}))
     assert out.served_slug == "mistral"  # unpinned → self-heals as before
+    assert out.substituted_model is None
 
 
 # ── 7. event row emitted per hop with settlement_class ────────────────────────

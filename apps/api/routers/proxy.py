@@ -177,6 +177,7 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
     # ZERO-OVERHEAD on the happy path: the engine is only ever invoked here, inside
     # the failure branch. A successful primary skips everything below.
     _proxy_fallback_from: str | None = None
+    _proxy_substituted_model: tuple[str, str] | None = None
     _original_failure_code: str | None = None
 
     if error_msg and _classify_error(error_msg) == "service_failure":
@@ -212,6 +213,7 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
             })
         # Adopt the provider that actually served for the rest of the handler.
         _proxy_fallback_from = outcome.fallback_from
+        _proxy_substituted_model = outcome.substituted_model
         _original_failure_code = outcome.original_failure_code
         slug = outcome.served_slug
         credit_cost = outcome.cost
@@ -269,6 +271,12 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
         )
         if orig_wri is not None:
             headers["X-Wayforth-Original-WRI"] = str(orig_wri)
+    # Honest model self-heal surface: the pinned model was tier-substituted on the
+    # serving provider. Set only when an actual remap happened.
+    if _proxy_substituted_model:
+        headers["X-Wayforth-Substituted-Model"] = (
+            f"{_proxy_substituted_model[0]} -> {_proxy_substituted_model[1]}"
+        )
 
     # ── Response ──────────────────────────────────────────────────────────────
     if wayforth_wrap:
@@ -291,6 +299,10 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
             "execution_ms":     execution_ms,
             "failover":         failover_block,
         }
+        if _proxy_substituted_model:
+            body["substituted_model"] = {
+                "pinned": _proxy_substituted_model[0], "served": _proxy_substituted_model[1],
+            }
         return JSONResponse(content=body, headers=headers)
 
     return JSONResponse(content=result, headers=headers)

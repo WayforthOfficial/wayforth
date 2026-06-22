@@ -65,15 +65,64 @@ def _supports_idempotency_key(slug: str) -> bool:
     return slug in _IDEMPOTENCY_KEY_PROVIDERS
 
 
-# Provider-specific params that CANNOT carry to a different provider in the group.
-# For llm-inference, an explicitly-pinned `model` is a vendor model name that a
-# substitute cannot honor. Policy (decided): SURFACE a clean error — never strip
-# the param and never silently fall back to the substitute's default model. (A
-# curated model-equivalence map is a separate follow-up.) Unpinned calls self-heal.
+# Provider-specific params that CANNOT carry verbatim to a different provider in
+# the group. For llm-inference, an explicitly-pinned `model` is a vendor model
+# name a substitute cannot run as-is. Rather than strip it (silent wrong model)
+# or always surface (no self-heal), we resolve a curated TIER-equivalent on the
+# substitute when one exists (see _MODEL_TIER / _TIER_MODEL), and only surface
+# when no substitute has a known equivalent. Unpinned calls self-heal as before.
 def _pinned_unhonorable_param(category: str | None, user_params: dict) -> tuple[str, str] | None:
     if category == "llm-inference" and user_params.get("model"):
         return ("model", str(user_params["model"]))
     return None
+
+
+# Curated model-equivalence map (llm-inference). A pinned vendor model maps to a
+# coarse capability TIER; each provider in the group has a representative model
+# per tier. This lets a pinned-model call self-heal to a tier-equivalent model on
+# a substitute provider — surfaced honestly via X-Wayforth-Substituted-Model —
+# instead of hard-failing. A pinned model NOT in this table has no known
+# equivalent, so we still surface (never silently serve a guessed model). Keys
+# are lowercased for lookup; _TIER_MODEL values keep exact vendor casing for the
+# actual upstream call. Defaults the adapters use today live in services/managed.py.
+_MODEL_TIER: dict[str, str] = {
+    # large / ~70B-class instruct
+    "llama-3.3-70b-versatile": "large",
+    "llama-3.1-70b-versatile": "large",
+    "meta-llama/llama-3.3-70b-instruct-turbo": "large",
+    "meta-llama/llama-3.1-70b-instruct-turbo": "large",
+    "mistral-large-latest": "large",
+    "gemini-2.5-pro": "large",
+    # small / fast
+    "llama-3.1-8b-instant": "small",
+    "meta-llama/llama-3.1-8b-instruct-turbo": "small",
+    "mistral-small-latest": "small",
+    "gemini-2.5-flash": "small",
+}
+
+_TIER_MODEL: dict[str, dict[str, str]] = {
+    "large": {
+        "groq": "llama-3.3-70b-versatile",
+        "together": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "mistral": "mistral-large-latest",
+        "gemini": "gemini-2.5-pro",
+    },
+    "small": {
+        "groq": "llama-3.1-8b-instant",
+        "together": "meta-llama/Llama-3.1-8B-Instruct-Turbo",
+        "mistral": "mistral-small-latest",
+        "gemini": "gemini-2.5-flash",
+    },
+}
+
+
+def _model_equivalent_for(pinned_model: str, candidate_slug: str) -> str | None:
+    """Tier-equivalent model on candidate_slug for a pinned vendor model, or None
+    when the pinned model has no known tier or the candidate has no model in it."""
+    tier = _MODEL_TIER.get(pinned_model.strip().lower())
+    if not tier:
+        return None
+    return _TIER_MODEL.get(tier, {}).get(candidate_slug)
 
 # Per-category in-process cache of the ordered chain (TTL bounded). Keyed by
 # category; value = (expiry_monotonic, [ordered_slugs]).
@@ -118,6 +167,7 @@ class FailoverOutcome:
     execution_ms: int = 0
     retried_primary: bool = False
     client_error: str | None = None  # set when a hop failed with a non-service (bad-param) error
+    substituted_model: tuple[str, str] | None = None  # (pinned, served tier-equivalent) when remapped
     providers_tried: list[tuple[str, str]] = field(default_factory=list)
 
 
@@ -328,22 +378,27 @@ async def run_with_failover(
 
     origin_post_send = settlement == _SETTLEMENT_POST
 
-    # 3b. Pinned-param honesty: if the caller pinned a provider-specific param (an
-    #     LLM model) that NO substitute in the group can honor, surface a clean
-    #     error rather than silently serving a different model. The same-provider
-    #     retry above already covered the honorable case; a cross-provider
-    #     substitute would change the model under the caller's feet.
+    # 3b. Pinned-model handling. A caller-pinned `model` is a vendor name a
+    #     substitute cannot run verbatim. If the pinned model has a curated tier
+    #     equivalent on at least one substitute, we self-heal to that equivalent
+    #     (per-candidate remap happens in the chain loop, surfaced via
+    #     out.substituted_model). If NO substitute has a known equivalent, surface
+    #     a clean error rather than silently serving a different-tier model.
     _pinned = _pinned_unhonorable_param(category, user_params)
-    if _pinned and chain:
-        field, val = _pinned
-        out.client_error = (
-            f"primary '{primary_slug}' failed and your request pins {field}='{val}', "
-            f"which no substitute in the '{category}' group can honor. Omit '{field}' to "
-            f"self-heal across providers, or pin a model the substitute supports."
+    pinned_model = _pinned[1] if _pinned else None
+    if pinned_model and chain:
+        has_equiv = any(
+            _model_equivalent_for(pinned_model, c) for c in chain[: policy.max_depth]
         )
-        out.providers_tried.append((primary_slug, f"pinned_{field}_unhonorable"))
-        out.settlement_class, out.retried_primary = settlement, retried
-        return out
+        if not has_equiv:
+            out.client_error = (
+                f"primary '{primary_slug}' failed and your request pins model='{pinned_model}', "
+                f"which has no curated equivalent on any substitute in the '{category}' group. "
+                f"Omit 'model' to self-heal on each provider's default, or pin a model with a known equivalent."
+            )
+            out.providers_tried.append((primary_slug, "pinned_model_unhonorable"))
+            out.settlement_class, out.retried_primary = settlement, retried
+            return out
 
     # 4. Chain through the group, depth-capped.
     for candidate in chain[: policy.max_depth]:
@@ -360,10 +415,21 @@ async def run_with_failover(
         if origin_post_send and cand_cost >= policy.failover_post_send_max_cost:
             out.providers_tried.append((candidate, "over_post_send_cost_cap"))
             continue
+        # Pinned-model self-heal: resolve this candidate's curated tier-equivalent
+        # BEFORE param mapping. A candidate with no known equivalent is skipped (we
+        # never serve a guessed model under a pinned request).
+        equiv_model = None
+        if pinned_model:
+            equiv_model = _model_equivalent_for(pinned_model, candidate)
+            if not equiv_model:
+                out.providers_tried.append((candidate, "no_model_equivalent"))
+                continue
         mapped, missing = map_params(candidate, user_params)
         if missing:
             out.providers_tried.append((candidate, "missing_param"))
             continue
+        if equiv_model:
+            mapped["model"] = equiv_model
 
         ok, bal, tx_id = await check_and_deduct_credits(
             db, user_id, cand_cost, "/proxy", service_id=candidate, tx_type="execution",
@@ -390,6 +456,8 @@ async def run_with_failover(
             out.served_slug, out.result, out.cost = candidate, result, cand_cost
             out.balance_after, out.tx_id = bal, tx_id
             out.fallback_from, out.execution_ms, out.retried_primary = primary_slug, ms, retried
+            if pinned_model and mapped.get("model") and mapped["model"] != pinned_model:
+                out.substituted_model = (pinned_model, mapped["model"])
             return out
 
         # Hop failed → refund it (per-hop idempotency key) and continue.
