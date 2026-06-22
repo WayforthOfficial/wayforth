@@ -1669,6 +1669,7 @@ from routers.mfa import router as mfa_router
 from routers.proxy import router as proxy_router
 from routers.cloud import router as cloud_router
 from routers.templates import router as templates_router
+from routers.a2a import router as a2a_router
 
 app.include_router(search.router)
 app.include_router(execute.router)
@@ -1685,6 +1686,7 @@ app.include_router(llm.router)
 app.include_router(proxy_router)
 app.include_router(cloud_router)
 app.include_router(templates_router)
+app.include_router(a2a_router)
 
 
 # ── OpenAPI customisation (security scheme + description) ─────────────────────
