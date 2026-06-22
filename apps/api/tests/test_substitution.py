@@ -281,6 +281,38 @@ def test_invalid_body_after_200_does_not_serve(harness):
     assert "brave" in [r[0] for r in harness["refunds"]]
 
 
+# ── 6b. pinned-model honesty (surface, don't strip/default) ───────────────────
+
+async def _run_llm(primary="groq", user_params=None, settlement=_SETTLEMENT_PRE, policy=None):
+    if policy is None:
+        policy = FailoverPolicy(retry_primary_on_transient=False)
+    return await run_with_failover(
+        db=None, pool=None, request_id="r", user_id="u", api_key_id="k", agent_id=None,
+        primary_slug=primary, user_params=user_params or {"messages": [{"role": "user", "content": "hi"}]},
+        primary_error="Service timeout", primary_settlement=settlement,
+        primary_cost=3, primary_balance_after=997, primary_tx_id="tx", primary_svc_key="K",
+        rail="managed", policy=policy,
+    )
+
+
+def test_pinned_model_surfaces_not_substituted(harness):
+    harness["set_chain"]("llm-inference", ["mistral", "together"])
+    harness["set_exec"]({"mistral": ({"content": "hi"}, None, 5, _SETTLEMENT_PRE)})
+    out = asyncio.run(_run_llm(user_params={
+        "messages": [{"role": "user", "content": "hi"}], "model": "llama-3.3-70b-versatile"}))
+    assert out.served_slug is None
+    assert out.client_error and "model" in out.client_error  # clean, explanatory error
+    assert ("mistral", 4) not in harness["deducts"]           # substitute NOT attempted (no silent default)
+    assert "groq" in [r[0] for r in harness["refunds"]]       # primary still refunded
+
+
+def test_unpinned_llm_self_heals(harness):
+    harness["set_chain"]("llm-inference", ["mistral"])
+    harness["set_exec"]({"mistral": ({"content": "pong"}, None, 5, _SETTLEMENT_PRE)})
+    out = asyncio.run(_run_llm(user_params={"messages": [{"role": "user", "content": "hi"}]}))
+    assert out.served_slug == "mistral"  # unpinned → self-heals as before
+
+
 # ── 7. event row emitted per hop with settlement_class ────────────────────────
 
 def test_events_emitted_per_hop(harness):

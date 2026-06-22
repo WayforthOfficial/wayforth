@@ -64,6 +64,17 @@ _IDEMPOTENCY_KEY_PROVIDERS: frozenset[str] = frozenset()
 def _supports_idempotency_key(slug: str) -> bool:
     return slug in _IDEMPOTENCY_KEY_PROVIDERS
 
+
+# Provider-specific params that CANNOT carry to a different provider in the group.
+# For llm-inference, an explicitly-pinned `model` is a vendor model name that a
+# substitute cannot honor. Policy (decided): SURFACE a clean error — never strip
+# the param and never silently fall back to the substitute's default model. (A
+# curated model-equivalence map is a separate follow-up.) Unpinned calls self-heal.
+def _pinned_unhonorable_param(category: str | None, user_params: dict) -> tuple[str, str] | None:
+    if category == "llm-inference" and user_params.get("model"):
+        return ("model", str(user_params["model"]))
+    return None
+
 # Per-category in-process cache of the ordered chain (TTL bounded). Keyed by
 # category; value = (expiry_monotonic, [ordered_slugs]).
 _CHAIN_CACHE: dict[str, tuple[float, list[str]]] = {}
@@ -316,6 +327,23 @@ async def run_with_failover(
     out.balance_after = new_bal if new_bal is not None else primary_balance_after
 
     origin_post_send = settlement == _SETTLEMENT_POST
+
+    # 3b. Pinned-param honesty: if the caller pinned a provider-specific param (an
+    #     LLM model) that NO substitute in the group can honor, surface a clean
+    #     error rather than silently serving a different model. The same-provider
+    #     retry above already covered the honorable case; a cross-provider
+    #     substitute would change the model under the caller's feet.
+    _pinned = _pinned_unhonorable_param(category, user_params)
+    if _pinned and chain:
+        field, val = _pinned
+        out.client_error = (
+            f"primary '{primary_slug}' failed and your request pins {field}='{val}', "
+            f"which no substitute in the '{category}' group can honor. Omit '{field}' to "
+            f"self-heal across providers, or pin a model the substitute supports."
+        )
+        out.providers_tried.append((primary_slug, f"pinned_{field}_unhonorable"))
+        out.settlement_class, out.retried_primary = settlement, retried
+        return out
 
     # 4. Chain through the group, depth-capped.
     for candidate in chain[: policy.max_depth]:
