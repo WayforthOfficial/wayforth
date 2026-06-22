@@ -1332,6 +1332,14 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Live Pioneer reserve pool balance — the SAME value /billing/balance returns
+    # (user_credits.pioneer_credits_balance). The dashboard's pioneer reserve bar
+    # reads this; without it the bar got `undefined` and rendered the empty state.
+    pioneer_credits_remaining = await db.fetchval(
+        "SELECT COALESCE(pioneer_credits_balance, 0) FROM user_credits WHERE user_id = $1::uuid",
+        user_id,
+    ) or 0
+
     # Count pioneer-routed searches and sum monthly drip credits.
     pioneer_calls_made = 0
     pioneer_calls_this_month = 0
@@ -1408,6 +1416,9 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
         "opted_in_at":                           user["pioneer_opted_in_at"].isoformat() if user["pioneer_opted_in_at"] else None,
         "opted_out_at":                          user["pioneer_opt_out_at"].isoformat() if user["pioneer_opt_out_at"] else None,
         "daily_credits":                         _PIONEER_DAILY_CREDITS.get(tier, 0),
+        # Live reserve pool balance — what the dashboard's reserve bar renders.
+        # Same value as /billing/balance pioneer_credits_remaining.
+        "pioneer_credits_remaining":             int(pioneer_credits_remaining),
         "tier":                                  tier,
         "last_drip_date":                        user["pioneer_last_drip_date"].isoformat() if user["pioneer_last_drip_date"] else None,
         "cooldown_until":                        cooldown_until.isoformat() if cooldown_active else None,
