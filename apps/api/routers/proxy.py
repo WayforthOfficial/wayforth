@@ -54,9 +54,10 @@ from routers.execute import (
     _fetch_wri,
     _mk_refund_key,
     _patch_tx_signals,
-    _try_execute_managed,
+    _try_execute_managed_ex,
     _update_search_signal,
 )
+from core.substitution import run_with_failover
 
 logger = logging.getLogger("wayforth")
 router = APIRouter()
@@ -166,69 +167,58 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
         })
 
     # ── Primary execution ─────────────────────────────────────────────────────
-    result, error_msg, execution_ms = await _try_execute_managed(slug, params, svc_key)
+    # _ex variant also yields the settlement_class (pre_send vs post_send_ambiguous)
+    # the failover engine needs for the idempotency gate.
+    result, error_msg, execution_ms, _primary_settlement = await _try_execute_managed_ex(
+        slug, params, svc_key
+    )
 
-    # ── Failover on service-side failures ────────────────────────────────────
+    # ── Failover on service-side failures (delegated to the substitution engine) ──
+    # ZERO-OVERHEAD on the happy path: the engine is only ever invoked here, inside
+    # the failure branch. A successful primary skips everything below.
     _proxy_fallback_from: str | None = None
     _original_failure_code: str | None = None
 
     if error_msg and _classify_error(error_msg) == "service_failure":
-        _original_failure_code = _classify_failure(None, error_msg)
-        new_bal = await _do_refund(
-            db, user_id, credit_cost, slug, error_msg, "/proxy", balance_after,
-            _mk_refund_key(getattr(request.state, "request_id", ""), slug, "proxy_managed"),
+        from main import app as _app_ref
+        outcome = await run_with_failover(
+            db, pool=_app_ref.state.pool,
+            request_id=getattr(request.state, "request_id", ""),
+            user_id=str(user_id), api_key_id=str(_api_key_id), agent_id=agent_id,
+            primary_slug=slug, user_params=_user_params,
+            primary_error=error_msg, primary_settlement=_primary_settlement,
+            primary_cost=credit_cost, primary_balance_after=balance_after,
+            primary_tx_id=_tx_id, primary_svc_key=svc_key,
+            rail="managed",
         )
-
-        _fb_slug = SERVICE_ALTERNATIVES.get(slug)
-        if _fb_slug and _fb_slug in SERVICE_CONFIGS:
-            _fb_cfg = SERVICE_CONFIGS[_fb_slug]
-            _fb_key = os.environ.get(_fb_cfg["key_var"], "")
-            if _fb_key:
-                _fb_mapped, _fb_miss = map_params(_fb_slug, _user_params)
-                if not _fb_miss:
-                    _fb_cost = _fb_cfg["credits"]
-                    _fb_ok, _fb_bal, _fb_tx_id = await check_and_deduct_credits(
-                        db, str(user_id), _fb_cost, "/proxy",
-                        service_id=_fb_slug, tx_type="execution",
-                        agent_id=agent_id, api_key_id=str(_api_key_id),
-                        return_tx_id=True,
-                    )
-                    if _fb_ok:
-                        result, _fb_err, execution_ms = await _try_execute_managed(
-                            _fb_slug, _fb_mapped, _fb_key,
-                        )
-                        if _fb_err and _classify_error(_fb_err) == "service_failure":
-                            await _do_refund(
-                                db, user_id, _fb_cost, _fb_slug, _fb_err, "/proxy", _fb_bal,
-                                _mk_refund_key(
-                                    getattr(request.state, "request_id", ""),
-                                    _fb_slug, "proxy_managed_fb",
-                                ),
-                            )
-                            result = None
-                        elif _fb_err:
-                            raise HTTPException(status_code=400, detail={
-                                "error": _fb_err, "refunded": False, "credits_restored": 0,
-                            })
-                        else:
-                            _proxy_fallback_from = slug
-                            slug = _fb_slug
-                            credit_cost = _fb_cost
-                            balance_after = _fb_bal
-                            _tx_id = _fb_tx_id
-
-        if result is None:
-            from main import app as _app_ref
+        if outcome.client_error:
+            raise HTTPException(status_code=400, detail={
+                "error": outcome.client_error, "refunded": True, "credits_restored": credit_cost,
+            })
+        if outcome.served_slug is None:
+            # Group exhausted (or post-send-ambiguous and not eligible to fail over).
             asyncio.create_task(_patch_tx_signals(
-                _app_ref.state.pool, _tx_id,
-                failure_code=_original_failure_code,
+                _app_ref.state.pool, _tx_id, failure_code=outcome.original_failure_code,
             ))
-            raise HTTPException(status_code=503, detail={
-                "error": "Service unavailable",
+            raise HTTPException(status_code=502, detail={
+                "error": "all_providers_failed",
+                "category": outcome.category,
+                "providers_tried": [
+                    {"provider": s, "reason": r} for s, r in outcome.providers_tried
+                ],
                 "refunded": True,
                 "credits_restored": credit_cost,
-                "credits_remaining": new_bal,
+                "credits_remaining": outcome.balance_after,
             })
+        # Adopt the provider that actually served for the rest of the handler.
+        _proxy_fallback_from = outcome.fallback_from
+        _original_failure_code = outcome.original_failure_code
+        slug = outcome.served_slug
+        credit_cost = outcome.cost
+        balance_after = outcome.balance_after
+        _tx_id = outcome.tx_id
+        result = outcome.result
+        execution_ms = outcome.execution_ms
 
     elif error_msg:
         raise HTTPException(status_code=400, detail={
@@ -260,6 +250,11 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
     wri = await _fetch_wri(db, slug)
     headers: dict[str, str] = {
         "X-Wayforth-Failover":          "true" if _proxy_fallback_from else "false",
+        # Visible self-heal surface: which provider actually served, and whether
+        # it came via fallback. X-Wayforth-Fallback mirrors -Failover under the
+        # name the spec calls out; both kept for back-compat.
+        "X-Wayforth-Served-By":         slug,
+        "X-Wayforth-Fallback":          "true" if _proxy_fallback_from else "false",
         "X-Wayforth-WRI":               str(wri) if wri is not None else "unknown",
         "X-Wayforth-Cost":              str(credit_cost),
         "X-Wayforth-Rail":              "managed",
@@ -289,6 +284,8 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
         body = {
             "status":           "ok",
             "service":          slug,
+            "served_by":        slug,
+            "fallback":         bool(_proxy_fallback_from),
             "result":           result,
             "credits_deducted": credit_cost,
             "execution_ms":     execution_ms,

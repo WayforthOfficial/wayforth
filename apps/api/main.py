@@ -23,7 +23,7 @@ load_dotenv()
 
 # ── Version and globals ───────────────────────────────────────────────────────
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -1143,6 +1143,58 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS idx_hosted_agents_next_run
                     ON hosted_agents(next_run_at)
                     WHERE trigger_type = 'schedule' AND next_run_at IS NOT NULL
+            """)
+            # Migration 064: substitution/failover engine — groups + event log.
+            # Mirrored in infra/migrations/064_substitution_engine.sql.
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS substitution_groups (
+                    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+                    category      TEXT        NOT NULL,
+                    service_slug  TEXT        NOT NULL,
+                    manual_rank   INTEGER,
+                    active        BOOLEAN     NOT NULL DEFAULT TRUE,
+                    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (category, service_slug)
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_subst_groups_category
+                    ON substitution_groups (category) WHERE active = TRUE
+            """)
+            await _mconn.execute("""
+                INSERT INTO substitution_groups (category, service_slug, manual_rank) VALUES
+                    ('web-search','serper',1),('web-search','brave',2),
+                    ('web-search','tavily',3),('web-search','perplexity',4),
+                    ('llm-inference','groq',1),('llm-inference','together',2),
+                    ('llm-inference','mistral',3),('llm-inference','gemini',4)
+                ON CONFLICT (category, service_slug) DO NOTHING
+            """)
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS substitution_events (
+                    id                                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+                    slug                              TEXT        NOT NULL,
+                    category                          TEXT,
+                    primary_provider                  TEXT        NOT NULL,
+                    failure_reason                    TEXT,
+                    substitute_chosen                 TEXT,
+                    latency_ms                        INTEGER,
+                    success                           BOOLEAN     NOT NULL DEFAULT FALSE,
+                    cost_credits                      INTEGER,
+                    settlement_class                  TEXT        NOT NULL,
+                    rail                              TEXT        NOT NULL DEFAULT 'managed',
+                    duplicate_upstream_cost_possible  BOOLEAN     NOT NULL DEFAULT FALSE,
+                    second_upstream_cost_credits      INTEGER,
+                    retried_primary                   BOOLEAN     NOT NULL DEFAULT FALSE,
+                    created_at                        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_subst_events_primary
+                    ON substitution_events (primary_provider, created_at DESC)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_subst_events_category
+                    ON substitution_events (category, created_at DESC)
             """)
     except Exception as e:
         logger.error("STARTUP ERROR: %s: %s", type(e).__name__, e, exc_info=True)
