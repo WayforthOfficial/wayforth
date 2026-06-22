@@ -195,12 +195,10 @@ def test_task_status_serializes_state():
     assert st == {"state": "completed", "timestamp": "2026-06-22T00:00:00Z"}
 
 
-# ── 8. THE LEAK GUARD: no wire string lives outside serializer.py ─────────────
+# ── 8. THE LEAK GUARD: every version-variant literal has exactly ONE authority ─
 
-# Every wire literal the seam owns. If any appears in a sibling a2a module
-# (card builder, router, client, keys) the abstraction has leaked and the
-# single-layer flip property is broken. This is the architectural guarantee.
-_FORBIDDEN_WIRE_LITERALS = [
+# Message *vocabulary* — methods/roles/states. Authority: serializer.py.
+_MESSAGE_WIRE_LITERALS = [
     # v0.3.0 methods
     "message/send", "message/stream", "tasks/get", "tasks/cancel", "tasks/resubscribe",
     "tasks/pushNotificationConfig/", "agent/getAuthenticatedExtendedCard",
@@ -211,25 +209,53 @@ _FORBIDDEN_WIRE_LITERALS = [
     "ROLE_USER", "ROLE_AGENT", "TASK_STATE_",
 ]
 
+# Agent Card *structure* — the field names that differ across versions.
+# Authority: card.py. A v1.0 card-shape flip must be just as isolated as the
+# message wire, so the structural variants are guarded the same way.
+_CARD_SHAPE_LITERALS = [
+    "supportedInterfaces",   # v1.0
+    "additionalInterfaces",  # v0.3.0
+    "preferredTransport",    # v0.3.0
+    "protocolBinding",       # v1.0 interface field
+]
 
-def _a2a_source_files_except_serializer() -> list[pathlib.Path]:
+# The advertised version string itself — must never be hardcoded; everyone
+# imports WIRE_PROTOCOL_VERSION. Authority: serializer.py (its single definition).
+# Quoted forms only, so prose like "v0.3.0" in a docstring doesn't trip it.
+_VERSION_STRING_LITERALS = ['"0.3.0"', "'0.3.0'"]
+
+# Per-file authority: a literal may appear ONLY in its authority module; anywhere
+# else under core/a2a/ (or routers/a2a.py) is a leak.
+_AUTHORITY: dict[str, list[str]] = {
+    "serializer.py": _MESSAGE_WIRE_LITERALS + _VERSION_STRING_LITERALS,
+    "card.py": _CARD_SHAPE_LITERALS,
+}
+
+_ALL_GUARDED_LITERALS = (
+    _MESSAGE_WIRE_LITERALS + _CARD_SHAPE_LITERALS + _VERSION_STRING_LITERALS
+)
+
+
+def _a2a_source_files() -> list[pathlib.Path]:
     api_root = pathlib.Path(__file__).resolve().parent.parent
     files = list((api_root / "core" / "a2a").glob("*.py"))
     router = api_root / "routers" / "a2a.py"
     if router.exists():
         files.append(router)
-    return [f for f in files if f.name != "serializer.py"]
+    return files
 
 
 def test_no_wire_string_leak():
     offenders: list[str] = []
-    for path in _a2a_source_files_except_serializer():
+    for path in _a2a_source_files():
+        allowed = set(_AUTHORITY.get(path.name, []))
         text = path.read_text()
-        for literal in _FORBIDDEN_WIRE_LITERALS:
-            if literal in text:
+        for literal in _ALL_GUARDED_LITERALS:
+            if literal in text and literal not in allowed:
                 offenders.append(f"{path.name}: {literal!r}")
     assert not offenders, (
-        "A2A wire string leaked outside core/a2a/serializer.py — the version seam is "
-        "broken; route it through serializer.Method/Role/TaskState instead:\n  "
+        "A2A version-variant literal leaked outside its authority module — the seam "
+        "is broken. Route message vocabulary through serializer.py and card structure "
+        "through card.py; import WIRE_PROTOCOL_VERSION, never hardcode it:\n  "
         + "\n  ".join(offenders)
     )
