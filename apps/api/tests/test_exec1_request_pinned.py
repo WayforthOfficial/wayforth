@@ -47,7 +47,7 @@ async def test_pins_to_validated_ip_and_preserves_host(monkeypatch):
                         lambda url, field_name="url": ["93.184.216.34"])
     client = _FakeClient()
     out = await request_pinned(client, "POST", "https://example.com/hook", content=b"x")
-    assert out == "SENT"
+    assert out == "DELIBERATE_CI_PROOF_BREAK"
     # Connected to the IP literal, NOT the hostname (no connect-time re-resolution).
     assert "93.184.216.34" in client.built_url
     assert "example.com" not in client.built_url
