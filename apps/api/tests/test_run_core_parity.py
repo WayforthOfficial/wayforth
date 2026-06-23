@@ -47,6 +47,7 @@ class _RunDB:
     """Answers run_endpoint's queries deterministically from a candidate list."""
     def __init__(self, candidates):
         self._candidates = candidates
+        self.stream_refunds: list = []   # streaming refunds (direct user_credits UPDATE)
 
     async def fetch(self, q, *a):
         if "FROM services" in q and "ORDER BY coverage_tier" in q:
@@ -56,6 +57,9 @@ class _RunDB:
         return []
 
     async def fetchrow(self, q, *a):
+        if "UPDATE user_credits" in q:                    # streaming refund path
+            self.stream_refunds.append(a[0])             # credit_cost restored
+            return {"credits_balance": 1000}
         if "service_health" in q:
             return None                                   # skip WRI-health adjust
         if "FROM services" in q:                          # best-service hint
@@ -85,13 +89,12 @@ def _candidate(slug, category="inference", wri=80.0):
 
 # ── harness ───────────────────────────────────────────────────────────────────
 
-def run_once(monkeypatch, *, candidates, exec_script, body=None,
-             auth_raises=None, deduct_ok=True):
-    """Invoke run_endpoint with all external effects mocked. Returns
-    (result_or_exception, deducts, refunds). exec_script: slug -> (result, err, ms)."""
+def _install_mocks(monkeypatch, *, exec_script, auth_raises, deduct_ok):
+    """Stub every external effect run_endpoint touches. Returns (deducts, refunds)."""
     monkeypatch.setenv("GROQ_API_KEY", "K")
     monkeypatch.setenv("TOGETHER_API_KEY", "K")
     monkeypatch.setenv("MISTRAL_API_KEY", "K")
+    monkeypatch.setenv("SERPER_API_KEY", "K")
 
     deducts: list = []
     refunds: list = []
@@ -146,17 +149,45 @@ def run_once(monkeypatch, *, candidates, exec_script, body=None,
     from main import app
     if not hasattr(app.state, "pool"):
         app.state.pool = object()
+    return deducts, refunds
 
+
+def run_once(monkeypatch, *, candidates, exec_script, body=None,
+             auth_raises=None, deduct_ok=True):
+    """Invoke run_endpoint (non-streaming) with all effects mocked. Returns
+    (result_or_exception, deducts, refunds). exec_script: slug -> (result, err, ms)."""
+    deducts, refunds = _install_mocks(
+        monkeypatch, exec_script=exec_script, auth_raises=auth_raises, deduct_ok=deduct_ok)
     req = _FakeReq(body or {"intent": "chat hello", "input": {"messages": [{"role": "user", "content": "hi"}]}})
     resp = _FakeResp()
-    # bust the in-process run cache between cases
-    ex._RUN_CACHE.clear() if hasattr(ex, "_RUN_CACHE") else None
-
+    ex._RUN_CACHE.clear()   # bust the in-process run cache between cases
     try:
         result = asyncio.run(run_endpoint(req, resp, _RunDB(candidates)))
         return result, deducts, refunds
     except HTTPException as e:
         return e, deducts, refunds
+
+
+def run_stream(monkeypatch, *, candidates, body=None):
+    """Invoke run_endpoint with stream=True. Mocks _run_sse_stream and captures
+    the streaming refund (a direct user_credits UPDATE, not _do_refund). Returns
+    (result, deducts, refunds, stream_refunds)."""
+    deducts, refunds = _install_mocks(
+        monkeypatch, exec_script={}, auth_raises=None, deduct_ok=True)
+
+    async def fake_sse(*a, **k):
+        yield b"data: {}\n\n"
+    monkeypatch.setattr(ex, "_run_sse_stream", fake_sse)
+    monkeypatch.setattr(ex, "_active_streams", {})   # fresh per case
+
+    db = _RunDB(candidates)
+    req = _FakeReq({**(body or {"intent": "chat hello",
+                                "input": {"messages": [{"role": "user", "content": "hi"}]}}),
+                    "stream": True})
+    resp = _FakeResp()
+    ex._RUN_CACHE.clear()
+    result = asyncio.run(run_endpoint(req, resp, db))
+    return result, deducts, refunds, db.stream_refunds
 
 
 # ── cases ─────────────────────────────────────────────────────────────────────
@@ -239,3 +270,27 @@ def test_failover_refunds_primary_charges_substitute(monkeypatch):
     # Ledger: groq deducted then refunded (nets zero); together deducted, not refunded.
     assert ("groq", 3) in deducts and ("together", 4) in deducts
     assert refunds == [("groq", 3)]
+
+
+# ── streaming smoke (the one unguarded billing path, before the cut) ──────────
+
+def test_streaming_happy_deducts_once_no_refund(monkeypatch):
+    from starlette.responses import StreamingResponse
+    result, deducts, refunds, stream_refunds = run_stream(
+        monkeypatch, candidates=[_candidate("groq")])
+    assert isinstance(result, StreamingResponse)   # opened the SSE stream
+    assert deducts == [("groq", 3)]                # charged once up front
+    assert refunds == [] and stream_refunds == []  # no refund at handler level
+
+
+def test_streaming_unsupported_slug_deducts_then_refunds(monkeypatch):
+    # stream=True but the selected service can't stream → 400 + the deposit is
+    # refunded via the direct user_credits UPDATE (not _do_refund).
+    from starlette.responses import JSONResponse
+    result, deducts, refunds, stream_refunds = run_stream(
+        monkeypatch, candidates=[_candidate("serper", category="search")],
+        body={"intent": "search the web", "input": {"query": "hi"}})
+    assert isinstance(result, JSONResponse) and result.status_code == 400
+    assert deducts == [("serper", 3)]   # charged, then…
+    assert stream_refunds == [3]        # …fully refunded via user_credits UPDATE
+    assert refunds == []                # not the _do_refund path
