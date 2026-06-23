@@ -23,6 +23,37 @@ export interface SearchResponse {
   results: SearchResult[];
 }
 
+export interface ComparedService {
+  slug: string;
+  name: string;
+  category: string;
+  wri_score: number | null;
+  total_signals: number;
+  payment_rate: number | null;
+  cost_per_call_usd: number | null;
+  managed: boolean;
+  zero_setup: boolean;
+  avg_response_ms: number | null;
+  x402_supported: boolean;
+  relevance_score: number;
+}
+
+/** Response of GET /compare. */
+export interface CompareResponse {
+  query: string | null;
+  compared_at: string;
+  services: ComparedService[];
+  recommendation: { slug: string; reason: string };
+  comparison_matrix: {
+    fastest: string | null;
+    cheapest: string | null;
+    most_signals: string | null;
+    best_wri: string | null;
+    x402_native: string | null;
+  };
+  not_found?: string[];
+}
+
 export interface HealthResponse {
   status: string;
   service: string;

@@ -8,6 +8,7 @@ import { fetchWithRetry } from "./retry";
 import type {
   AgentIdentity,
   BalanceResult,
+  CompareResponse,
   ExecuteResult,
   HealthResponse,
   RunResult,
@@ -20,6 +21,7 @@ import type {
 } from "./types";
 
 const DEFAULT_BASE_URL = "https://gateway.wayforth.io";
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 async function raiseForStatus(res: Response): Promise<void> {
   if (res.status < 400) return;
@@ -52,13 +54,37 @@ async function raiseForStatus(res: Response): Promise<void> {
 export class WayforthClient {
   private baseUrl: string;
   private headers: Record<string, string>;
+  private timeoutMs: number;
 
-  constructor(apiKey: string, baseUrl: string = DEFAULT_BASE_URL) {
+  constructor(
+    apiKey: string,
+    baseUrl: string = DEFAULT_BASE_URL,
+    timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.timeoutMs = timeoutMs;
     this.headers = {
       "x-wayforth-api-key": apiKey,
       "Content-Type": "application/json",
     };
+  }
+
+  // Wrap a request with a client-side timeout. An aborted request surfaces as
+  // ServiceUnavailableError (the typed hierarchy), not a raw AbortError — the
+  // backoff retries in fetchWithRetry run inside this single time budget.
+  private async _fetch(url: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      return await fetchWithRetry(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new ServiceUnavailableError(`Request timed out after ${this.timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
@@ -68,13 +94,13 @@ export class WayforthClient {
         if (v !== undefined) url.searchParams.set(k, String(v));
       });
     }
-    const res = await fetchWithRetry(url.toString(), { headers: this.headers });
+    const res = await this._fetch(url.toString(), { headers: this.headers });
     await raiseForStatus(res);
     return res.json() as Promise<T>;
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetchWithRetry(`${this.baseUrl}${path}`, {
+    const res = await this._fetch(`${this.baseUrl}${path}`, {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify(body),
@@ -116,6 +142,12 @@ export class WayforthClient {
 
   async getSimilar(serviceId: string, limit = 5): Promise<SimilarResponse> {
     return this.get<SimilarResponse>(`/services/similar/${serviceId}`, { limit });
+  }
+
+  /** Compare 2–5 services side by side (WRI, cost, signals, response time) with a
+   *  recommendation. Maps to GET /compare?slugs=a,b. */
+  async compare(...slugs: string[]): Promise<CompareResponse> {
+    return this.get<CompareResponse>("/compare", { slugs: slugs.join(",") });
   }
 
   async getTiers(): Promise<TiersResponse> {
