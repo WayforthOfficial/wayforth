@@ -1221,6 +1221,36 @@ async def lifespan(app: FastAPI):
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_a2a_signing_keys_one_active
                     ON a2a_signing_keys (status) WHERE status = 'active'
             """)
+
+            # 066 — Loop-aware spend budgets. Mirrored in
+            # infra/migrations/066_run_budgets.sql. spent is ALWAYS ledger-derived
+            # (SUM over credit_transactions.run_id); run_budgets only stores the
+            # ceiling. NULL run_id = unbudgeted (today's behavior, unchanged).
+            await _mconn.execute("""
+                ALTER TABLE credit_transactions
+                    ADD COLUMN IF NOT EXISTS run_id UUID
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS credit_transactions_run_id_idx
+                    ON credit_transactions (run_id, user_id) WHERE run_id IS NOT NULL
+            """)
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS run_budgets (
+                    run_id       UUID        PRIMARY KEY,
+                    user_id      UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    ceiling      INTEGER     NOT NULL CHECK (ceiling > 0),
+                    soft_cap     BOOLEAN     NOT NULL DEFAULT FALSE,
+                    max_overage  INTEGER     NOT NULL DEFAULT 0 CHECK (max_overage >= 0),
+                    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT run_budget_overage_consistent CHECK (
+                        (soft_cap AND max_overage > 0) OR (NOT soft_cap AND max_overage = 0)
+                    )
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS run_budgets_user_idx ON run_budgets (user_id)
+            """)
     except Exception as e:
         logger.error("STARTUP ERROR: %s: %s", type(e).__name__, e, exc_info=True)
         logger.critical("DB pool creation or migrations failed: %s — exiting so the orchestrator can restart cleanly", e)

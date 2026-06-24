@@ -21,10 +21,13 @@ from pydantic import BaseModel, Field
 from core.auth import _resolve_user, _validate_agent_id, decrypt_api_key, encrypt_api_key
 from core.credits import (
     CREDITS_PER_CALL,
+    BudgetExhaustedError,
     _check_spend_anomaly,
     _increment_calls,
     _maybe_dispatch_credits_low,
     check_and_deduct_credits,
+    check_run_budget,
+    run_budget_spent,
     ROUTING_FEE,
 )
 from core.db import get_db
@@ -1999,14 +2002,20 @@ async def _run_core(
     api_key_header: str,
     request_id: str,
     pool,
+    run_id=None,
 ) -> dict:
-    """The /run non-streaming money path: select → deduct → execute (+ inline 2-retry
-    failover) → signals → result.
+    """The /run non-streaming money path: select → budget-gate → deduct → execute
+    (+ inline 2-retry failover) → signals → result.
 
     The SINGLE billing path shared by POST /run (non-streaming) and A2A message/send
     — there is no second money path. Returns the result dict; the CALLER owns the
     result cache and the X-Wayforth-Cache header. Raises 402/422/400/503 exactly as
     the original endpoint did. No streaming deduct/refund lives here.
+
+    When run_id names a budgeted run, check_run_budget gates the call BEFORE any
+    deduct (hard stop, or soft-cap with a flagged crossing) and the result carries a
+    `budget` snapshot. When run_id is unset or unbudgeted, the gate no-ops and the
+    path is byte-identical to before.
     """
     sel = await _run_select(db, intent, input, prefs)
     selected_slug = sel.selected_slug
@@ -2041,11 +2050,17 @@ async def _run_core(
         _fc_cost = 100 if (_fc_ms == "stability" and _fc_mapped.get("quality") == "ultra") else _fc_cfg["credits"]
         _run_fallback_candidates.append((_fc_ms, _fc_svc, _fc_mapped, _fc_cost, _fc_key))
 
+    # Pre-spend budget gate (loop-aware). No-op for unbudgeted runs; for a budgeted
+    # run it refuses — before any deduct/execute — the call that would exceed the
+    # ceiling (hard stop) or the ceiling+max_overage (soft cap). Raises a typed
+    # BudgetExhaustedError (402 → A2A -32010). Checked once against this call's cost.
+    _budget = await check_run_budget(db, run_id, user_id, credit_cost)
+
     success, balance_after, _run_tx_id = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/run",
         service_id=selected_slug, tx_type="execution",
         agent_id=agent_id, api_key_id=str(api_key_id),
-        return_tx_id=True,
+        return_tx_id=True, run_id=run_id,
     )
     if not success:
         raise HTTPException(status_code=402, detail={
@@ -2076,6 +2091,7 @@ async def _run_core(
                 db, str(user_id), _fc_cost, "/run",
                 service_id=_fc_slug, tx_type="execution",
                 agent_id=agent_id, api_key_id=str(api_key_id),
+                run_id=run_id,
             )
             if not _fc_ok:
                 continue
@@ -2168,6 +2184,19 @@ async def _run_core(
     else:
         _run_result["failover"] = {"triggered": False}
 
+    # Budgeted runs carry a live snapshot (ledger-derived spent, post-charge). Absent
+    # for unbudgeted calls, so their result dict is byte-identical to before.
+    if _budget is not None:
+        _spent_after = await run_budget_spent(db, run_id, user_id)
+        _run_result["budget"] = {
+            "run_id":        _budget["run_id"],
+            "ceiling":       _budget["ceiling"],
+            "spent":         _spent_after,
+            "remaining":     max(0, _budget["ceiling"] - _spent_after),
+            "soft_cap":      _budget["soft_cap"],
+            "over_soft_cap": _budget["over_soft_cap"],
+        }
+
     _run_model = mapped_params.get("model") if selected_slug in _LLM_SLUGS else None
     asyncio.create_task(_patch_tx_signals(
         pool, _run_tx_id,
@@ -2217,6 +2246,7 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
     agent_id = _validate_agent_id(body.get("agent_id"))
     input_dict = body.get("input") or {}
     prefs = body.get("preferences") or {}
+    run_id = body.get("run_id")   # optional loop budget id; None → unbudgeted (as today)
 
     from main import app
 
@@ -2229,11 +2259,15 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
         credit_cost = sel.credit_cost
         svc_key = sel.svc_key
 
+        # Pre-spend budget gate — the streaming path has its OWN deduct, so the same
+        # ceiling is enforced here (one rule, one helper) before any byte is sent.
+        await check_run_budget(db, run_id, user_id, credit_cost)
+
         success, balance_after, _run_tx_id = await check_and_deduct_credits(
             db, str(user_id), credit_cost, "/run",
             service_id=selected_slug, tx_type="execution",
             agent_id=agent_id, api_key_id=str(_api_key_id),
-            return_tx_id=True,
+            return_tx_id=True, run_id=run_id,
         )
         if not success:
             raise HTTPException(status_code=402, detail={
@@ -2316,10 +2350,107 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
         api_key_header=api_key_header,
         request_id=getattr(request.state, "request_id", ""),
         pool=app.state.pool,
+        run_id=run_id,
     )
     response.headers["X-Wayforth-Cache"] = "miss"
     _run_cache_set(_cache_key, _run_result)
     return _run_result
+
+
+# ── /run/budgets — attach a credit ceiling to a logical run (a loop) ───────────
+
+def _validate_run_budget_body(body: dict) -> tuple[int, bool, int]:
+    """Validate ceiling/soft_cap/max_overage against the same invariant the table's
+    CHECK enforces (no uncapped mode). Raises HTTPException(400) on violation."""
+    ceiling = body.get("ceiling")
+    if not isinstance(ceiling, int) or isinstance(ceiling, bool) or ceiling <= 0:
+        raise HTTPException(status_code=400, detail={"error": "ceiling must be a positive integer"})
+    soft_cap = bool(body.get("soft_cap", False))
+    max_overage = body.get("max_overage", 0) or 0
+    if not isinstance(max_overage, int) or isinstance(max_overage, bool) or max_overage < 0:
+        raise HTTPException(status_code=400, detail={"error": "max_overage must be a non-negative integer"})
+    if soft_cap and max_overage <= 0:
+        raise HTTPException(status_code=400, detail={"error": "soft_cap requires max_overage > 0"})
+    if not soft_cap and max_overage != 0:
+        raise HTTPException(status_code=400, detail={"error": "max_overage is only valid with soft_cap=true"})
+    return ceiling, soft_cap, max_overage
+
+
+@router.post("/run/budgets")
+async def set_run_budget(request: Request, db=Depends(get_db)):
+    """Create or update a run's credit budget (the loop ceiling). Owned by the
+    caller; a run_id is minted when omitted. Returns the live, ledger-derived
+    snapshot. There is no uncapped mode — ceiling is mandatory."""
+    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key_header:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
+
+    body = await request.json()
+    ceiling, soft_cap, max_overage = _validate_run_budget_body(body)
+
+    run_id = body.get("run_id") or str(_uuid.uuid4())
+    try:
+        _uuid.UUID(str(run_id))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail={"error": "run_id must be a UUID"})
+
+    # Upsert, but never hijack another user's run_id: the DO UPDATE only fires for
+    # the owner, so a foreign run_id yields no RETURNING row → 409.
+    row = await db.fetchrow(
+        """INSERT INTO run_budgets (run_id, user_id, ceiling, soft_cap, max_overage)
+           VALUES ($1::uuid, $2::uuid, $3, $4, $5)
+           ON CONFLICT (run_id) DO UPDATE
+             SET ceiling = $3, soft_cap = $4, max_overage = $5, updated_at = NOW()
+             WHERE run_budgets.user_id = $2::uuid
+           RETURNING run_id, ceiling, soft_cap, max_overage""",
+        str(run_id), str(user_id), ceiling, soft_cap, max_overage,
+    )
+    if not row:
+        raise HTTPException(status_code=409, detail={"error": "run_id belongs to another user"})
+
+    spent = await run_budget_spent(db, run_id, user_id)
+    hard_ceiling = ceiling + max_overage if soft_cap else ceiling
+    return {
+        "run_id":      str(row["run_id"]),
+        "ceiling":     ceiling,
+        "soft_cap":    soft_cap,
+        "max_overage": max_overage,
+        "spent":       spent,
+        "remaining":   max(0, hard_ceiling - spent),
+    }
+
+
+@router.get("/run/budgets/{run_id}")
+async def get_run_budget(request: Request, run_id: str, db=Depends(get_db)):
+    """Read a run's live budget: ceiling + ledger-derived spent/remaining."""
+    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key_header:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
+    try:
+        _uuid.UUID(str(run_id))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail={"error": "run_id must be a UUID"})
+
+    row = await db.fetchrow(
+        "SELECT ceiling, soft_cap, max_overage FROM run_budgets "
+        "WHERE run_id = $1::uuid AND user_id = $2::uuid",
+        str(run_id), str(user_id),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail={"error": "no budget for run_id"})
+    ceiling = int(row["ceiling"]); soft_cap = bool(row["soft_cap"]); max_overage = int(row["max_overage"] or 0)
+    spent = await run_budget_spent(db, run_id, user_id)
+    hard_ceiling = ceiling + max_overage if soft_cap else ceiling
+    return {
+        "run_id":      str(run_id),
+        "ceiling":     ceiling,
+        "soft_cap":    soft_cap,
+        "max_overage": max_overage,
+        "spent":       spent,
+        "remaining":   max(0, hard_ceiling - spent),
+    }
 
 
 # ── A2A bridge — message/send + message/stream route through the SAME money path ─
@@ -2331,10 +2462,11 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
 # land with the interop gate; here we only guarantee one money path.
 
 
-async def a2a_run_send(db, request, *, intent: str, input: dict, prefs: dict, agent_id):
+async def a2a_run_send(db, request, *, intent: str, input: dict, prefs: dict, agent_id, run_id=None):
     """A2A message/send → the shared /run money path (non-streaming). Same auth +
-    _run_core call as POST /run — the no-fork guarantee. Returns the raw /run result
-    dict; the A2A layer wraps it into a Message envelope."""
+    _run_core call as POST /run — the no-fork guarantee. run_id (defaulted from the
+    A2A contextId by the caller) flows into the same budget gate. Returns the raw
+    /run result dict; the A2A layer wraps it into a Task envelope."""
     api_key_header = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key_header:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
@@ -2355,10 +2487,11 @@ async def a2a_run_send(db, request, *, intent: str, input: dict, prefs: dict, ag
         api_key_header=api_key_header,
         request_id=getattr(request.state, "request_id", ""),
         pool=app.state.pool,
+        run_id=run_id,
     )
 
 
-async def a2a_run_stream(db, request, *, intent: str, input: dict, prefs: dict, agent_id, framer=None):
+async def a2a_run_stream(db, request, *, intent: str, input: dict, prefs: dict, agent_id, framer=None, run_id=None):
     """A2A message/stream → the existing /run SSE pipeline. Reuses _run_select + the
     SAME deduct + _run_sse_stream tail as the /run shell's streaming branch, verbatim
     — only the SSE event framing differs (the A2A caller passes a `framer` that emits
@@ -2382,11 +2515,14 @@ async def a2a_run_stream(db, request, *, intent: str, input: dict, prefs: dict, 
     credit_cost = sel.credit_cost
     svc_key = sel.svc_key
 
+    # Pre-spend budget gate — same helper as _run_core / the /run streaming branch.
+    await check_run_budget(db, run_id, user_id, credit_cost)
+
     success, balance_after, _run_tx_id = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/run",
         service_id=selected_slug, tx_type="execution",
         agent_id=agent_id, api_key_id=str(_api_key_id),
-        return_tx_id=True,
+        return_tx_id=True, run_id=run_id,
     )
     if not success:
         raise HTTPException(status_code=402, detail={

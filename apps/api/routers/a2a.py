@@ -180,6 +180,15 @@ def _task_context_ids(message: dict) -> tuple[str, str]:
     return task_id, context_id
 
 
+def _run_id_for(message: dict, context_id: str) -> str:
+    """The loop-budget run_id on the A2A path. Defaults to the inbound contextId (the
+    loop/session id) so a budget attached to a conversation is enforced across its
+    turns; an explicit message.metadata.run_id overrides. A freshly-minted contextId
+    simply has no run_budgets row → unbudgeted, exactly as today."""
+    meta = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    return meta.get("run_id") or context_id
+
+
 def _result_as_task(result: dict, task_id: str, context_id: str) -> dict:
     """Wrap a /run result dict as an A2A-conformant completed Task (v0.3.0). The run
     output rides as a single data Artifact; state is terminal `completed`. Built via
@@ -270,9 +279,13 @@ async def _dispatch(method: Method, params: dict, db, request: Request, req_id):
         message = params.get("message") or {}
         intent, input_dict, prefs, agent_id = _extract_run_args(message)
         task_id, context_id = _task_context_ids(message)
+        # The loop/session contextId IS the run budget id on the A2A path (a caller
+        # may also pin one explicitly via message.metadata.run_id).
+        run_id = _run_id_for(message, context_id)
         try:
             result = await _ex.a2a_run_send(
-                db, request, intent=intent, input=input_dict, prefs=prefs, agent_id=agent_id)
+                db, request, intent=intent, input=input_dict, prefs=prefs,
+                agent_id=agent_id, run_id=run_id)
         except HTTPException as e:
             raise _http_to_jsonrpc(e)
         return _result_as_task(result, task_id, context_id)
@@ -281,11 +294,12 @@ async def _dispatch(method: Method, params: dict, db, request: Request, req_id):
         message = params.get("message") or {}
         intent, input_dict, prefs, agent_id = _extract_run_args(message)
         task_id, context_id = _task_context_ids(message)
+        run_id = _run_id_for(message, context_id)
         framer = _make_a2a_sse_framer(task_id, context_id, str(_uuid.uuid4()), req_id)
         try:
             return await _ex.a2a_run_stream(
                 db, request, intent=intent, input=input_dict, prefs=prefs,
-                agent_id=agent_id, framer=framer)
+                agent_id=agent_id, framer=framer, run_id=run_id)
         except HTTPException as e:
             raise _http_to_jsonrpc(e)
 
