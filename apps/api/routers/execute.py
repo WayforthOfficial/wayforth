@@ -11,6 +11,7 @@ import secrets
 import time as _time_mod
 import uuid as _uuid
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -1712,35 +1713,34 @@ async def execute_batch(request: Request, db=Depends(get_db)):
 
 # ── /run — one-call runtime ───────────────────────────────────────────────────
 
-@router.post("/run")
-async def run_endpoint(request: Request, response: Response, db=Depends(get_db)):
-    """Intent → search → rank → execute → result in one call."""
+
+class _RunSelection(NamedTuple):
+    """Result of _run_select — everything the deduct/execute pipeline needs to know
+    about which managed service serves an intent, what it costs, and the ranked
+    context required to build failover candidates."""
+    selected_slug: str
+    selected_svc: dict
+    selected_rank: int | None
+    mapped_params: dict
+    credit_cost: int
+    svc_key: str
+    top5: list
+    ranked: list
+    compatible_cats: object
+    input_dict: dict
+
+
+async def _run_select(db, intent: str, input: dict, prefs: dict) -> _RunSelection:
+    """search → rank → select → map → cost for a /run intent.
+
+    The SINGLE source of truth for which managed service serves an intent and what
+    it costs — both the /run shell (streaming) and _run_core (non-streaming) route
+    through this, no copy. Raises the 422s (no_managed_service / missing_param) and
+    503s (db / ranker) verbatim, exactly as the original endpoint did inline.
+    """
     import time as _time
 
-    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key_header:
-        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
-
-    user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
-    await check_rate_limit(str(_api_key_id), _tier)
-    body = await request.json()
-
-    intent = (body.get("intent") or "").strip()
-    if not intent:
-        raise HTTPException(status_code=400, detail={"error": "intent is required"})
-
-    stream = bool(body.get("stream", False))
-
-    _cache_key = (hashlib.sha256(api_key_header.encode()).hexdigest()[:16], intent)
-    if not stream:
-        _cached = _run_cache_get(_cache_key)
-        if _cached is not None:
-            response.headers["X-Wayforth-Cache"] = "hit"
-            return _cached
-
-    agent_id = _validate_agent_id(body.get("agent_id"))
-    input_dict = body.get("input") or {}
-    prefs = body.get("preferences") or {}
+    input_dict = input or {}
     category_filter = prefs.get("category") or detect_category_hint(intent)
     max_price = prefs.get("max_price_per_call")
     tier_min = int(prefs.get("tier_min", 2))
@@ -1771,7 +1771,6 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
         idx += 1
 
     where = " AND ".join(conditions)
-    from main import app
     from ranker_client import rank_services
     try:
         rows = await db.fetch(
@@ -1942,7 +1941,7 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
             "hint": missing_param_hint(missing),
         })
 
-    # Step 4 — Execute (managed path, mirrors /execute)
+    # Step 4 — Cost (managed path, mirrors /execute)
     config = SERVICE_CONFIGS[selected_slug]
     if selected_slug == "stability":
         credit_cost = 150 if mapped_params.get("quality") == "ultra" else 86
@@ -1951,32 +1950,79 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
 
     svc_key = os.environ.get(config["key_var"], "")
 
-    # Build up-to-2 fallback candidates for automatic retry on 5xx (non-streaming only)
+    return _RunSelection(
+        selected_slug=selected_slug,
+        selected_svc=selected_svc,
+        selected_rank=selected_rank,
+        mapped_params=mapped_params,
+        credit_cost=credit_cost,
+        svc_key=svc_key,
+        top5=top5,
+        ranked=ranked,
+        compatible_cats=_compatible_cats,
+        input_dict=input_dict,
+    )
+
+
+async def _run_core(
+    db,
+    *,
+    user_id,
+    api_key_id,
+    tier: str | None,
+    intent: str,
+    input: dict,
+    prefs: dict,
+    agent_id,
+    api_key_header: str,
+    request_id: str,
+    pool,
+) -> dict:
+    """The /run non-streaming money path: select → deduct → execute (+ inline 2-retry
+    failover) → signals → result.
+
+    The SINGLE billing path shared by POST /run (non-streaming) and A2A message/send
+    — there is no second money path. Returns the result dict; the CALLER owns the
+    result cache and the X-Wayforth-Cache header. Raises 402/422/400/503 exactly as
+    the original endpoint did. No streaming deduct/refund lives here.
+    """
+    sel = await _run_select(db, intent, input, prefs)
+    selected_slug = sel.selected_slug
+    selected_svc = sel.selected_svc
+    selected_rank = sel.selected_rank
+    mapped_params = sel.mapped_params
+    credit_cost = sel.credit_cost
+    svc_key = sel.svc_key
+    top5 = sel.top5
+    ranked = sel.ranked
+    _compatible_cats = sel.compatible_cats
+    input_dict = sel.input_dict
+
+    # Build up-to-2 fallback candidates for automatic retry on 5xx
     _run_fallback_candidates: list[tuple[str, dict, dict, int, str]] = []
-    if not stream:
-        for _fc_svc in ranked:
-            if len(_run_fallback_candidates) >= 2:
-                break
-            _fc_cat = _fc_svc.get("slug") or ""
-            _fc_ms = CATALOG_TO_MANAGED.get(_fc_cat)
-            if not _fc_ms or _fc_ms == selected_slug or _fc_ms not in SERVICE_CONFIGS:
-                continue
-            _fc_key = os.environ.get(SERVICE_CONFIGS[_fc_ms]["key_var"], "")
-            if not _fc_key:
-                continue
-            if _compatible_cats and _fc_svc.get("category") not in _compatible_cats:
-                continue
-            _fc_mapped, _fc_miss = map_params(_fc_ms, input_dict)
-            if _fc_miss:
-                continue
-            _fc_cfg = SERVICE_CONFIGS[_fc_ms]
-            _fc_cost = 100 if (_fc_ms == "stability" and _fc_mapped.get("quality") == "ultra") else _fc_cfg["credits"]
-            _run_fallback_candidates.append((_fc_ms, _fc_svc, _fc_mapped, _fc_cost, _fc_key))
+    for _fc_svc in ranked:
+        if len(_run_fallback_candidates) >= 2:
+            break
+        _fc_cat = _fc_svc.get("slug") or ""
+        _fc_ms = CATALOG_TO_MANAGED.get(_fc_cat)
+        if not _fc_ms or _fc_ms == selected_slug or _fc_ms not in SERVICE_CONFIGS:
+            continue
+        _fc_key = os.environ.get(SERVICE_CONFIGS[_fc_ms]["key_var"], "")
+        if not _fc_key:
+            continue
+        if _compatible_cats and _fc_svc.get("category") not in _compatible_cats:
+            continue
+        _fc_mapped, _fc_miss = map_params(_fc_ms, input_dict)
+        if _fc_miss:
+            continue
+        _fc_cfg = SERVICE_CONFIGS[_fc_ms]
+        _fc_cost = 100 if (_fc_ms == "stability" and _fc_mapped.get("quality") == "ultra") else _fc_cfg["credits"]
+        _run_fallback_candidates.append((_fc_ms, _fc_svc, _fc_mapped, _fc_cost, _fc_key))
 
     success, balance_after, _run_tx_id = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/run",
         service_id=selected_slug, tx_type="execution",
-        agent_id=agent_id, api_key_id=str(_api_key_id),
+        agent_id=agent_id, api_key_id=str(api_key_id),
         return_tx_id=True,
     )
     if not success:
@@ -1990,13 +2036,199 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
         })
 
     _calls_remaining: int = balance_after  # credits remaining; fallback if key absent
-    if _api_key_id:
-        _inc = await _increment_calls(app.state.pool, str(_api_key_id), cost=credit_cost)
+    if api_key_id:
+        _inc = await _increment_calls(pool, str(api_key_id), cost=credit_cost)
         if _inc is not None:
             _calls_remaining = _inc
 
-    # ── Streaming path (inference LLM intents only) ───────────────────────────
+    # ── Non-streaming execution with automatic fallback (max 2 retries) ─────────
+    _fallback_from: str | None = None
+    result, error_msg, execution_ms = await _try_execute_managed(selected_slug, mapped_params, svc_key)
+
+    if error_msg and _classify_error(error_msg) == "service_failure":
+        _fallback_from = selected_slug
+        _all_failed_bal = await _do_refund(db, user_id, credit_cost, selected_slug, error_msg, "/run", balance_after,
+                                           _mk_refund_key(request_id, selected_slug, "run"))
+        for _fc_slug, _fc_svc, _fc_params, _fc_cost, _fc_key in _run_fallback_candidates:
+            _fc_ok, _fc_bal = await check_and_deduct_credits(
+                db, str(user_id), _fc_cost, "/run",
+                service_id=_fc_slug, tx_type="execution",
+                agent_id=agent_id, api_key_id=str(api_key_id),
+            )
+            if not _fc_ok:
+                continue
+            result, error_msg, execution_ms = await _try_execute_managed(_fc_slug, _fc_params, _fc_key)
+            if error_msg and _classify_error(error_msg) == "service_failure":
+                _all_failed_bal = await _do_refund(db, user_id, _fc_cost, _fc_slug, error_msg, "/run", _fc_bal,
+                                                   _mk_refund_key(request_id, _fc_slug, "run_fb"))
+                continue
+            if error_msg:
+                raise HTTPException(status_code=400, detail={"error": error_msg, "refunded": False, "credits_restored": 0})
+            # Fallback succeeded — adopt its service context
+            selected_slug = _fc_slug
+            selected_svc = _fc_svc
+            mapped_params = _fc_params
+            credit_cost = _fc_cost
+            balance_after = _fc_bal
+            break
+        else:
+            raise HTTPException(status_code=503, detail={
+                "error": "Service unavailable",
+                "refunded": True,
+                "credits_restored": credit_cost,
+                "credits_remaining": _all_failed_bal,
+                "calls_remaining": _all_failed_bal,  # backward compat
+                "service": _fallback_from,
+            })
+    elif error_msg:
+        raise HTTPException(status_code=400, detail={
+            "error": error_msg,
+            "refunded": False,
+            "credits_restored": 0,
+        })
+
+    asyncio.create_task(_update_search_signal(pool, str(user_id), selected_slug))
+    asyncio.create_task(
+        _maybe_dispatch_credits_low(pool, str(user_id), api_key_header, balance_after)
+    )
+    asyncio.create_task(_check_spend_anomaly(pool, str(user_id)))
+
+    wri = selected_svc.get("wri_score")
+    try:
+        _health = await db.fetchrow(
+            "SELECT avg_response_ms, error_rate FROM service_health WHERE slug = $1",
+            selected_slug,
+        )
+        if _health and wri is not None:
+            _adj = 0
+            if (_health["error_rate"] or 0) > 0.3:
+                _adj -= 10
+            if (_health["avg_response_ms"] or 0) > 5000:
+                _adj -= 5
+            if _adj:
+                wri = max(0.0, float(wri) + _adj)
+    except Exception:
+        pass  # non-critical: WRI health adjustment is best-effort
+
+    _run_result = {
+        "result": result,
+        "service_used": {
+            "slug": selected_slug,
+            "name": SERVICE_DISPLAY_NAMES.get(selected_slug, selected_slug),
+            "wri_score": round(float(wri), 1) if wri else None,
+            "category": selected_svc.get("category"),
+            "credits_used": credit_cost,
+        },
+        "search_context": {
+            "intent": intent,
+            "results_considered": len(top5),
+            "selected_rank": selected_rank,
+        },
+        "credits_remaining": _calls_remaining,
+        "calls_remaining": _calls_remaining,  # backward compat
+        "execution_ms": execution_ms,
+        "priority": tier in ("pro", "growth"),
+    }
+    if _fallback_from:
+        _run_orig_wri = await _fetch_wri(db, _fallback_from)
+        _run_fb_wri   = round(float(wri), 1) if wri is not None else None
+        _run_result["failover"] = {
+            "triggered":        True,
+            "original_service": _fallback_from,
+            "routed_to":        selected_slug,
+            "reason":           "Service unavailable",
+            "original_wri":     _run_orig_wri,
+            "fallback_wri":     _run_fb_wri,
+        }
+        # Preserved for backward-compat consumers still reading flat fields
+        _run_result["fallback_from"]   = _fallback_from
+        _run_result["fallback_reason"] = "service_unavailable"
+    else:
+        _run_result["failover"] = {"triggered": False}
+
+    _run_model = mapped_params.get("model") if selected_slug in _LLM_SLUGS else None
+    asyncio.create_task(_patch_tx_signals(
+        pool, _run_tx_id,
+        failure_code=None,
+        output_length_chars=len(str(result)) if result is not None else 0,
+        task_query_text=intent,
+        model_routing_attempted=_json.dumps([_run_model]) if _run_model else None,
+        model_routing_selected=_run_model,
+        substitution_from=_fallback_from,
+        substitution_to=selected_slug if _fallback_from else None,
+        substitution_reason="unavailable" if _fallback_from else None,
+    ))
+
+    return _run_result
+
+
+@router.post("/run")
+async def run_endpoint(request: Request, response: Response, db=Depends(get_db)):
+    """Intent → search → rank → execute → result in one call.
+
+    Thin shell: auth, rate-limit, parse, cache. The non-streaming flow delegates to
+    _run_core (the shared money path); the streaming flow stays inline here (its own
+    deduct + the existing _run_sse_stream), routing service selection through the
+    same _run_select so there is one selection authority.
+    """
+    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key_header:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
+
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
+    await check_rate_limit(str(_api_key_id), _tier)
+    body = await request.json()
+
+    intent = (body.get("intent") or "").strip()
+    if not intent:
+        raise HTTPException(status_code=400, detail={"error": "intent is required"})
+
+    stream = bool(body.get("stream", False))
+
+    _cache_key = (hashlib.sha256(api_key_header.encode()).hexdigest()[:16], intent)
+    if not stream:
+        _cached = _run_cache_get(_cache_key)
+        if _cached is not None:
+            response.headers["X-Wayforth-Cache"] = "hit"
+            return _cached
+
+    agent_id = _validate_agent_id(body.get("agent_id"))
+    input_dict = body.get("input") or {}
+    prefs = body.get("preferences") or {}
+
+    from main import app
+
+    # ── Streaming path (inference LLM intents only) — inline, its own deduct ────
     if stream:
+        sel = await _run_select(db, intent, input_dict, prefs)
+        selected_slug = sel.selected_slug
+        selected_svc = sel.selected_svc
+        mapped_params = sel.mapped_params
+        credit_cost = sel.credit_cost
+        svc_key = sel.svc_key
+
+        success, balance_after, _run_tx_id = await check_and_deduct_credits(
+            db, str(user_id), credit_cost, "/run",
+            service_id=selected_slug, tx_type="execution",
+            agent_id=agent_id, api_key_id=str(_api_key_id),
+            return_tx_id=True,
+        )
+        if not success:
+            raise HTTPException(status_code=402, detail={
+                "error": "insufficient_credits",
+                "required_credits": credit_cost,
+                "current_balance_credits": balance_after,
+                "current_balance_calls": balance_after // CREDITS_PER_CALL,
+                "message": "Not enough credits for this call.",
+                "top_up": "https://wayforth.io/billing",
+            })
+
+        _calls_remaining: int = balance_after  # credits remaining; fallback if key absent
+        if _api_key_id:
+            _inc = await _increment_calls(app.state.pool, str(_api_key_id), cost=credit_cost)
+            if _inc is not None:
+                _calls_remaining = _inc
+
         if selected_slug not in _STREAMING_SLUGS:
             async with db.transaction():
                 await db.fetchrow(
@@ -2049,124 +2281,20 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
             "X-Accel-Buffering": "no",
         })
 
-    # ── Non-streaming execution with automatic fallback (max 2 retries) ─────────
-    _fallback_from: str | None = None
-    result, error_msg, execution_ms = await _try_execute_managed(selected_slug, mapped_params, svc_key)
-
-    if error_msg and _classify_error(error_msg) == "service_failure":
-        _fallback_from = selected_slug
-        _all_failed_bal = await _do_refund(db, user_id, credit_cost, selected_slug, error_msg, "/run", balance_after,
-                                           _mk_refund_key(getattr(request.state, "request_id", ""), selected_slug, "run"))
-        for _fc_slug, _fc_svc, _fc_params, _fc_cost, _fc_key in _run_fallback_candidates:
-            _fc_ok, _fc_bal = await check_and_deduct_credits(
-                db, str(user_id), _fc_cost, "/run",
-                service_id=_fc_slug, tx_type="execution",
-                agent_id=agent_id, api_key_id=str(_api_key_id),
-            )
-            if not _fc_ok:
-                continue
-            result, error_msg, execution_ms = await _try_execute_managed(_fc_slug, _fc_params, _fc_key)
-            if error_msg and _classify_error(error_msg) == "service_failure":
-                _all_failed_bal = await _do_refund(db, user_id, _fc_cost, _fc_slug, error_msg, "/run", _fc_bal,
-                                                   _mk_refund_key(getattr(request.state, "request_id", ""), _fc_slug, "run_fb"))
-                continue
-            if error_msg:
-                raise HTTPException(status_code=400, detail={"error": error_msg, "refunded": False, "credits_restored": 0})
-            # Fallback succeeded — adopt its service context
-            selected_slug = _fc_slug
-            selected_svc = _fc_svc
-            mapped_params = _fc_params
-            credit_cost = _fc_cost
-            balance_after = _fc_bal
-            break
-        else:
-            raise HTTPException(status_code=503, detail={
-                "error": "Service unavailable",
-                "refunded": True,
-                "credits_restored": credit_cost,
-                "credits_remaining": _all_failed_bal,
-                "calls_remaining": _all_failed_bal,  # backward compat
-                "service": _fallback_from,
-            })
-    elif error_msg:
-        raise HTTPException(status_code=400, detail={
-            "error": error_msg,
-            "refunded": False,
-            "credits_restored": 0,
-        })
-
-    asyncio.create_task(_update_search_signal(app.state.pool, str(user_id), selected_slug))
-    asyncio.create_task(
-        _maybe_dispatch_credits_low(app.state.pool, str(user_id), api_key_header, balance_after)
+    # ── Non-streaming path — the shared money path ────────────────────────────
+    _run_result = await _run_core(
+        db,
+        user_id=user_id,
+        api_key_id=_api_key_id,
+        tier=_tier,
+        intent=intent,
+        input=input_dict,
+        prefs=prefs,
+        agent_id=agent_id,
+        api_key_header=api_key_header,
+        request_id=getattr(request.state, "request_id", ""),
+        pool=app.state.pool,
     )
-    asyncio.create_task(_check_spend_anomaly(app.state.pool, str(user_id)))
-
-    wri = selected_svc.get("wri_score")
-    try:
-        _health = await db.fetchrow(
-            "SELECT avg_response_ms, error_rate FROM service_health WHERE slug = $1",
-            selected_slug,
-        )
-        if _health and wri is not None:
-            _adj = 0
-            if (_health["error_rate"] or 0) > 0.3:
-                _adj -= 10
-            if (_health["avg_response_ms"] or 0) > 5000:
-                _adj -= 5
-            if _adj:
-                wri = max(0.0, float(wri) + _adj)
-    except Exception:
-        pass  # non-critical: WRI health adjustment is best-effort
-
     response.headers["X-Wayforth-Cache"] = "miss"
-    _run_result = {
-        "result": result,
-        "service_used": {
-            "slug": selected_slug,
-            "name": SERVICE_DISPLAY_NAMES.get(selected_slug, selected_slug),
-            "wri_score": round(float(wri), 1) if wri else None,
-            "category": selected_svc.get("category"),
-            "credits_used": credit_cost,
-        },
-        "search_context": {
-            "intent": intent,
-            "results_considered": len(top5),
-            "selected_rank": selected_rank,
-        },
-        "credits_remaining": _calls_remaining,
-        "calls_remaining": _calls_remaining,  # backward compat
-        "execution_ms": execution_ms,
-        "priority": _tier in ("pro", "growth"),
-    }
-    if _fallback_from:
-        _run_orig_wri = await _fetch_wri(db, _fallback_from)
-        _run_fb_wri   = round(float(wri), 1) if wri is not None else None
-        _run_result["failover"] = {
-            "triggered":        True,
-            "original_service": _fallback_from,
-            "routed_to":        selected_slug,
-            "reason":           "Service unavailable",
-            "original_wri":     _run_orig_wri,
-            "fallback_wri":     _run_fb_wri,
-        }
-        # Preserved for backward-compat consumers still reading flat fields
-        _run_result["fallback_from"]   = _fallback_from
-        _run_result["fallback_reason"] = "service_unavailable"
-    else:
-        _run_result["failover"] = {"triggered": False}
     _run_cache_set(_cache_key, _run_result)
-
-    _run_model = mapped_params.get("model") if selected_slug in _LLM_SLUGS else None
-    asyncio.create_task(_patch_tx_signals(
-        app.state.pool, _run_tx_id,
-        failure_code=None,
-        output_length_chars=len(str(result)) if result is not None else 0,
-        task_query_text=intent,
-        model_routing_attempted=_json.dumps([_run_model]) if _run_model else None,
-        model_routing_selected=_run_model,
-        substitution_from=_fallback_from,
-        substitution_to=selected_slug if _fallback_from else None,
-        substitution_reason="unavailable" if _fallback_from else None,
-    ))
-
     return _run_result
