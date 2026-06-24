@@ -387,12 +387,34 @@ _MAX_CONCURRENT_STREAMS_PER_KEY = 5
 _active_streams: dict[str, int] = {}
 
 
+def _default_run_sse_framer(kind: str, payload: dict) -> str:
+    """The native /run SSE wire format. Byte-identical to the inline form
+    _run_sse_stream emitted before framing was made pluggable — the /run HTTP API
+    stream is unchanged. The A2A transport supplies its own framer (serializer
+    TaskStatusUpdateEvent / TaskArtifactUpdateEvent) without touching billing."""
+    if kind == "token":
+        return f"data: {_json.dumps({'token': payload['token'], 'done': False})}\n\n"
+    if kind == "error":
+        return f"data: {_json.dumps({'error': payload['error'], 'done': True})}\n\n"
+    # kind == "final"
+    return (
+        f"data: {_json.dumps({'token': '', 'done': True, 'service_used': payload['service_used'], 'credits_remaining': payload['calls_remaining'], 'calls_remaining': payload['calls_remaining']})}\n\n"
+    )
+
+
 async def _run_sse_stream(
     slug, params, svc_key, user_id, credit_cost, pool,
     service_used, calls_remaining, stream_owner_key,
-    refund_key=None, tx_id=None, task_query_text=None,
+    refund_key=None, tx_id=None, task_query_text=None, framer=None,
 ):
-    """Async generator producing SSE events for a streaming LLM /run call."""
+    """Async generator producing SSE events for a streaming LLM /run call.
+
+    `framer` renders one structured event ("token" / "error" / "final") to SSE
+    bytes; it defaults to the native /run format. ONLY the rendered bytes vary by
+    transport — the token loop, the deduct/refund tail, and the signal patch below
+    are identical for /run and A2A (the interop gate changes framing, not billing).
+    """
+    _frame = framer or _default_run_sse_framer
     from services.managed import stream_groq, stream_together
     stream_fn = stream_groq if slug == "groq" else stream_together
     _output_chars = 0
@@ -401,10 +423,10 @@ async def _run_sse_stream(
         try:
             async for token in stream_fn(params, svc_key):
                 _output_chars += len(token)
-                yield f"data: {_json.dumps({'token': token, 'done': False})}\n\n"
+                yield _frame("token", {"token": token})
         except Exception as exc:
             _stream_error = str(exc)[:200]
-            yield f"data: {_json.dumps({'error': _stream_error, 'done': True})}\n\n"
+            yield _frame("error", {"error": _stream_error})
             # Route the refund through _do_refund (not a raw UPDATE) so it is
             # idempotent (refund_key + unique index → no double-refund if the
             # stream errors after a retry) and produces a credit_transactions
@@ -419,7 +441,7 @@ async def _run_sse_stream(
                 logger.error("stream refund failed user=%s slug=%s cost=%s: %s",
                              user_id, slug, credit_cost, _refund_err)
             return
-        yield f"data: {_json.dumps({'token': '', 'done': True, 'service_used': service_used, 'credits_remaining': calls_remaining, 'calls_remaining': calls_remaining})}\n\n"
+        yield _frame("final", {"service_used": service_used, "calls_remaining": calls_remaining})
     finally:
         _active_streams[stream_owner_key] = max(0, _active_streams.get(stream_owner_key, 1) - 1)
         # Signal patch — scheduled as a future so it doesn't block generator teardown.
@@ -2336,13 +2358,13 @@ async def a2a_run_send(db, request, *, intent: str, input: dict, prefs: dict, ag
     )
 
 
-async def a2a_run_stream(db, request, *, intent: str, input: dict, prefs: dict, agent_id):
+async def a2a_run_stream(db, request, *, intent: str, input: dict, prefs: dict, agent_id, framer=None):
     """A2A message/stream → the existing /run SSE pipeline. Reuses _run_select + the
     SAME deduct + _run_sse_stream tail as the /run shell's streaming branch, verbatim
-    (no streaming refactor this pass). Returns a StreamingResponse on the happy path,
-    or the same JSONResponse the /run shell returns for the non-stream-capable /
-    over-cap / insufficient-credits sub-cases. A2A-conformant error/Task framing is
-    deferred to the interop gate."""
+    — only the SSE event framing differs (the A2A caller passes a `framer` that emits
+    TaskStatusUpdateEvent / TaskArtifactUpdateEvent; billing is untouched). The
+    non-stream-capable / over-cap / insufficient-credits sub-cases raise HTTPException
+    (the dispatcher maps them to JSON-RPC errors) after the verbatim refund."""
     api_key_header = request.headers.get("X-Wayforth-API-Key", "")
     if not api_key_header:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
@@ -2389,7 +2411,7 @@ async def a2a_run_stream(db, request, *, intent: str, input: dict, prefs: dict, 
                 "WHERE user_id = $2::uuid RETURNING credits_balance",
                 credit_cost, user_id,
             )
-        return JSONResponse(status_code=400, content={
+        raise HTTPException(status_code=400, detail={
             "error": "streaming_not_supported",
             "intent_category": selected_svc.get("category", "unknown"),
         })
@@ -2403,7 +2425,7 @@ async def a2a_run_stream(db, request, *, intent: str, input: dict, prefs: dict, 
                 "WHERE user_id = $2::uuid RETURNING credits_balance",
                 credit_cost, user_id,
             )
-        return JSONResponse(status_code=429, content={
+        raise HTTPException(status_code=429, detail={
             "error": "too_many_concurrent_streams",
             "message": f"Maximum {_MAX_CONCURRENT_STREAMS_PER_KEY} concurrent SSE streams per API key.",
             "active_streams": active,
@@ -2426,6 +2448,7 @@ async def a2a_run_stream(db, request, *, intent: str, input: dict, prefs: dict, 
         _mk_refund_key(getattr(request.state, "request_id", ""), selected_slug, "run_sse"),
         tx_id=_run_tx_id,
         task_query_text=intent,
+        framer=framer,
     )
     return StreamingResponse(gen, media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",

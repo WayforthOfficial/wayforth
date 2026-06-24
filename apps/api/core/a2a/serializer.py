@@ -100,6 +100,12 @@ class ErrorCode(Enum):
     UNSUPPORTED_OPERATION = -32004
     CONTENT_TYPE_NOT_SUPPORTED = -32005
     INVALID_AGENT_RESPONSE = -32006
+    # Wayforth server-defined, in the JSON-RPC reserved server-error range
+    # (-32000..-32099). A2A has no payment/rate-limit error; these carry our
+    # /run 402 and 429 conditions. They validate as a generic JSON-RPC error
+    # (a2a-sdk JSONRPCError accepts any int code) — verified by the interop gate.
+    INSUFFICIENT_CREDITS = -32010
+    RATE_LIMITED = -32011
 
 
 class JsonRpcError(Exception):
@@ -126,6 +132,8 @@ _DEFAULT_ERROR_MESSAGE: dict[ErrorCode, str] = {
     ErrorCode.UNSUPPORTED_OPERATION: "This operation is not supported",
     ErrorCode.CONTENT_TYPE_NOT_SUPPORTED: "Incompatible content types",
     ErrorCode.INVALID_AGENT_RESPONSE: "Invalid agent response",
+    ErrorCode.INSUFFICIENT_CREDITS: "Insufficient credits",
+    ErrorCode.RATE_LIMITED: "Rate limit exceeded",
 }
 
 
@@ -348,3 +356,75 @@ def serialize_task_status(state: TaskState, *, timestamp: str | None = None,
     if message is not None:
         status["message"] = serialize_message(message)
     return status
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Task / Artifact / streaming-event builders. The wire 'kind' discriminators
+# ("task", "artifact", "status-update", "artifact-update") and the camelCase
+# field aliases (contextId/taskId/artifactId) are version-variant wire vocabulary
+# and therefore live HERE, never in the router. Each builder's output is byte-
+# parseable by a2a-sdk==0.3.26 (Task / Artifact / TaskStatusUpdateEvent /
+# TaskArtifactUpdateEvent) — the interop gate asserts the round-trip both ways.
+# ════════════════════════════════════════════════════════════════════════════
+
+def make_text_part(text: str) -> dict:
+    """v0.3.0 TextPart."""
+    return {"kind": "text", "text": text}
+
+
+def make_data_part(data: dict) -> dict:
+    """v0.3.0 DataPart."""
+    return {"kind": "data", "data": data}
+
+
+def make_artifact(artifact_id: str, parts: list, *, name: str | None = None) -> dict:
+    """v0.3.0 Artifact. parts are already-serialized Part dicts."""
+    artifact: dict = {"artifactId": artifact_id, "parts": parts}
+    if name is not None:
+        artifact["name"] = name
+    return artifact
+
+
+def make_task(*, task_id: str, context_id: str, state: TaskState,
+              artifacts: list | None = None, message: dict | None = None,
+              timestamp: str | None = None) -> dict:
+    """v0.3.0 Task envelope. status carries the terminal TaskState; artifacts carry
+    the run output (each an already-serialized Artifact). message, when present, is
+    an internal message serialized into status.message through the seam."""
+    task: dict = {
+        "kind": "task",
+        "id": task_id,
+        "contextId": context_id,
+        "status": serialize_task_status(state, timestamp=timestamp, message=message),
+    }
+    if artifacts:
+        task["artifacts"] = artifacts
+    return task
+
+
+def make_status_update_event(*, task_id: str, context_id: str, state: TaskState,
+                             final: bool, message: dict | None = None,
+                             timestamp: str | None = None) -> dict:
+    """v0.3.0 TaskStatusUpdateEvent. final=True marks the terminal frame of a stream
+    (the spec requires the last event be a status-update with a terminal state)."""
+    return {
+        "kind": "status-update",
+        "taskId": task_id,
+        "contextId": context_id,
+        "status": serialize_task_status(state, timestamp=timestamp, message=message),
+        "final": final,
+    }
+
+
+def make_artifact_update_event(*, task_id: str, context_id: str, artifact: dict,
+                               append: bool, last_chunk: bool) -> dict:
+    """v0.3.0 TaskArtifactUpdateEvent — streams incremental artifact content.
+    append=True chains onto the named artifact; last_chunk closes it."""
+    return {
+        "kind": "artifact-update",
+        "taskId": task_id,
+        "contextId": context_id,
+        "artifact": artifact,
+        "append": append,
+        "lastChunk": last_chunk,
+    }

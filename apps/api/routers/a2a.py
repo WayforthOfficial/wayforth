@@ -22,16 +22,18 @@ emits, protocolVersion, comes from the signed card (card.py → WIRE_PROTOCOL_VE
 """
 from __future__ import annotations
 
+import json as _json
 import logging
 import os
 import uuid as _uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from core.a2a import keys as a2a_keys
 from core.a2a import serializer as S
-from core.a2a.serializer import ErrorCode, JsonRpcError, Method, Role
+from core.a2a.serializer import ErrorCode, JsonRpcError, Method, TaskState
 from core.a2a.sign import build_signed_card
 from core.db import get_db
 
@@ -127,7 +129,7 @@ async def a2a_jsonrpc(request: Request, db=Depends(get_db)):
             S.make_error_response(body.get("id") if isinstance(body, dict) else None, e))
 
     try:
-        result = await _dispatch(method, params, db, request)
+        result = await _dispatch(method, params, db, request, req_id)
         # STREAM_MESSAGE returns a live SSE response, not a JSON-RPC result body.
         if isinstance(result, StreamingResponse):
             return result
@@ -166,55 +168,124 @@ def _extract_run_args(message: dict) -> tuple[str, dict, dict, object]:
     return intent, input_dict, prefs, agent_id
 
 
-def _wrap_result_as_message(result: dict) -> dict:
-    """Wrap a /run result dict as a minimal A2A agent Message (v0.3.0 via the seam).
-    Spec-conformant message→Task framing is the interop gate's job; this only proves
-    the method returns a real result, not UNSUPPORTED."""
-    internal = {
-        "messageId": str(_uuid.uuid4()),
-        "role": Role.AGENT,
-        "parts": [{"kind": "data", "data": result}],
-        "kind": "message",
-    }
-    return S.serialize_message(internal)
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _task_context_ids(message: dict) -> tuple[str, str]:
+    """Reuse the inbound message's taskId/contextId when the caller continues an
+    existing task; otherwise mint fresh ones."""
+    task_id = message.get("taskId") or str(_uuid.uuid4())
+    context_id = message.get("contextId") or str(_uuid.uuid4())
+    return task_id, context_id
+
+
+def _result_as_task(result: dict, task_id: str, context_id: str) -> dict:
+    """Wrap a /run result dict as an A2A-conformant completed Task (v0.3.0). The run
+    output rides as a single data Artifact; state is terminal `completed`. Built via
+    the serializer seam — byte-parseable as an a2a-sdk Task (the interop gate asserts
+    the round-trip both ways)."""
+    artifact = S.make_artifact(
+        str(_uuid.uuid4()), [S.make_data_part(result)], name="result")
+    return S.make_task(
+        task_id=task_id, context_id=context_id, state=TaskState.COMPLETED,
+        artifacts=[artifact], timestamp=_now_iso())
+
+
+# HTTP status (from the /run money path) → A2A JSON-RPC error code. A2A defines no
+# payment/rate-limit error, so 402/429 use Wayforth server-defined codes in the
+# JSON-RPC reserved -32000..-32099 range; the original /run detail rides in
+# error.data. The interop gate asserts every envelope parses as a2a-sdk JSONRPCError.
+_HTTP_TO_ERRORCODE: dict[int, ErrorCode] = {
+    400: ErrorCode.INVALID_PARAMS,        # bad request body / client error
+    401: ErrorCode.INVALID_REQUEST,       # missing/invalid API key (no A2A auth code)
+    402: ErrorCode.INSUFFICIENT_CREDITS,  # server-defined (-32010)
+    422: ErrorCode.INVALID_PARAMS,        # missing_param / no_managed_service
+    429: ErrorCode.RATE_LIMITED,          # server-defined (-32011)
+    503: ErrorCode.INTERNAL_ERROR,        # all providers failed
+}
 
 
 def _http_to_jsonrpc(e: HTTPException) -> JsonRpcError:
-    """Map a /run HTTPException onto a JSON-RPC error. 4xx caller faults →
-    INVALID_PARAMS; everything else → INTERNAL_ERROR. The original detail rides in
-    .data so nothing is lost. (Richer A2A error/Task mapping lands with the gate.)"""
-    code = ErrorCode.INVALID_PARAMS if 400 <= e.status_code < 500 else ErrorCode.INTERNAL_ERROR
+    """Map a /run HTTPException onto the correct A2A JSON-RPC error. The original
+    detail rides in .data so nothing is lost; unmapped statuses → INTERNAL_ERROR."""
+    code = _HTTP_TO_ERRORCODE.get(e.status_code, ErrorCode.INTERNAL_ERROR)
     detail = e.detail
     msg = detail.get("error") if isinstance(detail, dict) else str(detail)
     return JsonRpcError(code, msg or "Run failed", data=detail)
 
 
-async def _dispatch(method: Method, params: dict, db, request: Request):
+def _make_a2a_sse_framer(task_id: str, context_id: str, artifact_id: str, req_id):
+    """Build the SSE framer the A2A stream hands into the /run pipeline. Renders each
+    structured run event as a JSON-RPC streaming-response envelope whose result is
+    an A2A update event:
+      • first frame → a `working`   TaskStatusUpdateEvent  (final=False)
+      • token       → a             TaskArtifactUpdateEvent (append, not last)
+      • final       → a `completed` TaskStatusUpdateEvent  (final=True)
+      • error       → a `failed`    TaskStatusUpdateEvent  (final=True)
+    Framing only — the deduct/refund tail inside _run_sse_stream is untouched."""
+    state = {"started": False}
+
+    def _sse(event: dict) -> str:
+        return f"data: {_json.dumps(S.make_response(req_id, event))}\n\n"
+
+    def frame(kind: str, payload: dict) -> str:
+        out: list[str] = []
+        if not state["started"]:
+            state["started"] = True
+            out.append(_sse(S.make_status_update_event(
+                task_id=task_id, context_id=context_id,
+                state=TaskState.WORKING, final=False)))
+        if kind == "token":
+            artifact = S.make_artifact(
+                artifact_id, [S.make_text_part(payload["token"])], name="response")
+            out.append(_sse(S.make_artifact_update_event(
+                task_id=task_id, context_id=context_id, artifact=artifact,
+                append=True, last_chunk=False)))
+        elif kind == "error":
+            out.append(_sse(S.make_status_update_event(
+                task_id=task_id, context_id=context_id,
+                state=TaskState.FAILED, final=True)))
+        else:  # "final"
+            out.append(_sse(S.make_status_update_event(
+                task_id=task_id, context_id=context_id,
+                state=TaskState.COMPLETED, final=True)))
+        return "".join(out)
+
+    return frame
+
+
+async def _dispatch(method: Method, params: dict, db, request: Request, req_id):
     """Dispatch a parsed JSON-RPC method to its handler.
 
     SEND_MESSAGE and STREAM_MESSAGE route through the SHARED /run money path
     (execute.a2a_run_send → _run_core; execute.a2a_run_stream → the existing SSE
-    pipeline) — no second billing path. Every other method is still registered but
-    explicitly unimplemented (spec-compliant UNSUPPORTED_OPERATION, never faked);
-    they wire up with the interop gate."""
+    pipeline) and return A2A-conformant envelopes — a completed Task for send, a
+    stream of TaskStatusUpdateEvent / TaskArtifactUpdateEvent for stream. Every
+    other method stays registered but explicitly unimplemented (spec-compliant
+    UNSUPPORTED_OPERATION, never faked)."""
     from routers import execute as _ex
 
     if method is Method.SEND_MESSAGE:
         message = params.get("message") or {}
         intent, input_dict, prefs, agent_id = _extract_run_args(message)
+        task_id, context_id = _task_context_ids(message)
         try:
             result = await _ex.a2a_run_send(
                 db, request, intent=intent, input=input_dict, prefs=prefs, agent_id=agent_id)
         except HTTPException as e:
             raise _http_to_jsonrpc(e)
-        return _wrap_result_as_message(result)
+        return _result_as_task(result, task_id, context_id)
 
     if method is Method.STREAM_MESSAGE:
         message = params.get("message") or {}
         intent, input_dict, prefs, agent_id = _extract_run_args(message)
+        task_id, context_id = _task_context_ids(message)
+        framer = _make_a2a_sse_framer(task_id, context_id, str(_uuid.uuid4()), req_id)
         try:
             return await _ex.a2a_run_stream(
-                db, request, intent=intent, input=input_dict, prefs=prefs, agent_id=agent_id)
+                db, request, intent=intent, input=input_dict, prefs=prefs,
+                agent_id=agent_id, framer=framer)
         except HTTPException as e:
             raise _http_to_jsonrpc(e)
 

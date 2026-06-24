@@ -340,13 +340,14 @@ def test_a2a_run_billing_parity(monkeypatch):
     req = _FakeReq({})   # carries the API key header + request.state
     out = asyncio.run(
         a2a._dispatch(Method.SEND_MESSAGE, {"message": message},
-                      _RunDB([_candidate("groq")]), req))
+                      _RunDB([_candidate("groq")]), req, "rpc-1"))
 
-    # Routed through the SHARED core (the no-fork proof), and the wire result
+    # Routed through the SHARED core (the no-fork proof), and the A2A Task envelope
     # carries the same run payload as POST /run.
     assert core_calls["n"] == 1
-    assert out["role"] == "agent"
-    assert out["parts"][0]["data"]["service_used"]["slug"] == "groq"
+    assert out["kind"] == "task"
+    assert out["status"]["state"] == "completed"
+    assert out["artifacts"][0]["parts"][0]["data"]["service_used"]["slug"] == "groq"
 
     # Identical billing: same deduct sequence, same (empty) refund sequence.
     assert deducts_a2a == deducts_run == [("groq", 3)]
