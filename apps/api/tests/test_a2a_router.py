@@ -98,8 +98,9 @@ def _rpc(client, method, params=None, rid=1):
 
 
 def test_methods_registered_but_unimplemented_v030(client):
-    # v0.3.0 slash-form method → spec-compliant UNSUPPORTED_OPERATION, not faked.
-    resp = _rpc(client, "message/send", {"message": {"role": "user", "parts": []}})
+    # A still-unimplemented v0.3.0 method (message/send + message/stream now route
+    # to the run money path) → spec-compliant UNSUPPORTED_OPERATION, not faked.
+    resp = _rpc(client, "tasks/get", {"id": "task-1"})
     assert resp["jsonrpc"] == "2.0" and resp["id"] == 1
     assert "result" not in resp
     assert resp["error"]["code"] == -32004   # UNSUPPORTED_OPERATION
@@ -107,7 +108,9 @@ def test_methods_registered_but_unimplemented_v030(client):
 
 def test_inbound_accepts_v1_method_spelling(client):
     # v1.0 PascalCase normalizes to the same internal method (Postel at the router).
-    resp = _rpc(client, "SendMessage", {"message": {"role": "ROLE_USER", "parts": []}})
+    # GetTask is still unimplemented, so reaching dispatch yields UNSUPPORTED, not
+    # METHOD_NOT_FOUND — proving the inbound normalization fired.
+    resp = _rpc(client, "GetTask", {"id": "task-1"})
     assert resp["error"]["code"] == -32004   # reached dispatch, not METHOD_NOT_FOUND
 
 

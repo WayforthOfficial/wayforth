@@ -2298,3 +2298,136 @@ async def run_endpoint(request: Request, response: Response, db=Depends(get_db))
     response.headers["X-Wayforth-Cache"] = "miss"
     _run_cache_set(_cache_key, _run_result)
     return _run_result
+
+
+# ── A2A bridge — message/send + message/stream route through the SAME money path ─
+# The A2A JSON-RPC router (routers/a2a.py) dispatches into these. They do NOT
+# introduce a second billing path: a2a_run_send is the /run shell's non-stream
+# auth + _run_core sequence verbatim, and a2a_run_stream reuses _run_select + the
+# existing deduct/_run_sse_stream tail verbatim (no streaming refactor this pass).
+# Wire-envelope concerns (message→Task, SSE event conformance) live in a2a.py and
+# land with the interop gate; here we only guarantee one money path.
+
+
+async def a2a_run_send(db, request, *, intent: str, input: dict, prefs: dict, agent_id):
+    """A2A message/send → the shared /run money path (non-streaming). Same auth +
+    _run_core call as POST /run — the no-fork guarantee. Returns the raw /run result
+    dict; the A2A layer wraps it into a Message envelope."""
+    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key_header:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
+
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
+    await check_rate_limit(str(_api_key_id), _tier)
+
+    from main import app
+    return await _run_core(
+        db,
+        user_id=user_id,
+        api_key_id=_api_key_id,
+        tier=_tier,
+        intent=intent,
+        input=input or {},
+        prefs=prefs or {},
+        agent_id=_validate_agent_id(agent_id),
+        api_key_header=api_key_header,
+        request_id=getattr(request.state, "request_id", ""),
+        pool=app.state.pool,
+    )
+
+
+async def a2a_run_stream(db, request, *, intent: str, input: dict, prefs: dict, agent_id):
+    """A2A message/stream → the existing /run SSE pipeline. Reuses _run_select + the
+    SAME deduct + _run_sse_stream tail as the /run shell's streaming branch, verbatim
+    (no streaming refactor this pass). Returns a StreamingResponse on the happy path,
+    or the same JSONResponse the /run shell returns for the non-stream-capable /
+    over-cap / insufficient-credits sub-cases. A2A-conformant error/Task framing is
+    deferred to the interop gate."""
+    api_key_header = request.headers.get("X-Wayforth-API-Key", "")
+    if not api_key_header:
+        raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
+
+    user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
+    await check_rate_limit(str(_api_key_id), _tier)
+    agent_id = _validate_agent_id(agent_id)
+
+    from main import app
+
+    sel = await _run_select(db, intent, input or {}, prefs or {})
+    selected_slug = sel.selected_slug
+    selected_svc = sel.selected_svc
+    mapped_params = sel.mapped_params
+    credit_cost = sel.credit_cost
+    svc_key = sel.svc_key
+
+    success, balance_after, _run_tx_id = await check_and_deduct_credits(
+        db, str(user_id), credit_cost, "/run",
+        service_id=selected_slug, tx_type="execution",
+        agent_id=agent_id, api_key_id=str(_api_key_id),
+        return_tx_id=True,
+    )
+    if not success:
+        raise HTTPException(status_code=402, detail={
+            "error": "insufficient_credits",
+            "required_credits": credit_cost,
+            "current_balance_credits": balance_after,
+            "current_balance_calls": balance_after // CREDITS_PER_CALL,
+            "message": "Not enough credits for this call.",
+            "top_up": "https://wayforth.io/billing",
+        })
+
+    _calls_remaining: int = balance_after  # credits remaining; fallback if key absent
+    if _api_key_id:
+        _inc = await _increment_calls(app.state.pool, str(_api_key_id), cost=credit_cost)
+        if _inc is not None:
+            _calls_remaining = _inc
+
+    if selected_slug not in _STREAMING_SLUGS:
+        async with db.transaction():
+            await db.fetchrow(
+                "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
+                "WHERE user_id = $2::uuid RETURNING credits_balance",
+                credit_cost, user_id,
+            )
+        return JSONResponse(status_code=400, content={
+            "error": "streaming_not_supported",
+            "intent_category": selected_svc.get("category", "unknown"),
+        })
+
+    stream_owner_key = hashlib.sha256(api_key_header.encode()).hexdigest()[:16]
+    active = _active_streams.get(stream_owner_key, 0)
+    if active >= _MAX_CONCURRENT_STREAMS_PER_KEY:
+        async with db.transaction():
+            await db.fetchrow(
+                "UPDATE user_credits SET credits_balance = credits_balance + $1, updated_at = NOW() "
+                "WHERE user_id = $2::uuid RETURNING credits_balance",
+                credit_cost, user_id,
+            )
+        return JSONResponse(status_code=429, content={
+            "error": "too_many_concurrent_streams",
+            "message": f"Maximum {_MAX_CONCURRENT_STREAMS_PER_KEY} concurrent SSE streams per API key.",
+            "active_streams": active,
+            "limit": _MAX_CONCURRENT_STREAMS_PER_KEY,
+        })
+    _active_streams[stream_owner_key] = active + 1
+
+    wri = selected_svc.get("wri_score")
+    _service_used_sse = {
+        "slug": selected_slug,
+        "name": SERVICE_DISPLAY_NAMES.get(selected_slug, selected_slug),
+        "wri_score": round(float(wri), 1) if wri else None,
+        "category": selected_svc.get("category"),
+        "credits_used": credit_cost,
+    }
+    gen = _run_sse_stream(
+        selected_slug, mapped_params, svc_key, str(user_id),
+        credit_cost, app.state.pool, _service_used_sse, _calls_remaining,
+        stream_owner_key,
+        _mk_refund_key(getattr(request.state, "request_id", ""), selected_slug, "run_sse"),
+        tx_id=_run_tx_id,
+        task_query_text=intent,
+    )
+    return StreamingResponse(gen, media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })

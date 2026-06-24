@@ -294,3 +294,60 @@ def test_streaming_unsupported_slug_deducts_then_refunds(monkeypatch):
     assert deducts == [("serper", 3)]   # charged, then…
     assert stream_refunds == [3]        # …fully refunded via user_credits UPDATE
     assert refunds == []                # not the _do_refund path
+
+
+# ── no-fork guarantee: A2A message/send and /run share ONE money path ─────────
+
+def test_a2a_run_billing_parity(monkeypatch):
+    """A2A message/send and POST /run both route through _run_core and bill
+    identically for the same intent. Proves there is one money path, not two."""
+    import routers.a2a as a2a
+    from core.a2a.serializer import Method
+
+    intent = "chat hello"
+    user_input = {"messages": [{"role": "user", "content": "hi"}]}
+    exec_script = {"groq": ({"content": "hi"}, None, 7)}
+
+    # ── POST /run (non-streaming) ──
+    res_run, deducts_run, refunds_run = run_once(
+        monkeypatch,
+        candidates=[_candidate("groq")],
+        exec_script=exec_script,
+        body={"intent": intent, "input": user_input},
+    )
+    assert not isinstance(res_run, HTTPException)
+    assert res_run["service_used"]["slug"] == "groq"
+
+    # ── A2A message/send (same intent) — fresh mocks + a spy on _run_core ──
+    deducts_a2a, refunds_a2a = _install_mocks(
+        monkeypatch, exec_script=exec_script, auth_raises=None, deduct_ok=True)
+
+    core_calls = {"n": 0}
+    _real_core = ex._run_core
+
+    async def _spy_core(*a, **k):
+        core_calls["n"] += 1
+        return await _real_core(*a, **k)
+    monkeypatch.setattr(ex, "_run_core", _spy_core)
+
+    message = {
+        "role": "user",
+        "parts": [
+            {"kind": "text", "text": intent},
+            {"kind": "data", "data": user_input},
+        ],
+    }
+    req = _FakeReq({})   # carries the API key header + request.state
+    out = asyncio.run(
+        a2a._dispatch(Method.SEND_MESSAGE, {"message": message},
+                      _RunDB([_candidate("groq")]), req))
+
+    # Routed through the SHARED core (the no-fork proof), and the wire result
+    # carries the same run payload as POST /run.
+    assert core_calls["n"] == 1
+    assert out["role"] == "agent"
+    assert out["parts"][0]["data"]["service_used"]["slug"] == "groq"
+
+    # Identical billing: same deduct sequence, same (empty) refund sequence.
+    assert deducts_a2a == deducts_run == [("groq", 3)]
+    assert refunds_a2a == refunds_run == []
