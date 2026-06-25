@@ -67,7 +67,6 @@ from core.rate_limit import limiter
 from core.tier_gates import require_tier, _get_redis
 from services.managed import SERVICE_CONFIGS, _active_managed_count
 from services.param_mapper import MANAGED_TO_CATALOG
-from services.wayforthrank import compute_wri
 
 _DB_URL = os.environ.get("DATABASE_URL", "")
 _ASYNCPG_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
@@ -239,7 +238,7 @@ async def _probe_managed_services_loop():
                 logger.warning("probe db write failed for %s: %s", managed_slug, db_err)
 
         logger.info("managed service probe cycle complete")
-        await asyncio.sleep(21600)  # 6 hours — same cadence as the WRI recalculate cron
+        await asyncio.sleep(21600)  # 6 hours — same cadence as the reliability-score recalculate cron
 
 
 async def _boost_auto_pause_loop():
@@ -253,7 +252,7 @@ async def _boost_auto_pause_loop():
                  (coverage_tier >= 2 AND consecutive_failures < 3)
                  → boost_paused = FALSE (routing traffic restored)
                  Note: boost_expires_at is never changed — paused days are lost.
-    WRI score is never modified by boost state — see /integrity §11.5.
+    reliability score is never modified by boost state — see /integrity §11.5.
     """
     from routers.provider import _BOOST_CONFIG
     await asyncio.sleep(120)  # startup delay — let probe loop run first
@@ -287,7 +286,7 @@ async def _boost_auto_pause_loop():
                         )
 
                         if not tier2_ok and not row["boost_paused"]:
-                            # Service degraded → pause boost (routing only, no WRI effect)
+                            # Service degraded → pause boost (routing only, no reliability-score effect)
                             await conn.execute("""
                                 UPDATE providers
                                    SET boost_paused = TRUE
@@ -565,7 +564,7 @@ async def lifespan(app: FastAPI):
                 ON webhook_deliveries(webhook_id, created_at DESC)
             """)
             # v0.8.0 Item 5 — kind + per-row notify_url/hmac_secret/source_id so
-            # WRI alerts can ride the existing webhook retry loop instead of
+            # reliability-score alerts can ride the existing webhook retry loop instead of
             # being dropped on the floor when a single POST fails. Mirrored in
             # infra/migrations/044_webhook_deliveries_kind.sql.
             await _mconn.execute("""
@@ -1049,7 +1048,7 @@ async def lifespan(app: FastAPI):
             """)
             # Provider service management (v0.8.2): soft-delete flag. DELETE
             # /provider/services/{slug} sets active=FALSE so the service drops
-            # out of search/fallback while its catalog row + WayforthRank signal
+            # out of search/fallback while its catalog row + merit-based ranking signal
             # history are preserved. Defaults TRUE so all existing rows stay live.
             await _mconn.execute("""
                 ALTER TABLE services
@@ -2300,7 +2299,7 @@ _CHANGELOG_ENTRIES = [
         "title": "Search relevance tuning, category filters, pagination",
         "date": "Fri, 06 Mar 2026 00:00:00 +0000",
         "link": "https://wayforth.io/changelog#v0.5.2",
-        "description": "Improved WRI-weighted search ranking, category and tag filters on /search, cursor-based pagination.",
+        "description": "Improved reliability-weighted search ranking, category and tag filters on /search, cursor-based pagination.",
     },
     {
         "version": "0.5.1",
@@ -2314,7 +2313,7 @@ _CHANGELOG_ENTRIES = [
         "title": "Initial public release: search, execute, 270+ services",
         "date": "Mon, 02 Mar 2026 00:00:00 +0000",
         "link": "https://wayforth.io/changelog#v0.5.0",
-        "description": "Public launch with semantic search across 270+ verified APIs, managed execution adapters for 11 providers, WayforthRank v1.",
+        "description": "Public launch with semantic search across 270+ verified APIs, managed execution adapters for 11 providers, merit-based ranking.",
     },
 ]
 

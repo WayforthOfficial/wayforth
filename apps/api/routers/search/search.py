@@ -17,7 +17,6 @@ from core.db import get_db
 from core.auth import _TIER_RPM
 from core.rate_limit import limiter
 from core.tier_gates import FREE_TIER_MONTHLY_SEARCH_LIMIT, check_rate_limit, check_anon_rate_limit
-from services.wayforthrank import compute_wri
 
 logger = logging.getLogger("wayforth")
 
@@ -25,7 +24,7 @@ router = APIRouter()
 
 
 def _apply_health_wri(wri, health_row) -> float:
-    """Reduce WRI score based on live service health data."""
+    """Reduce the stored reliability score based on live service health data."""
     if wri is None or not health_row:
         return wri
     adj = 0
@@ -66,7 +65,7 @@ async def _record_search(pool, q, results, session_id="", query_id="", user_id=N
             if results:
                 ep = results[0].get("endpoint_url", "")
                 top_slug = "0x" + hashlib.sha256(ep.encode()).hexdigest() if ep else None
-                top_wri = int(compute_wri(results[0], results[0].get("score", 0)))
+                top_wri = int(results[0].get("wri_score") or 0)
 
             await conn.execute("""
                 INSERT INTO search_analytics
@@ -305,34 +304,8 @@ async def search_services(
         asyncio.create_task(_record_search(pool, q, ranked, session_id, query_id, auth.get("user_id")))
     if pool and agent_id:
         asyncio.create_task(_update_identity_search(pool, agent_id))
-    popular_ids: dict = {}
-    payment_ids: dict = {}
-    try:
-        pop_rows = await db.fetch("""
-            SELECT top_result_id, COUNT(*) as c
-            FROM search_analytics
-            WHERE created_at > NOW() - INTERVAL '7 days'
-              AND top_result_id IS NOT NULL
-            GROUP BY top_result_id
-            ORDER BY c DESC LIMIT 50
-        """)
-        max_count = max((r["c"] for r in pop_rows), default=1)
-        popular_ids = {str(r["top_result_id"]): (r["c"] / max_count) * 5 for r in pop_rows}
 
-        pay_rows = await db.fetch("""
-            SELECT service_id, SUM(COALESCE(signal_weight, 1.0)) as c
-            FROM search_outcomes
-            WHERE outcome_type = 'payment_initiated'
-              AND created_at > NOW() - INTERVAL '7 days'
-              AND service_id IS NOT NULL
-            GROUP BY service_id ORDER BY c DESC LIMIT 50
-        """)
-        max_pay = max((r["c"] for r in pay_rows), default=1)
-        payment_ids = {str(r["service_id"]): (r["c"] / max_pay) * 8 for r in pay_rows}
-    except Exception:
-        pass  # non-critical: payment history boost skipped if table unavailable
-
-    # Load service health for WRI adjustment
+    # Load service health for reliability-score adjustment
     _health_map: dict = {}
     try:
         _top_slugs = [s.get("slug") for s in top if s.get("slug")]
@@ -343,7 +316,7 @@ async def search_services(
             )
             _health_map = {r["slug"]: r for r in _health_rows}
     except Exception:
-        pass  # non-critical: health map absent means no latency adjustment to WRI scores
+        pass  # non-critical: health map absent means no latency adjustment to reliability scores
 
     # Load Pioneer Boost metadata for each result slug.
     # Joins provider_services → providers to find active (non-paused, non-expired) boosts.
@@ -385,7 +358,7 @@ async def search_services(
         slug = s.get("slug")
         _boost = _boost_map.get(slug, {})
         _wri = _apply_health_wri(
-            s["wri_score"] if (s.get("wri_score") is not None and s.get("wri_version") == "v2") else compute_wri(s, s.get("score", 0), popularity_boost=popular_ids.get(str(s.get("id")), 0.0), payment_boost=payment_ids.get(str(s.get("id")), 0.0)),
+            s.get("wri_score"),   # stored score only — never recomputed in the gateway
             _health_map.get(slug),
         )
         result = {
