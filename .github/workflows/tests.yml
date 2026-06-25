@@ -43,3 +43,44 @@ jobs:
             tests/test_authz2_last_ceo.py \
             tests/test_billing1_referral_redeem.py \
             tests/test_exec1_request_pinned.py
+
+  # Forced proof that loop budgets hard-stop at the ceiling against a REAL database:
+  # applies migration 066 to an ephemeral Postgres and exercises the actual money-path
+  # SQL (run_budgets upsert, credit_transactions tagged with run_id, the ledger SUM,
+  # and the pre-spend enforcement in _run_core) through the /run/budgets + /run
+  # handlers. Fails the build if the over-cap call isn't refused-before-deduct.
+  budget-proof:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: budget_proof
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (runtime only — no dev/test deps)
+        run: uv sync --no-dev --frozen || uv sync --no-dev
+
+      - name: Run loop-budget proof against ephemeral Postgres
+        env:
+          ENVIRONMENT: development
+          RUN_BUDGET_PROOF_DSN: postgresql://postgres:postgres@localhost:5432/budget_proof
+        run: uv run --no-dev python scripts/budget_proof.py
