@@ -40,8 +40,8 @@ from core.db import get_db
 logger = logging.getLogger("wayforth")
 router = APIRouter()
 
-# Gateway base for the advertised A2A endpoint. The card is SERVED here; the
-# signature's jku still names the brand apex (see keys.APEX_JKU).
+# Gateway base for the advertised A2A endpoint. The card is SERVED here, and the
+# signature's jku names this same origin's JWKS (see keys.SIGNING_JKU) — no apex.
 _GATEWAY_BASE = os.environ.get("WAYFORTH_GATEWAY_BASE", "https://gateway.wayforth.io").rstrip("/")
 _A2A_ENDPOINT = f"{_GATEWAY_BASE}/a2a"
 
@@ -99,7 +99,7 @@ async def agent_card(db=Depends(get_db)):
     return JSONResponse(card, headers={"Cache-Control": "public, max-age=300"})
 
 
-# ── well-known: JWKS (public signing keys; apex rewrites to this) ─────────────
+# ── well-known: JWKS (public signing keys; the card's jku names this URL) ─────
 
 @router.get("/.well-known/jwks.json", include_in_schema=False)
 async def jwks(db=Depends(get_db)):

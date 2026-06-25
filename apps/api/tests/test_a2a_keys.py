@@ -142,12 +142,14 @@ def test_unknown_kid_and_unsigned_fail():
     assert SIGN.verify_card(_card(), {"keys": [jwk]}) is False     # no signatures
 
 
-def test_signature_header_carries_apex_jku():
+def test_signature_header_carries_gateway_jku():
+    # jku names the gateway's own JWKS — the same origin that serves the card and
+    # the keys (no apex rewrite). The A2A verifier imposes no same-origin/apex rule.
     kid, priv, _ = K.generate_signing_key()
     signed = SIGN.sign_card(_card(), kid, priv)
     header = json.loads(SIGN._b64url_decode(signed["signatures"][0]["protected"]))
     assert header["alg"] == "ES256" and header["kid"] == kid
-    assert header["jku"] == "https://wayforth.io/.well-known/jwks.json"
+    assert header["jku"] == K.SIGNING_JKU == "https://gateway.wayforth.io/.well-known/jwks.json"
 
 
 # ── SDK-aligned canonicalization (the byte-exactness contract) ────────────────

@@ -43,7 +43,7 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from core.a2a.card import build_agent_card, strip_sdk_signing_defaults
-from core.a2a.keys import APEX_JKU, SIGNING_ALG, get_active_signing_key
+from core.a2a.keys import SIGNING_ALG, SIGNING_JKU, get_active_signing_key
 
 
 def _b64url(raw: bytes) -> str:
@@ -89,7 +89,7 @@ def sign_card(card: dict, kid: str, private_key: ec.EllipticCurvePrivateKey) -> 
     payload = json.loads(canonical)
     jws = jwt.encode(
         payload=payload, key=private_key, algorithm=SIGNING_ALG,
-        headers={"kid": kid, "jku": APEX_JKU},
+        headers={"kid": kid, "jku": SIGNING_JKU},
     )
     protected, _payload_b64, signature = jws.split(".")
     signed = dict(card)

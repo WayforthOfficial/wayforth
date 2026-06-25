@@ -27,7 +27,7 @@ a2a_signing = pytest.importorskip("a2a.utils.signing")
 sdk_helpers = pytest.importorskip("a2a.utils.helpers")
 
 from core.a2a.card import build_agent_card                 # noqa: E402
-from core.a2a.keys import APEX_JKU, generate_signing_key    # noqa: E402
+from core.a2a.keys import SIGNING_JKU, generate_signing_key    # noqa: E402
 from core.a2a.sign import canonicalize_agent_card, sign_card, verify_card  # noqa: E402
 
 AgentCard = a2a_types.AgentCard
@@ -71,7 +71,7 @@ def test_we_verify_sdk_signature():
 
     signer = a2a_signing.create_agent_card_signer(
         signing_key=priv,
-        protected_header={"alg": "ES256", "kid": kid, "jku": APEX_JKU},
+        protected_header={"alg": "ES256", "kid": kid, "jku": SIGNING_JKU},
         header={})
     sdk_signed = signer(AgentCard.model_validate(_card()))
     served = sdk_signed.model_dump(by_alias=True, exclude_none=True)

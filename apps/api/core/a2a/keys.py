@@ -8,10 +8,11 @@ plus >=1 retiring keypair during a rotation overlap. Design decisions (approved)
     Plaintext private bytes never touch the DB and never leave the gateway. No new
     secret store; key_version lets us re-encrypt under a rotated ENCRYPTION_KEY.
 
-  • SINGLE SOURCE OF TRUTH — the gateway generates and serves the JWKS. The brand
-    apex (APEX_JKU) is the issuer identity in the JWS header `jku`; the apex
-    transparently REWRITES to the gateway JWKS, so a key rotation requires no apex
-    or Lovable deploy — only a DB write here.
+  • SINGLE SOURCE OF TRUTH — the gateway generates, serves, AND names the JWKS:
+    the JWS header `jku` (SIGNING_JKU) points straight at the gateway's
+    /.well-known/jwks.json — the same origin that serves the Agent Card. A key
+    rotation is a DB write here and nothing else: no apex / DNS / edge rewrite
+    exists or is needed (the A2A verifier never requires a same-origin or apex jku).
 
   • >=2-KEY ROTATION WINDOW — JWKS publishes active + retiring public keys, so a
     verifier that fetched the old key just before a rotation still validates the
@@ -26,6 +27,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 
 import asyncpg
 from cryptography.hazmat.primitives import serialization
@@ -33,10 +35,16 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from core.auth import decrypt_api_key, encrypt_api_key
 
-# Issuer identity placed in the card signature's JWS `jku` header. The card is
-# SERVED from the gateway, but the issuer is the brand apex; the apex rewrites to
-# the gateway JWKS. Issuer identity and serving endpoint are deliberately separate.
-APEX_JKU = "https://wayforth.io/.well-known/jwks.json"
+# The JWS `jku` header — where the JWKS is actually served: the gateway, the same
+# origin that serves the Agent Card. The A2A spec / a2a-sdk verifier impose no
+# same-origin requirement and never auto-fetch jku (key_provider(kid, jku) is
+# caller-supplied), but naming the host that truly serves the keys means a relying
+# party that DOES fetch jku always resolves — with no apex rewrite / DNS infra.
+# Derived from the same WAYFORTH_GATEWAY_BASE that builds the card `url`, so card
+# url and jku share an origin across every environment.
+_GATEWAY_BASE = os.environ.get("WAYFORTH_GATEWAY_BASE", "https://gateway.wayforth.io").rstrip("/")
+WELL_KNOWN_JWKS_PATH = "/.well-known/jwks.json"
+SIGNING_JKU = f"{_GATEWAY_BASE}{WELL_KNOWN_JWKS_PATH}"
 
 SIGNING_ALG = "ES256"
 SIGNING_CRV = "P-256"
@@ -146,8 +154,8 @@ async def get_active_signing_key(db) -> tuple[str, ec.EllipticCurvePrivateKey]:
 
 async def get_jwks(db) -> dict:
     """Public JWKS: active + retiring keys (public halves only). This is the body
-    served at the gateway /.well-known/jwks.json and, via apex rewrite, at
-    APEX_JKU. Private material is never read here."""
+    served at the gateway /.well-known/jwks.json — the same URL the card signature's
+    jku (SIGNING_JKU) names. Private material is never read here."""
     rows = await db.fetch(
         "SELECT public_jwk FROM a2a_signing_keys "
         "WHERE status IN ('active', 'retiring') ORDER BY created_at DESC")
