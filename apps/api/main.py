@@ -1940,7 +1940,33 @@ async def health(request: Request):
 
 @app.get("/status", tags=["System"])
 async def system_status(db=Depends(get_db)):
-    """Public system status — uptime, service count, last health check."""
+    """Public system status — minimal operational signal only. Detailed metrics
+    (catalog counts, ranking version, payment-rail / x402 / contract detail, recent
+    search volume) are admin-gated at /status/internal — they are not public."""
+    db_ok = True
+    try:
+        await db.fetchval("SELECT 1")
+    except Exception:
+        db_ok = False
+    return {
+        "status": "operational" if db_ok else "degraded",
+        "version": VERSION,
+        "api": "operational",
+        "database": "operational" if db_ok else "degraded",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/status/internal", tags=["System"], include_in_schema=False)
+async def system_status_internal(request: Request, db=Depends(get_db)):
+    """Admin-only — the full status detail moved off the public /status payload:
+    catalog counts, ranking version, payment rails, x402, pricing, contracts, and
+    recent search volume. Gated by core.admin_auth.admin_authed (session token or
+    the break-glass X-Admin-Key, when enabled)."""
+    from core.admin_auth import admin_authed
+    if not await admin_authed(request, db):
+        raise HTTPException(status_code=403, detail={"error": "admin_required"})
+
     stats = await db.fetchrow("""
         SELECT
             COUNT(*) FILTER (WHERE coverage_tier >= 2 AND consecutive_failures < 3) as tier2_services,
@@ -1952,10 +1978,9 @@ async def system_status(db=Depends(get_db)):
         SELECT COUNT(*) FROM search_analytics
         WHERE created_at > NOW() - INTERVAL '24h'
     """)
-    # Rail-live status from the single source of truth (core.rails). A public
-    # endpoint must NEVER advertise a rail as live while its launch flag is off —
-    # same honesty rule as the status banner. x402's rail_live additionally folds
-    # in the funded-settlement check. Until RAILS_LIVE flips, all three read false.
+    # Rail-live status from the single source of truth (core.rails). x402's
+    # rail_live additionally folds in the funded-settlement check. Until RAILS_LIVE
+    # flips, all three read false.
     from core.rails import rail_live
     _card_live = rail_live("card")
     _usdc_live = rail_live("usdc")
@@ -1968,7 +1993,7 @@ async def system_status(db=Depends(get_db)):
     return {
         "status": "operational",
         "version": VERSION,
-        "wayforthrank_version": "2.0",
+        "rank_version": "2.0",
         "services": {
             "total": stats["total_services"],
             "tier2": stats["tier2_services"],
