@@ -461,7 +461,7 @@ async def account_analytics(request: Request, db=Depends(get_db)):
     else:
         reset = _datetime.date(today.year, today.month + 1, 1)
 
-    # WRI scores per service (from search→execute signal chain)
+    # reliability scores per service (from search→execute signal chain)
     wri_rows = await db.fetch("""
         SELECT
             clicked_slug AS service,
@@ -1273,7 +1273,7 @@ async def pioneer_leave(request: Request, db=Depends(get_db)):
     """Opt the authenticated developer out of the Pioneer Program.
 
     Credits already dripped are kept — no clawback. Routing reverts to normal
-    WayforthRank immediately, the daily drip stops, and a 7-day rejoin cooldown
+    merit-based ranking immediately, the daily drip stops, and a 7-day rejoin cooldown
     is set (pioneer_last_drip_date is cleared so a future rejoin starts fresh).
     """
     caller = await resolve_dashboard_caller(request, db)
@@ -1445,7 +1445,7 @@ async def pioneer_status(request: Request, db=Depends(get_db)):
         "pioneer_calls_this_month":              int(pioneer_calls_this_month),   # backward compat
         # How many providers currently have an active boost window. When 0, the
         # 60% routing bucket is empty and pioneer_routing degrades gracefully to
-        # normal WayforthRank order (signal_weight stays 1.0).
+        # normal merit-based ranking order (signal_weight stays 1.0).
         "active_boosted_providers":              int(active_boosted_providers),
     }
 

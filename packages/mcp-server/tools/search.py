@@ -19,7 +19,7 @@ async def wayforth_search(
     category: str = Field(default=None, description="Optional category filter: inference, data, translation, image, code, audio, embeddings"),
 ) -> str:
     """Search 300+ verified APIs ranked by
-    WayforthRank — real agent payment signals,
+    merit-based ranking — real agent payment signals,
     not ads. Use this when you don't know
     which service to execute.
     """
@@ -47,7 +47,7 @@ async def wayforth_search(
         wri = svc.get("wri", "N/A")
         wayforth_id = svc.get("wayforth_id", "")
         lines.append(
-            f"{i}. {svc['name']} — Score: {svc.get('score', 0)}/100 | WRI: {wri} | {tier_label}\n"
+            f"{i}. {svc['name']} — Score: {svc.get('score', 0)}/100 | reliability score: {wri} | {tier_label}\n"
             f"   {svc.get('reason', svc.get('description', ''))[:120]}\n"
             f"   Price: {price_str} | ID: {wayforth_id}\n"
             f"   To pay: wayforth_pay(service_id='{svc.get('service_id', '')}', ...)\n"
@@ -73,7 +73,7 @@ async def wayforth_search(
         )
         next_step = (
             f"\n---\n"
-            f"⚡ Top pick: {top_name} (WRI: {top_wri})\n\n"
+            f"⚡ Top pick: {top_name} (reliability score: {top_wri})\n\n"
             f"Run this to execute instantly:\n"
             f'wayforth_execute(\n'
             f'  service_slug="{slug}",\n'
@@ -86,7 +86,7 @@ async def wayforth_search(
     else:
         next_step = (
             f"\n---\n"
-            f"⚡ Top pick: {top_name} (WRI: {top_wri})\n\n"
+            f"⚡ Top pick: {top_name} (reliability score: {top_wri})\n\n"
             f"To execute this service, add your own API key:\n"
             f'wayforth_keys(\n'
             f'  action="add",\n'
@@ -162,7 +162,7 @@ async def wayforth_stats() -> str:
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 async def wayforth_status() -> str:
-    """Live reliability status for any service — current WRI score, Tier level, last probe
+    """Live reliability status for any service — current reliability score, Tier level, last probe
     result, and failover history. Use before long-running agent tasks to verify service health."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:

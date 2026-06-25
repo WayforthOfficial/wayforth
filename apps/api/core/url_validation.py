@@ -2,7 +2,7 @@
 
 Webhooks register URLs that the server will later POST to. Without validation,
 a caller can register http(s)://169.254.169.254/... (cloud metadata) or
-http(s)://postgres.railway.internal/... and turn webhook delivery into a
+an internal-only host (e.g. a private database) and turn webhook delivery into a
 blind-SSRF probe against our own infrastructure.
 
 `validate_external_url` rejects internal targets at *registration* time so

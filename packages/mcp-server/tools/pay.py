@@ -35,7 +35,7 @@ async def wayforth_pay(
         service_id: Service to pay (from wayforth_search results)
         amount_usd: Amount to pay in USD (e.g. 0.001)
         track: Payment track — 'card' or 'crypto' (default: 'card')
-        query_id: Optional query ID from wayforth_search for WayforthRank signal
+        query_id: Optional query ID from wayforth_search for ranking signal
     """
     api_key = _get_api_key()
     if not api_key:

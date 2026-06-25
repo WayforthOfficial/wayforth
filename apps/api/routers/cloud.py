@@ -18,7 +18,7 @@ Security model:
   - Credits: proxy calls deduct from owner's balance normally;
     compute charge (1.5 credits/actual-min, ceil, 1-credit min) at completion
 
-WayforthRank data path:
+merit-based ranking data path:
   At run completion, credit_transactions WHERE agent_id = run_id are
   reconciled and written to agent_runs.services_called / failover_events /
   substitutions — this is the primary signal path for Cloud moat data.
@@ -138,7 +138,7 @@ async def _resolve_caller(request: Request, db) -> tuple[str, str, str]:
 
 
 async def _reconcile_run_signals(pool, run_id: str, user_id: str) -> dict[str, Any]:
-    """Query credit_transactions attributed to this run and build WayforthRank signal dict."""
+    """Query credit_transactions attributed to this run and build ranking signal dict."""
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT
@@ -276,7 +276,7 @@ async def _execute_run(
     user_api_key: str,
     credits_reserved: int,
 ) -> None:
-    """Background task: dispatch to E2B sandbox, settle credits, write WayforthRank signals.
+    """Background task: dispatch to E2B sandbox, settle credits, write ranking signals.
 
     Pre-reserve model:
       credits_reserved  — deducted from balance at dispatch (= credit_cap when set, else 0)
@@ -364,7 +364,7 @@ async def _execute_run(
                 run_id, user_id, compute_credits,
             )
 
-        # Reconcile WayforthRank signals from proxy calls during this run
+        # Reconcile ranking signals from proxy calls during this run
         signals = await _reconcile_run_signals(pool, run_id, user_id)
         proxy_credits = signals["credits_proxy"]
 

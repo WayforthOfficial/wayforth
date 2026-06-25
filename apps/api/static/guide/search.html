@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Search &amp; Discovery — Wayforth Docs</title>
-  <meta name="description" content="wayforth_search reference, WayforthQL v1.1, available filters, all 19 categories, and WRI score explained.">
+  <meta name="description" content="wayforth_search reference, WayforthQL v1.1, available filters, all 19 categories, and reliability score explained.">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
 </head>
@@ -48,7 +48,7 @@
         <a href="#wayforthql" class="toc-link">WayforthQL v1.1</a>
         <a href="#filters" class="toc-link">Filters</a>
         <a href="#categories" class="toc-link">Categories</a>
-        <a href="#wri" class="toc-link">WRI Score</a>
+        <a href="#wri" class="toc-link">reliability score Score</a>
       </div>
     </nav>
   </aside>
@@ -57,12 +57,12 @@
     <div class="content-inner">
       <div class="page-badge">Search &amp; Discovery</div>
       <h1 class="page-title">Search &amp; Discovery</h1>
-      <p class="page-lead">Find the right service for any task using natural language or structured WayforthQL queries. Results are ranked by WRI — Wayforth's live reliability index.</p>
+      <p class="page-lead">Find the right service for any task using natural language or structured WayforthQL queries. Results are ranked by reliability score — Wayforth's live reliability index.</p>
 
       <!-- wayforth_search -->
       <section id="wayforth-search">
         <h2>wayforth_search()</h2>
-        <p>Natural language search across the Wayforth catalog. Returns services ranked by semantic relevance × WRI score.</p>
+        <p>Natural language search across the Wayforth catalog. Returns services ranked by semantic relevance × reliability score.</p>
 
         <div class="sig">
           <span class="kw">def</span> <span class="fn">wayforth_search</span>(
@@ -136,7 +136,7 @@
           <div class="param-row">
             <span class="pname">wri_score</span>
             <span class="ptype">int</span>
-            <span class="pdesc">Wayforth Reliability Index, 0–100</span>
+            <span class="pdesc">reliability score, 0–100</span>
           </div>
           <div class="param-row">
             <span class="pname">tier</span>
@@ -277,7 +277,7 @@ results = client.query("category:vision AND max_price_usd:<=0.01 SORT BY wri_sco
               <tr>
                 <td><code>tier</code></td>
                 <td>int 1–5</td>
-                <td>Service tier. <strong>1</strong> = community, <strong>3</strong> = production-ready (WRI ≥ 80), <strong>5</strong> = enterprise SLA.</td>
+                <td>Service tier. <strong>1</strong> = community, <strong>3</strong> = production-ready (reliability score ≥ 80), <strong>5</strong> = enterprise SLA.</td>
               </tr>
               <tr>
                 <td><code>max_price_usd</code></td>
@@ -371,10 +371,10 @@ results = client.query("category:vision AND max_price_usd:<=0.01 SORT BY wri_sco
         </div>
       </section>
 
-      <!-- WRI -->
+      <!-- reliability score -->
       <section id="wri">
-        <h2>WRI Score</h2>
-        <p>The <strong>Wayforth Reliability Index (WRI)</strong> is a live 0–100 score that measures how trustworthy a service is for production use. It is recalculated continuously from real call data.</p>
+        <h2>reliability score Score</h2>
+        <p>The <strong>reliability score</strong> is a live 0–100 score that measures how trustworthy a service is for production use. It is recalculated continuously from real call data.</p>
 
         <h3>Score components</h3>
         <div class="tbl-wrap">
@@ -419,10 +419,10 @@ results = client.query("category:vision AND max_price_usd:<=0.01 SORT BY wri_sco
           </div>
         </div>
 
-        <p>Services with WRI ≥ 80 are recommended for production workloads. The default search results are sorted by a weighted combination of semantic relevance and WRI score.</p>
+        <p>Services with reliability score ≥ 80 are recommended for production workloads. The default search results are sorted by a weighted combination of semantic relevance and reliability score.</p>
 
         <div class="callout cn">
-          <p><strong>Note:</strong> WRI is computed for each service independently. A service can drop below 80 if its upstream provider degrades. Wayforth's self-healing payment layer will automatically retry or reroute calls to a backup provider when this happens.</p>
+          <p><strong>Note:</strong> reliability score is computed for each service independently. A service can drop below 80 if its upstream provider degrades. Wayforth's self-healing payment layer will automatically retry or reroute calls to a backup provider when this happens.</p>
         </div>
       </section>
 

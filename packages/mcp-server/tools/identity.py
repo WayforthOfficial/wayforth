@@ -88,10 +88,10 @@ async def wayforth_check_agent_identity(
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 async def wayforth_set_wri_alert(
     notify_url: str = Field(
-        description="HTTPS webhook URL to POST to when a service crosses the WRI threshold."
+        description="HTTPS webhook URL to POST to when a service crosses the reliability score threshold."
     ),
     threshold_score: float = Field(
-        description="WRI score threshold (50.0 – 99.9). Alert fires when any matching service crosses this score upward."
+        description="reliability score threshold (50.0 – 99.9). Alert fires when any matching service crosses this score upward."
     ),
     category: str = Field(
         default=None,
@@ -110,7 +110,7 @@ async def wayforth_set_wri_alert(
     ),
 ) -> str:
     """
-    Register a webhook to be notified when any API service crosses a WayforthRank WRI score threshold.
+    Register a webhook to be notified when any API service crosses a reliability score threshold.
 
     The webhook fires once per service per 24 hours when the score crosses upward through the threshold.
     Payload is HMAC-SHA256 signed with X-Wayforth-Signature for verification.
@@ -138,7 +138,7 @@ async def wayforth_set_wri_alert(
         if resp.status_code != 200:
             return f"Error {resp.status_code}: {data}"
         lines = [
-            f"WRI alert registered.",
+            f"reliability score alert registered.",
             f"  ID:              {data.get('id')}",
             f"  Threshold:       {data.get('threshold_score')}",
             f"  Category:        {data.get('category') or 'all categories'}",
@@ -146,7 +146,7 @@ async def wayforth_set_wri_alert(
             f"  Notify URL:      {data.get('notify_url')}",
             f"  Created:         {data.get('created_at')}",
             "",
-            "The webhook fires when any service crosses this WRI threshold upward (24hr cooldown).",
+            "The webhook fires when any service crosses this reliability score threshold upward (24hr cooldown).",
             "Payload is HMAC-SHA256 signed. Verify with X-Wayforth-Signature header.",
         ]
         return "\n".join(lines)
@@ -180,8 +180,8 @@ STEP 2 — Execute instantly (12 managed services, no API keys needed):
 
 STEP 3 — Discover (when you don't know which service to use):
   wayforth_search("translate text to Spanish")
-  → DeepL        WRI:82  Tier 2  $0.00003/call
-  → LibreTranslate  WRI:71  Tier 2  Free
+  → DeepL        reliability score:82  Tier 2  $0.00003/call
+  → LibreTranslate  reliability score:71  Tier 2  Free
 
 STEP 4 — Pay (choose your track):
 
@@ -220,7 +220,7 @@ All tools (in recommended order):
   wayforth_remember    — save a service to agent memory
   wayforth_recall      — retrieve saved services
   wayforth_check_agent_identity — look up x402 wallet reputation and tier
-  wayforth_set_wri_alert — register webhook for WRI threshold alerts
+  wayforth_set_wri_alert — register webhook for reliability score threshold alerts
   wayforth_stats       — catalog statistics
   wayforth_status      — API health check
   wayforth_quickstart  — this guide

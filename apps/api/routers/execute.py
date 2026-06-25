@@ -112,7 +112,7 @@ _FAILURE_REASON_LABELS: dict[str, str] = {
 
 
 async def _fetch_wri(db, slug: str) -> float | None:
-    """Return the current WRI score for a catalog slug, or None."""
+    """Return the current reliability score for a catalog slug, or None."""
     from services.param_mapper import MANAGED_TO_CATALOG as _M2C
     catalog_slug = _M2C.get(slug, slug)
     try:
@@ -475,13 +475,13 @@ async def _is_self_dealing(conn, user_id: str, clicked_slug: str) -> bool:
     """True if `user_id` owns the provider behind `clicked_slug` (FINDING-009).
 
     A provider searching for and executing their own service would otherwise
-    inflate their WRI conversion signal (payment_followed=true) at full weight.
+    inflate their reliability score conversion signal (payment_followed=true) at full weight.
     We detect the overlap by matching the executing user's email(s) to the
     provider that owns the clicked service.
 
     FINDING-105 (accepted risk, v0.9.x backlog): this exclusion is single-
     dimension (user_id only). A provider can still self-deal from a SECOND
-    account (different user_id) to inflate their own service's WRI. Backlog
+    account (different user_id) to inflate their own service's reliability score. Backlog
     hardening: (1) distinct-buyer floor so one user can't dominate a service's
     conversion signal, (2) per-user signal-weight cap, (3) IP/ASN + device-
     fingerprint clustering on search_analytics. Not blocking v0.9.0.
@@ -508,7 +508,7 @@ async def _update_search_signal(pool, user_id: str, clicked_slug: str):
             # The execution is still recorded for billing; it just doesn't mark
             # payment_followed (set signal_weight=0 equivalent by not counting it).
             if await _is_self_dealing(conn, user_id, clicked_slug):
-                logger.info("WRI self-deal excluded: user=%s slug=%s", user_id, clicked_slug)
+                logger.info("reliability score self-deal excluded: user=%s slug=%s", user_id, clicked_slug)
                 return
             await conn.execute("""
                 UPDATE search_analytics
@@ -927,7 +927,7 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
         usdc_address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
         amount_usdc = amount_usd
 
-        # Log payment intent for WayforthRank
+        # Log payment intent for merit-based ranking
         if query_id and service:
             try:
                 await db.execute(
@@ -991,7 +991,7 @@ async def pay_for_service(request: Request, db=Depends(get_db)):
             },
         )
 
-    # Log payment for WayforthRank
+    # Log payment for merit-based ranking
     if query_id and service:
         try:
             await db.execute(
@@ -2146,7 +2146,7 @@ async def _run_core(
             if _adj:
                 wri = max(0.0, float(wri) + _adj)
     except Exception:
-        pass  # non-critical: WRI health adjustment is best-effort
+        pass  # non-critical: reliability score health adjustment is best-effort
 
     _run_result = {
         "result": result,

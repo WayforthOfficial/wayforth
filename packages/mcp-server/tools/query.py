@@ -14,7 +14,7 @@ async def wayforth_query(
     category: str = Field(default=None, description="Filter by category: inference, translation, data, search, audio, image, etc."),
     price_max: float = Field(default=None, description="Maximum price per API call in USD (e.g. 0.001 for $0.001/call)"),
     protocol: str = Field(default=None, description="Payment protocol filter (e.g. 'x402' for HTTP 402 native services)"),
-    sort_by: str = Field(default="wri", description="Sort order: 'wri' (WayforthRank score, default), 'price' (cheapest first), 'tier' (highest tier first)"),
+    sort_by: str = Field(default="wri", description="Sort order: 'wri' (reliability score, default), 'price' (cheapest first), 'tier' (highest tier first)"),
     limit: int = Field(default=5, description="Number of results to return (1–50)"),
     x402_only: bool = Field(default=False, description="When true, return only x402-native services"),
     provider: str = Field(default=None, description="Filter by provider name substring (e.g. 'openai', 'google')"),
