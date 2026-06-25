@@ -24,7 +24,7 @@ router = APIRouter()
 
 
 def _apply_health_wri(wri, health_row) -> float:
-    """Reduce WRI score based on live service health data."""
+    """Reduce the stored reliability score based on live service health data."""
     if wri is None or not health_row:
         return wri
     adj = 0
