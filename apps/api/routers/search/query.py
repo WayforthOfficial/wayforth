@@ -14,7 +14,6 @@ from core.credits import CREDIT_COSTS, check_and_deduct_credits
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier, check_rate_limit
-from services.wayforthrank import compute_wri
 
 logger = logging.getLogger("wayforth")
 
@@ -207,7 +206,7 @@ async def wayforthql(request: Request, body: WayforthQLQuery, auth: dict = Depen
             "name": s.get("name"),
             "slug": s.get("slug"),
             "score": s.get("score", 0),
-            "wri": compute_wri(s, s.get("score", 0)),
+            "wri": s.get("wri_score"),
             "reason": s.get("reason", ""),
             "coverage_tier": s.get("coverage_tier"),
             "category": s.get("category"),

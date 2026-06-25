@@ -67,7 +67,6 @@ from core.rate_limit import limiter
 from core.tier_gates import require_tier, _get_redis
 from services.managed import SERVICE_CONFIGS, _active_managed_count
 from services.param_mapper import MANAGED_TO_CATALOG
-from services.wayforthrank import compute_wri
 
 _DB_URL = os.environ.get("DATABASE_URL", "")
 _ASYNCPG_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://")
