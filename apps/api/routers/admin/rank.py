@@ -18,7 +18,7 @@ router = APIRouter()
 
 @router.post("/admin/rank/recalculate", tags=["Admin"])
 async def rank_recalculate(request: Request, db=Depends(get_db)):
-    """Recompute WayforthRank v2 scores for all services with payment signal data.
+    """Recompute merit-based ranking scores for all services with payment signal data.
 
     Proxies to the wayforth-rank private service (RANK_SERVICE_URL) so the
     v2 formula weights stay out of this public container."""

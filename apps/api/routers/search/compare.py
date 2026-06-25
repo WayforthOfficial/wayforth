@@ -78,7 +78,7 @@ async def compare_services(
     auth: dict = Depends(check_auth),
     db=Depends(get_db),
 ):
-    """Compare 2-5 services side by side: WRI, cost, signals, response time, recommendation."""
+    """Compare 2-5 services side by side: reliability score, cost, signals, response time, recommendation."""
     from datetime import datetime, timezone
     from ranker_client import rank_services
     from services.x402_pricing import X402_PRICES_USDC
@@ -232,7 +232,7 @@ async def compare_services(
 
     # Step 5 — Recommendation
     top = services_out[0]
-    reason_parts = [f"{top['name']} leads with WRI {top['wri_score']}"]
+    reason_parts = [f"{top['name']} leads with reliability score {top['wri_score']}"]
     if top["total_signals"]:
         reason_parts.append(f"{top['total_signals']} search signals")
     if top["avg_response_ms"]:
@@ -365,7 +365,7 @@ async def service_intelligence(request: Request, service_id: str, api_key: str =
 @router.get("/services/{service_id}/wri")
 @limiter.limit("30/minute")
 async def service_wri(request: Request, service_id: str, db=Depends(get_db)):
-    """Current WRI score and 7-day trend for a service."""
+    """Current reliability score and 7-day trend for a service."""
     async with request.app.state.pool.acquire() as conn:
         history = await conn.fetch("""
             SELECT wri_score, tier, recorded_at
@@ -401,7 +401,7 @@ async def service_wri(request: Request, service_id: str, db=Depends(get_db)):
 @router.get("/services/{service_id}/history")
 @limiter.limit("20/minute")
 async def service_history(request: Request, service_id: str, days: int = Query(default=30, ge=1, le=90)):
-    """WRI score trend for a service over time. Powers reliability trend visualization."""
+    """reliability score trend for a service over time. Powers reliability trend visualization."""
     async with request.app.state.pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT wri_score, tier, consecutive_failures, recorded_at
@@ -440,7 +440,7 @@ async def mcp_server_card():
     return {
         "name": "wayforth",
         "version": "0.2.3",
-        "description": "The search engine AI agents use to find and pay for APIs. Search 300+ verified APIs ranked by WayforthRank v2.",
+        "description": "The search engine AI agents use to find and pay for APIs. Search 300+ verified APIs ranked by merit-based routing (no paid placement).",
         "repository": "https://github.com/WayforthOfficial/wayforth",
         "homepage": "https://wayforth.io",
         "license": "BSL-1.1",
@@ -458,7 +458,7 @@ async def mcp_server_card():
             },
         },
         "tools": [
-            {"name": "wayforth_search", "description": "Search 300+ verified APIs ranked by WayforthRank v2 payment signals"},
+            {"name": "wayforth_search", "description": "Search 300+ verified APIs ranked by merit-based ranking signals"},
             {"name": "wayforth_execute", "description": "Execute any managed service with zero API keys"},
             {"name": "wayforth_query", "description": "WayforthQL structured query with filters"},
             {"name": "wayforth_pay", "description": "Pay for API services via card (Stripe Treasury) or crypto (Base USDC, non-custodial)"},
@@ -482,7 +482,7 @@ async def mcp_manifest():
         "schema_version": "v1",
         "name": "wayforth",
         "version": "0.2.3",
-        "description": "Search engine and payment rail for AI agents. 300 verified APIs, 11 managed services, WayforthRank v2.",
+        "description": "Search engine and payment rail for AI agents. 300 verified APIs, 11 managed services, merit-based ranking.",
         "homepage": "https://wayforth.io",
         "icon": "https://wayforth.io/logo.png",
         "transport": {
@@ -503,7 +503,7 @@ async def mcp_manifest():
         "tools": [
             {
                 "name": "wayforth_search",
-                "description": "Semantic search across 300 APIs ranked by WayforthRank v2 payment-signal scoring.",
+                "description": "Semantic search across 300 APIs ranked by merit-based ranking.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

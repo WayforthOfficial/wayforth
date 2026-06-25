@@ -1,4 +1,4 @@
-"""routers/webhooks.py — Webhook registration, listing, deletion, and WRI alerts."""
+"""routers/webhooks.py — Webhook registration, listing, deletion, and reliability score alerts."""
 
 import asyncio
 import hashlib
@@ -81,11 +81,11 @@ async def _enqueue_wri_alert(
     is_new = old_wri is None
 
     if is_new:
-        msg = (f"A new service ({svc_name}) just entered WayforthRank above your "
+        msg = (f"A new service ({svc_name}) just entered merit-based ranking above your "
                f"threshold of {threshold}. Current score: {round(new_wri, 1)} "
                f"({total_signals} signals, {pay_rate}% payment conversion).")
     else:
-        msg = (f"{svc_name} crossed your WRI alert threshold of {threshold}. "
+        msg = (f"{svc_name} crossed your reliability score alert threshold of {threshold}. "
                f"Current score: {round(new_wri, 1)} "
                f"({total_signals} signals, {pay_rate}% payment conversion).")
 
@@ -169,11 +169,11 @@ async def _deliver_wri_alert(
     is_new = old_wri is None
 
     if is_new:
-        msg = (f"A new service ({svc_name}) just entered WayforthRank above your "
+        msg = (f"A new service ({svc_name}) just entered merit-based ranking above your "
                f"threshold of {threshold}. Current score: {round(new_wri, 1)} "
                f"({total_signals} signals, {pay_rate}% payment conversion).")
     else:
-        msg = (f"{svc_name} crossed your WRI alert threshold of {threshold}. "
+        msg = (f"{svc_name} crossed your reliability score alert threshold of {threshold}. "
                f"Current score: {round(new_wri, 1)} "
                f"({total_signals} signals, {pay_rate}% payment conversion).")
 
@@ -416,12 +416,12 @@ async def list_webhooks(request: Request, db=Depends(get_db)):
     return {"webhooks": webhooks, "total": len(webhooks)}
 
 
-# WRI alert webhooks — must be before /webhooks/{webhook_id} (static before parameterized)
+# reliability score alert webhooks — must be before /webhooks/{webhook_id} (static before parameterized)
 
 @router.post("/webhooks/wri-alerts", tags=["Webhooks"])
 @limiter.limit("20/minute")
 async def create_wri_alert(request: Request, db=Depends(get_db)):
-    """Register a webhook that fires when any service crosses a WRI score threshold."""
+    """Register a webhook that fires when any service crosses a reliability score threshold."""
     # Session-OR-key (PR #25 pattern): the dashboard alerts UI uses the wf_session
     # cookie; API clients still send X-Wayforth-API-Key. resolve_dashboard_caller
     # accepts both and yields the same (user_id, api_key_id, tier).
@@ -477,7 +477,7 @@ async def create_wri_alert(request: Request, db=Depends(get_db)):
 @router.get("/webhooks/wri-alerts", tags=["Webhooks"])
 @limiter.limit("30/minute")
 async def list_wri_alerts(request: Request, db=Depends(get_db)):
-    """List all WRI alert webhooks registered to this API key."""
+    """List all reliability score alert webhooks registered to this API key."""
     # Session-OR-key (PR #25 pattern): the dashboard alerts UI uses the wf_session
     # cookie; API clients still send X-Wayforth-API-Key. resolve_dashboard_caller
     # accepts both and yields the same (user_id, api_key_id, tier).
@@ -515,7 +515,7 @@ async def list_wri_alerts(request: Request, db=Depends(get_db)):
 @router.delete("/webhooks/wri-alerts/{alert_id}", tags=["Webhooks"])
 @limiter.limit("20/minute")
 async def delete_wri_alert(request: Request, alert_id: str, db=Depends(get_db)):
-    """Deactivate a WRI alert webhook by ID."""
+    """Deactivate a reliability score alert webhook by ID."""
     # Session-OR-key (PR #25 pattern): the dashboard alerts UI uses the wf_session
     # cookie; API clients still send X-Wayforth-API-Key. resolve_dashboard_caller
     # accepts both and yields the same (user_id, api_key_id, tier).
@@ -530,7 +530,7 @@ async def delete_wri_alert(request: Request, alert_id: str, db=Depends(get_db)):
     if not row:
         raise HTTPException(status_code=404, detail={
             "error": "alert_not_found",
-            "message": "No active WRI alert found with this ID under your API key.",
+            "message": "No active reliability score alert found with this ID under your API key.",
         })
     await db.execute(
         "UPDATE wri_alerts SET active = false WHERE id = $1::uuid", alert_id

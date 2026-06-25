@@ -95,7 +95,7 @@ async def server_card(request):
     return JSONResponse({
         "name": "wayforth",
         "version": VERSION,
-        "description": "The search engine AI agents use to find and pay for APIs. 300+ verified APIs ranked by WayforthRank v2.",
+        "description": "The search engine AI agents use to find and pay for APIs. 300+ verified APIs ranked by merit-based routing (no paid placement).",
         "icon": "https://wayforth.io/favicon.png",
         "repository": "https://github.com/WayforthOfficial/wayforth",
         "homepage": "https://wayforth.io",

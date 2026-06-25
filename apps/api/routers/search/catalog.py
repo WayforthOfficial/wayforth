@@ -128,7 +128,7 @@ async def list_categories(request: Request, db=Depends(get_db)):
 @router.get("/services/featured")
 @limiter.limit("30/minute")
 async def featured_services(request: Request, db=Depends(get_db)):
-    """Featured services — one per category, Tier 2 only, best WRI score. Powers the homepage inline search default state."""
+    """Featured services — one per category, Tier 2 only, best reliability score. Powers the homepage inline search default state."""
     try:
         rows = await db.fetch("""
             WITH ranked AS (
@@ -339,12 +339,12 @@ async def service_slug_health(request: Request, slug: str, db=Depends(get_db)):
 async def service_reliability(
     request: Request,
     slug: str | None = Query(default=None, description="Managed service slug (e.g. deepl, groq)"),
-    category: str | None = Query(default=None, description="Category name — returns top 5 by WRI"),
+    category: str | None = Query(default=None, description="Category name — returns top 5 by reliability score"),
     db=Depends(get_db),
 ):
     """Real-time reliability snapshot for a service or category.
 
-    Returns WRI score, tier, uptime estimate, last probe timestamp, and whether
+    Returns reliability score, tier, uptime estimate, last probe timestamp, and whether
     a verified failover alternative is available. Use before committing to a
     service for a long-running agent task.
     """
@@ -650,7 +650,7 @@ async def status_services():
 
 @router.get("/leaderboard", tags=["Public"])
 async def leaderboard_managed():
-    """Public WRI leaderboard for all managed services. No auth required."""
+    """Public reliability score leaderboard for all managed services. No auth required."""
     from datetime import datetime, timezone, timedelta
     from main import app
 
@@ -794,11 +794,11 @@ async def quickstart():
     <pre><span class="comment"># In your agent — natural language, no API keys needed</span>
 wayforth_search(<span class="string">"translate text to Spanish"</span>)
 
-<span class="comment"># Returns ranked results with WRI scores</span>
-<span class="comment"># → DeepL API      WRI: 82  Tier 2 Verified  $0.0000025/req</span>
-<span class="comment"># → LibreTranslate  WRI: 71  Tier 2 Verified  Free</span>
-<span class="comment"># → ModernMT        WRI: 68  Tier 2 Verified  $0.000003/req</span></pre>
-    <p class="note">WRI (Wayforth Reliability Index) is a 0–100 score based on uptime history,
+<span class="comment"># Returns ranked results with reliability scores</span>
+<span class="comment"># → DeepL API      reliability score: 82  Tier 2 Verified  $0.0000025/req</span>
+<span class="comment"># → LibreTranslate  reliability score: 71  Tier 2 Verified  Free</span>
+<span class="comment"># → ModernMT        reliability score: 68  Tier 2 Verified  $0.000003/req</span></pre>
+    <p class="note">reliability score is a 0–100 score based on uptime history,
     probe frequency, and real agent usage. Higher = more trustworthy.</p>
   </div>
 
@@ -845,7 +845,7 @@ results = client.query(
     sort_by=<span class="string">"wri"</span>
 )
 <span class="keyword">for</span> r <span class="keyword">in</span> results[<span class="string">"results"</span>]:
-    print(r[<span class="string">"name"</span>], <span class="string">"WRI:"</span>, r[<span class="string">"wri"</span>])</pre>
+    print(r[<span class="string">"name"</span>], <span class="string">"reliability score:"</span>, r[<span class="string">"wri"</span>])</pre>
   </div>
 
   <hr class="divider">

@@ -8,7 +8,7 @@ One import, one init:
 
 The tool discovers the best available service at runtime via the Wayforth
 search API, then executes through /proxy/{slug} for native upstream response
-shape plus automatic failover and WayforthRank signal capture.
+shape plus automatic failover and ranking signal capture.
 """
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ class WayforthTool(BaseTool):
 
     Discovers the best service for a given intent using Wayforth's search API,
     then executes through /proxy/{slug} for native upstream response shape,
-    automatic failover, and WayforthRank signal capture.
+    automatic failover, and ranking signal capture.
 
     Usage::
 

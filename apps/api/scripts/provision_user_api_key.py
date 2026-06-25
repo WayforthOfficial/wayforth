@@ -104,7 +104,7 @@ async def provision(
 ) -> int:
     # DATABASE_PUBLIC_URL (externally routable) is preferred when running
     # outside Railway's private network — `railway run` from a dev laptop
-    # injects DATABASE_URL pointing at postgres.railway.internal which only
+    # injects DATABASE_URL pointing at an internal-only database host which only
     # resolves from inside the cluster. Same fallback the crawler scripts
     # (e.g. apps/crawler/bulk_prober.py) use.
     db_url = (

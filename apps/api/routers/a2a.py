@@ -87,7 +87,7 @@ async def agent_card(db=Depends(get_db)):
         db,
         name="Wayforth Gateway",
         description="Agent gateway to 300+ verified APIs with managed credentials, "
-                    "WayforthRank routing, and automatic provider failover.",
+                    "merit-based routing (no paid placement), and automatic provider failover.",
         url=_A2A_ENDPOINT,
         version=_agent_version(),
         skills=_SKILLS,

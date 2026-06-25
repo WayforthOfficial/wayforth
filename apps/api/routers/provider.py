@@ -543,7 +543,7 @@ async def provider_me(request: Request, db=Depends(get_db)):
 @router.get("/provider/overview", tags=["Provider"])
 @limiter.limit("30/minute")
 async def provider_overview(request: Request, db=Depends(get_db)):
-    """Provider dashboard overview: WRI, calls, discovery, trends."""
+    """Provider dashboard overview: reliability score, calls, discovery, trends."""
     provider = await _get_provider(request, db)
     svc = await _get_provider_service(db, provider["provider_id"])
     if not svc:
@@ -645,7 +645,7 @@ async def provider_overview(request: Request, db=Depends(get_db)):
                 category_rank = i + 1
                 break
 
-    # WRI trend (weekly buckets, last 5 weeks)
+    # reliability score trend (weekly buckets, last 5 weeks)
     wri_trend = []
     try:
         hist_rows = await db.fetch("""
@@ -658,7 +658,7 @@ async def provider_overview(request: Request, db=Depends(get_db)):
         if hist_rows:
             wri_trend = [{"date": str(r["week"]), "score": round(float(r["avg_wri"]), 1)} for r in hist_rows]
     except Exception:
-        pass  # non-critical: WRI trend history falls back to synthetic points below
+        pass  # non-critical: reliability score trend history falls back to synthetic points below
     if not wri_trend and wri_score:
         today = datetime.now(timezone.utc).date()
         wri_trend = [
@@ -1119,7 +1119,7 @@ async def provider_boost_activate(request: Request, db=Depends(get_db)):
 
     On success: sets boost_used=TRUE (permanent), boost_activated_at, boost_expires_at,
     boost_tier; records to audit log. Boosts grant preferential Pioneer routing traffic
-    for the duration — WRI score is never modified by a paid boost (/integrity §11.5).
+    for the duration — reliability score is never modified by a paid boost (/integrity §11.5).
     """
     from datetime import datetime, timezone, timedelta
     from core.audit import log_provider_action
@@ -1414,7 +1414,7 @@ async def provider_edit_service(slug: str, request: Request, db=Depends(get_db))
 @limiter.limit("20/minute")
 async def provider_delete_service(slug: str, request: Request, db=Depends(get_db)):
     """Soft-delete a service owned by the authenticated provider. The catalog row
-    and WayforthRank signal history are preserved; the service stops surfacing in
+    and ranking signal history are preserved; the service stops surfacing in
     search/fallback (active=FALSE)."""
     provider = await _require_email_verified(request, db)
     provider_id = provider["provider_id"]
@@ -1444,7 +1444,7 @@ async def provider_billing_upgrade(request: Request, db=Depends(get_db)):
     The Launch Boost (15-day / 30-day) is tied to tier, not billing interval —
     annual subscribers get the same boost as monthly subscribers of the same tier.
 
-    Provider plans grant dashboard access (analytics, WRI, competitor data).
+    Provider plans grant dashboard access (analytics, reliability score, competitor data).
     There is no monthly credit pool to reset — billing_interval only affects
     Stripe charge cadence, not any in-app credit counter.
     """

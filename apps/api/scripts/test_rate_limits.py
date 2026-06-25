@@ -16,8 +16,14 @@ import asyncpg
 import httpx
 
 BASE = os.environ.get("API_BASE", "https://gateway.wayforth.io")
-DB_URL_RAW = os.environ["DATABASE_URL"].replace(
-    "postgres.railway.internal:5432", "shortline.proxy.rlwy.net:41067"
+# Rewrite the internal DB host:port to an externally-routable one when running this
+# script outside the cluster. Provide both via env — never hardcode infra endpoints.
+_DB_INTERNAL = os.environ.get("DB_INTERNAL_HOSTPORT", "")
+_DB_PUBLIC = os.environ.get("DB_PUBLIC_HOSTPORT", "")
+DB_URL_RAW = (
+    os.environ["DATABASE_URL"].replace(_DB_INTERNAL, _DB_PUBLIC)
+    if _DB_INTERNAL and _DB_PUBLIC
+    else os.environ["DATABASE_URL"]
 )
 
 # Use demo account user IDs as "owners" for the temporary test keys.
