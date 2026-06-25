@@ -46,13 +46,12 @@ _GATEWAY_BASE = os.environ.get("WAYFORTH_GATEWAY_BASE", "https://gateway.wayfort
 _A2A_ENDPOINT = f"{_GATEWAY_BASE}/a2a"
 
 # The card must not claim a capability the dispatcher can't honor end-to-end.
-# STREAM_MESSAGE now routes to the SSE pipeline, but the SSE *events* are not yet
-# A2A-conformant (TaskStatusUpdateEvent framing is interop-gate work), so we keep
-# advertising streaming FALSE — under-claiming is safe; over-claiming is not.
-# Flipped to True with the interop gate. test_a2a_router enforces this can't drift
-# (it only fails if the card advertises streaming:true while the method is
-# UNSUPPORTED — never the reverse).
-_STREAMING_SUPPORTED = False
+# STREAM_MESSAGE routes to the SSE pipeline AND frames its events as A2A-conformant
+# TaskStatusUpdateEvent / TaskArtifactUpdateEvent (terminal final:true), verified
+# both directions against a2a-sdk==0.3.26 by the interop gate — so streaming is now
+# advertised TRUE, honestly. test_a2a_router enforces this can't drift (it fails if
+# the card advertises streaming:true while the method is UNSUPPORTED).
+_STREAMING_SUPPORTED = True
 
 # Wayforth's advertised skill set. Structural only (AgentSkill shape is identical
 # across A2A versions), so it carries no version-variant literal.
