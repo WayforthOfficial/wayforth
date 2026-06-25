@@ -305,7 +305,7 @@ async def search_services(
     if pool and agent_id:
         asyncio.create_task(_update_identity_search(pool, agent_id))
 
-    # Load service health for WRI adjustment
+    # Load service health for reliability-score adjustment
     _health_map: dict = {}
     try:
         _top_slugs = [s.get("slug") for s in top if s.get("slug")]
@@ -316,7 +316,7 @@ async def search_services(
             )
             _health_map = {r["slug"]: r for r in _health_rows}
     except Exception:
-        pass  # non-critical: health map absent means no latency adjustment to WRI scores
+        pass  # non-critical: health map absent means no latency adjustment to reliability scores
 
     # Load Pioneer Boost metadata for each result slug.
     # Joins provider_services → providers to find active (non-paused, non-expired) boosts.
