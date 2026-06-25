@@ -33,3 +33,13 @@ dependencies = [
 #   beautifulsoup4, lxml, sqlalchemy[asyncio], requests, pillow (standalone).
 # Pillow remains transitively via qrcode[pil].
 # Requests was removed by Section 2 S10 (httpx async replacement).
+
+[dependency-groups]
+# Test-only. a2a-sdk is the A2A interop gate's verifier — test_a2a_interop_gate.py
+# asserts our wire output parses as these exact 0.3.26 types (both directions). It
+# is NOT a runtime dependency (the gateway speaks A2A through core/a2a, not the SDK).
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "a2a-sdk==0.3.26",
+]

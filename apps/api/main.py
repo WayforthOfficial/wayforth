@@ -1196,6 +1196,61 @@ async def lifespan(app: FastAPI):
                 CREATE INDEX IF NOT EXISTS idx_subst_events_category
                     ON substitution_events (category, created_at DESC)
             """)
+            # 065 — A2A Agent Card signing keys (Option C: encrypted-in-DB EC P-256).
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS a2a_signing_keys (
+                    id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+                    kid                   TEXT        NOT NULL UNIQUE,
+                    alg                   TEXT        NOT NULL DEFAULT 'ES256',
+                    crv                   TEXT        NOT NULL DEFAULT 'P-256',
+                    public_jwk            JSONB       NOT NULL,
+                    encrypted_private_key TEXT        NOT NULL,
+                    key_version           INTEGER     NOT NULL DEFAULT 1,
+                    status                TEXT        NOT NULL DEFAULT 'active',
+                    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    activated_at          TIMESTAMPTZ DEFAULT NOW(),
+                    retired_at            TIMESTAMPTZ
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_a2a_signing_keys_status
+                    ON a2a_signing_keys (status, created_at DESC)
+            """)
+            # At most one active signing key at a time (enforced, not assumed).
+            await _mconn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_a2a_signing_keys_one_active
+                    ON a2a_signing_keys (status) WHERE status = 'active'
+            """)
+
+            # 066 — Loop-aware spend budgets. Mirrored in
+            # infra/migrations/066_run_budgets.sql. spent is ALWAYS ledger-derived
+            # (SUM over credit_transactions.run_id); run_budgets only stores the
+            # ceiling. NULL run_id = unbudgeted (today's behavior, unchanged).
+            await _mconn.execute("""
+                ALTER TABLE credit_transactions
+                    ADD COLUMN IF NOT EXISTS run_id UUID
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS credit_transactions_run_id_idx
+                    ON credit_transactions (run_id, user_id) WHERE run_id IS NOT NULL
+            """)
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS run_budgets (
+                    run_id       UUID        PRIMARY KEY,
+                    user_id      UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    ceiling      INTEGER     NOT NULL CHECK (ceiling > 0),
+                    soft_cap     BOOLEAN     NOT NULL DEFAULT FALSE,
+                    max_overage  INTEGER     NOT NULL DEFAULT 0 CHECK (max_overage >= 0),
+                    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT run_budget_overage_consistent CHECK (
+                        (soft_cap AND max_overage > 0) OR (NOT soft_cap AND max_overage = 0)
+                    )
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS run_budgets_user_idx ON run_budgets (user_id)
+            """)
     except Exception as e:
         logger.error("STARTUP ERROR: %s: %s", type(e).__name__, e, exc_info=True)
         logger.critical("DB pool creation or migrations failed: %s — exiting so the orchestrator can restart cleanly", e)
@@ -1644,6 +1699,7 @@ from routers.mfa import router as mfa_router
 from routers.proxy import router as proxy_router
 from routers.cloud import router as cloud_router
 from routers.templates import router as templates_router
+from routers.a2a import router as a2a_router
 
 app.include_router(search.router)
 app.include_router(execute.router)
@@ -1660,6 +1716,7 @@ app.include_router(llm.router)
 app.include_router(proxy_router)
 app.include_router(cloud_router)
 app.include_router(templates_router)
+app.include_router(a2a_router)
 
 
 # ── OpenAPI customisation (security scheme + description) ─────────────────────

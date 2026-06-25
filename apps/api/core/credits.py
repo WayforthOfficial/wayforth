@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
+from fastapi import HTTPException
 
 logger = logging.getLogger("wayforth")
 
@@ -150,7 +151,7 @@ def check_service_margins() -> None:
 async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
                                    service_id: str = None, tx_type: str = "execution",
                                    agent_id: str = None, api_key_id: str = None,
-                                   return_tx_id: bool = False):
+                                   return_tx_id: bool = False, run_id: str = None):
     """Atomically check and deduct credits.
 
     Returns (success, balance_after) normally, or (success, balance_after, tx_id)
@@ -200,11 +201,11 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
         # balance_after records the MAIN pool after deduction (unchanged semantics).
         tx_id = await db.fetchval("""
             INSERT INTO credit_transactions
-            (user_id, amount, balance_after, type, description, api_endpoint, service_id, agent_id, api_key_id)
-            VALUES ($1::uuid, $2, $3, $7, $4, $5, $6, $8, $9::uuid)
+            (user_id, amount, balance_after, type, description, api_endpoint, service_id, agent_id, api_key_id, run_id)
+            VALUES ($1::uuid, $2, $3, $7, $4, $5, $6, $8, $9::uuid, $10::uuid)
             RETURNING id
         """, user_id, -cost, new_balance, f"API call: {endpoint}", endpoint, service_id, tx_type,
-            agent_id, api_key_id)
+            agent_id, api_key_id, run_id)
 
         if return_tx_id:
             return True, new_balance, tx_id
@@ -254,6 +255,92 @@ async def check_run_credit_cap(db, agent_id, additional_cost: int) -> None:
             "spent": spent,
             "attempted": int(additional_cost),
         })
+
+
+class BudgetExhaustedError(HTTPException):
+    """A budgeted run hit its credit ceiling — refused BEFORE any deduct/execute.
+
+    Typed (an agent can catch it) and a 402 HTTPException, so /run surfaces it as a
+    402-class response and the A2A layer maps it through the existing 402 → -32010
+    JSON-RPC error path. detail.error = 'run_budget_exhausted' distinguishes it from
+    a plain insufficient-balance 402.
+    """
+
+    def __init__(self, *, run_id: str, ceiling: int, spent: int, attempted: int,
+                 hard_ceiling: int):
+        super().__init__(status_code=402, detail={
+            "error": "run_budget_exhausted",
+            "message": (
+                f"Run budget exhausted: this call ({attempted} credits) would exceed "
+                f"the run's ceiling of {hard_ceiling} ({spent} already spent). Raise "
+                f"the run budget or start a new run."
+            ),
+            "run_id": run_id,
+            "ceiling": ceiling,
+            "hard_ceiling": hard_ceiling,
+            "spent": spent,
+            "remaining": max(0, hard_ceiling - spent),
+            "attempted": attempted,
+        })
+
+
+async def run_budget_spent(db, run_id: str, user_id: str) -> int:
+    """Ledger-derived spend for a run: SUM(-amount) over this run's (and only this
+    user's) credit_transactions. Refunds (positive amount) net out automatically, so
+    a refunded failover attempt does not consume budget. Never a stored counter."""
+    spent = await db.fetchval(
+        "SELECT COALESCE(SUM(-amount), 0) FROM credit_transactions "
+        "WHERE run_id = $1::uuid AND user_id = $2::uuid",
+        str(run_id), str(user_id),
+    )
+    return int(spent or 0)
+
+
+async def check_run_budget(db, run_id, user_id, additional_cost: int) -> dict | None:
+    """Loop-aware spend ceiling, enforced PRE-spend. Mirrors check_run_credit_cap
+    but keyed on a logical run_id and ledger-derived (no denormalized counter).
+
+    No-ops (returns None — caller behaves exactly as today) when run_id is unset or
+    has no run_budgets row: that is the unbudgeted path, byte-identical to before.
+
+    For a budgeted run, computes the hard ceiling:
+      • hard mode  (soft_cap=false): hard_ceiling = ceiling.
+      • soft mode  (soft_cap=true) : hard_ceiling = ceiling + max_overage; a call
+        that crosses `ceiling` (but not the hard ceiling) is ALLOWED and flagged.
+    Raises BudgetExhaustedError when spent + additional_cost > hard_ceiling — before
+    any deduct or execution. Otherwise returns the live budget snapshot
+    {run_id, ceiling, spent, remaining, soft_cap, over_soft_cap}.
+    """
+    if not run_id or not _RUN_UUID_RE.match(str(run_id)):
+        return None
+    budget = await db.fetchrow(
+        "SELECT ceiling, soft_cap, max_overage FROM run_budgets "
+        "WHERE run_id = $1::uuid AND user_id = $2::uuid",
+        str(run_id), str(user_id),
+    )
+    if not budget:
+        return None  # unbudgeted run — unchanged behavior
+
+    ceiling = int(budget["ceiling"])
+    soft_cap = bool(budget["soft_cap"])
+    max_overage = int(budget["max_overage"] or 0)
+    hard_ceiling = ceiling + max_overage if soft_cap else ceiling
+
+    spent = await run_budget_spent(db, run_id, user_id)
+    cost = int(additional_cost)
+    if spent + cost > hard_ceiling:
+        raise BudgetExhaustedError(
+            run_id=str(run_id), ceiling=ceiling, spent=spent,
+            attempted=cost, hard_ceiling=hard_ceiling)
+
+    return {
+        "run_id": str(run_id),
+        "ceiling": ceiling,
+        "spent": spent,
+        "remaining": max(0, hard_ceiling - spent),
+        "soft_cap": soft_cap,
+        "over_soft_cap": soft_cap and (spent + cost > ceiling),
+    }
 
 
 async def credits_used_this_cycle(conn, user_id: str) -> int:
