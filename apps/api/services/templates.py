@@ -2188,6 +2188,144 @@ the prompt before generation. Returns the image as base64 in the run output.
 - Chain multiple runs for product mockups, concept art, or batch generation
 """
 
+_STOCK_QUOTE_PY = '''\
+"""
+Wayforth Cloud Template: Stock Quote (Python)
+
+Parameters are DECLARED in PARAMS below and filled from the dashboard form. The
+gateway validates the user's input and injects the resolved values as the
+WAYFORTH_PARAMS env var (JSON), which this agent reads at runtime.
+"""
+import json
+import os
+
+import httpx
+
+# Declared parameters — the dashboard renders a form from this; the gateway extracts
+# it statically on deploy (never executes this file to read it) and validates input
+# at dispatch. Conditional fields (show_if / required_if) demonstrate the engine.
+PARAMS = [
+    {"name": "ticker", "type": "string", "label": "Ticker symbol",
+     "help": "e.g. AAPL, MSFT", "required": True,
+     "validation": {"regex": "^[A-Z]{1,5}$", "maxLength": 5}},
+    {"name": "interval", "type": "enum", "label": "Interval", "required": True,
+     "default": "daily",
+     "validation": {"options": [
+         {"value": "daily", "label": "Daily"},
+         {"value": "weekly", "label": "Weekly"},
+         {"value": "intraday", "label": "Intraday"}]}},
+    {"name": "intraday_minutes", "type": "enum", "label": "Intraday resolution",
+     "show_if": {"field": "interval", "equals": "intraday"},
+     "required_if": {"field": "interval", "equals": "intraday"},
+     "validation": {"options": [
+         {"value": "1min", "label": "1 minute"},
+         {"value": "5min", "label": "5 minutes"},
+         {"value": "60min", "label": "60 minutes"}]}},
+    {"name": "use_date_range", "type": "boolean",
+     "label": "Limit to a date range", "default": False},
+    {"name": "start_date", "type": "date", "label": "Start date",
+     "show_if": {"field": "use_date_range", "equals": True},
+     "required_if": {"field": "use_date_range", "equals": True},
+     "validation": {"max": "today"}},
+    {"name": "end_date", "type": "date", "label": "End date",
+     "show_if": {"field": "use_date_range", "equals": True},
+     "required_if": {"field": "use_date_range", "equals": True},
+     "validation": {"min_field": "start_date", "max": "today"}},
+]
+
+KEY    = os.environ["WAYFORTH_API_KEY"]
+RUN_ID = os.environ.get("X_WAYFORTH_AGENT_ID", "")
+params = json.loads(os.environ.get("WAYFORTH_PARAMS", "{}"))
+
+ticker   = params["ticker"]
+interval = params.get("interval", "daily")
+minutes  = params.get("intraday_minutes")
+date_range = (
+    f"{params.get('start_date')} to {params.get('end_date')}"
+    if params.get("use_date_range") else "latest"
+)
+
+HEADERS = {"X-Wayforth-API-Key": KEY, "X-Wayforth-Agent-ID": RUN_ID}
+print(f"[stock-quote] run={RUN_ID[:8]}... ticker={ticker} interval={interval} "
+      f"minutes={minutes} range={date_range}")
+
+resp = httpx.get(
+    "https://gateway.wayforth.io/proxy/alphavantage",
+    headers=HEADERS,
+    params={"symbol": ticker, "function": "GLOBAL_QUOTE"},
+    timeout=30,
+)
+resp.raise_for_status()
+data = resp.json()
+
+output = {
+    "ticker":           ticker,
+    "interval":         interval,
+    "intraday_minutes": minutes,
+    "date_range":       date_range,
+    "price":            data.get("price"),
+    "change":           data.get("change"),
+    "change_pct":       data.get("change_percent"),
+    "wri":              resp.headers.get("x-wayforth-wri"),
+    "run_id":           RUN_ID,
+}
+print(json.dumps(output, indent=2))
+'''
+
+_STOCK_QUOTE_README = """\
+# Stock Quote
+
+Looks up a stock quote, with parameters supplied from a **dashboard form** (not env
+vars). The agent declares a `PARAMS` block; the gateway renders it as a form,
+validates the input, and injects the resolved values as `WAYFORTH_PARAMS`.
+
+## Parameters
+| field | type | notes |
+|---|---|---|
+| `ticker` | string | required, 1–5 uppercase letters |
+| `interval` | enum | Daily / Weekly / Intraday |
+| `intraday_minutes` | enum | shown + required only when interval = Intraday |
+| `use_date_range` | boolean | toggle the date range |
+| `start_date` / `end_date` | date | shown + required when the toggle is on; `end ≥ start`, both ≤ today |
+
+## Credits
+~5 per run (4 Alpha Vantage + 1 compute).
+"""
+
+_STOCK_QUOTE_TS = '''\
+/**
+ * Wayforth Cloud Template: Stock Quote (TypeScript)
+ *
+ * Parameters arrive as the WAYFORTH_PARAMS env var (JSON), resolved from the
+ * dashboard form. The form schema is declared only in the Python variant; schema
+ * extraction is Python-only in v1, so this node variant runs WITHOUT a form
+ * (unchanged from before) and reads whatever params are injected.
+ */
+const KEY    = process.env.WAYFORTH_API_KEY!;
+const RUN_ID = process.env.X_WAYFORTH_AGENT_ID ?? '';
+const BASE   = (process.env.WAYFORTH_BASE_URL ?? 'https://gateway.wayforth.io').replace(/\\/$/, '');
+const params = JSON.parse(process.env.WAYFORTH_PARAMS ?? '{}');
+
+const ticker   = params.ticker ?? 'AAPL';
+const interval = params.interval ?? 'daily';
+
+const resp = await fetch(
+  `${BASE}/proxy/alphavantage?symbol=${ticker}&function=GLOBAL_QUOTE`,
+  { headers: { 'X-Wayforth-API-Key': KEY, 'X-Wayforth-Agent-ID': RUN_ID } },
+);
+const data: any = await resp.json();
+
+console.log(JSON.stringify({
+  ticker,
+  interval,
+  price:      data.price,
+  change:     data.change,
+  change_pct: data.change_percent,
+  wri:        resp.headers.get('x-wayforth-wri'),
+  run_id:     RUN_ID,
+}, null, 2));
+'''
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TEMPLATES: dict[str, dict] = {
@@ -2321,6 +2459,32 @@ TEMPLATES: dict[str, dict] = {
             "node20":     _DATAFETCH_TS,
         },
         "readme": _DATAFETCH_README,
+    },
+
+    "stock-quote": {
+        "id":              "stock-quote",
+        "name":            "Stock Quote",
+        "description":     (
+            "Looks up a stock quote from form-based parameters: ticker, interval, an "
+            "intraday resolution (shown only for intraday), and an optional date "
+            "range. Demonstrates declared PARAMS rendered as a dashboard form."
+        ),
+        "category":        "data",
+        "default_runtime": "python3.12",
+        "runtimes":        ["python3.12", "node20"],
+        "services_used":   ["alphavantage"],
+        "credits_per_run": {
+            "min":       5,
+            "max":       5,
+            "breakdown": "4 Alpha Vantage + 1 compute",
+        },
+        "env_vars":        [],
+        "tags":   ["finance", "stocks", "alphavantage", "params", "form"],
+        "code": {
+            "python3.12": _STOCK_QUOTE_PY,   # declares PARAMS → form on deploy
+            "node20":     _STOCK_QUOTE_TS,   # formless (params extraction is python-only in v1)
+        },
+        "readme": _STOCK_QUOTE_README,
     },
 
     "topic-monitor": {
