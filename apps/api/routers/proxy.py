@@ -35,6 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from core.auth import _resolve_user, _validate_agent_id
+from core.run_token import RUN_TOKEN_PREFIX, SCOPE_PROXY, token_has_scope, verify_run_token
 from core.credits import (
     _check_spend_anomaly,
     _increment_calls,
@@ -64,6 +65,63 @@ router = APIRouter()
 
 _LLM_SLUGS = frozenset({"groq", "together", "mistral", "gemini"})
 
+_ACTIVE_RUN_STATES = ("queued", "running")
+
+
+async def _resolve_proxy_caller(api_key_header: str, db):
+    """Resolve the /proxy caller from either a wf_live_ key or a wf_run_ run token.
+
+    Returns (user_id, api_key_id, tier, forced_agent_id, run_prefetch):
+      • user_id, api_key_id (str or None), tier — identity for billing/rate-limit.
+      • forced_agent_id — for run tokens, the SIGNED run_id (authoritative; overrides
+        any X-Wayforth-Agent-ID header so attribution can't be spoofed). None for keys.
+      • run_prefetch — the agent_runs (credits_reserved, status) row for run tokens, so
+        the cap check costs no extra read (Guardrail 2). None for keys.
+
+    Raises HTTPException(401) on any failure. The wf_live_ path is unchanged.
+    """
+    # Run token (agent sandbox) — verify signature/scope, then bind to the live run.
+    if api_key_header.startswith(RUN_TOKEN_PREFIX):
+        claims = verify_run_token(api_key_header)
+        if not claims or not token_has_scope(claims, SCOPE_PROXY):
+            raise HTTPException(status_code=401, detail={"error": "invalid_run_token"})
+        run_id = str(claims.get("run_id") or "")
+        try:
+            # Single consolidated load: the run row (binding + cap prefetch) plus the
+            # user's tier/key for rate-limit + attribution. ::uuid cast guards a bad id.
+            row = await db.fetchrow(
+                """
+                SELECT ar.user_id, ar.hosted_agent_id, ar.status, ar.credits_reserved,
+                       ak.id AS api_key_id, ak.tier
+                FROM agent_runs ar
+                LEFT JOIN api_keys ak
+                       ON ak.user_id = ar.user_id AND ak.active = TRUE
+                WHERE ar.id = $1::uuid
+                ORDER BY ak.created_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                run_id,
+            )
+        except Exception:
+            raise HTTPException(status_code=401, detail={"error": "invalid_run_token"})
+        if not row:
+            raise HTTPException(status_code=401, detail={"error": "run_not_found"})
+        # Binding: a leaked token can't be replayed for a different user/agent.
+        if str(row["user_id"]) != str(claims.get("sub")) or \
+           str(row["hosted_agent_id"]) != str(claims.get("agent_id")):
+            raise HTTPException(status_code=401, detail={"error": "run_binding_mismatch"})
+        # Revocation: the token dies the moment the run leaves an active state.
+        if row["status"] not in _ACTIVE_RUN_STATES:
+            raise HTTPException(status_code=401, detail={"error": "run_not_active"})
+        api_key_id = str(row["api_key_id"]) if row["api_key_id"] else None
+        tier = row["tier"] or "free"
+        run_prefetch = {"credits_reserved": row["credits_reserved"], "status": row["status"]}
+        return str(row["user_id"]), api_key_id, tier, run_id, run_prefetch
+
+    # wf_live_ key (SDK / human / non-agent) — unchanged path.
+    user_id, api_key_id, tier = await _resolve_user(db, api_key_header)
+    return str(user_id), (str(api_key_id) if api_key_id else None), tier, None, None
+
 
 @router.api_route("/proxy/{slug}", methods=["GET", "POST"])
 @limiter.limit("60/minute")
@@ -81,8 +139,9 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
     if not api_key_header:
         raise HTTPException(status_code=401, detail={"error": "X-Wayforth-API-Key header required"})
 
-    user_id, _api_key_id, _tier = await _resolve_user(db, api_key_header)
-    await check_rate_limit(str(_api_key_id), _tier)
+    user_id, _api_key_id, _tier, _forced_agent_id, _run_prefetch = \
+        await _resolve_proxy_caller(api_key_header, db)
+    await check_rate_limit(_api_key_id or str(user_id), _tier)
 
     # ── Slug validation (managed-only, v0.9.0) ────────────────────────────────
     slug = slug.strip().lower()
@@ -115,6 +174,10 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
     header_agent_id = _validate_agent_id(request.headers.get("X-Wayforth-Agent-ID"))
     if header_agent_id:
         agent_id = header_agent_id
+    # Run-token auth: the SIGNED run_id is authoritative — it overrides any header so
+    # billing/cap attribution can't be spoofed via X-Wayforth-Agent-ID.
+    if _forced_agent_id:
+        agent_id = _forced_agent_id
 
     # ── Param validation ──────────────────────────────────────────────────────
     # Save user-supplied params before service-specific defaults are injected so
@@ -151,8 +214,8 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
     success, balance_after, _tx_id = await check_and_deduct_credits(
         db, str(user_id), credit_cost, "/proxy",
         service_id=slug, tx_type="execution",
-        agent_id=agent_id, api_key_id=str(_api_key_id),
-        return_tx_id=True,
+        agent_id=agent_id, api_key_id=_api_key_id,
+        return_tx_id=True, run_prefetch=_run_prefetch,
     )
     if not success:
         raise HTTPException(status_code=402, detail={
@@ -185,7 +248,7 @@ async def proxy_call(request: Request, slug: str, db=Depends(get_db)):
         outcome = await run_with_failover(
             db, pool=_app_ref.state.pool,
             request_id=getattr(request.state, "request_id", ""),
-            user_id=str(user_id), api_key_id=str(_api_key_id), agent_id=agent_id,
+            user_id=str(user_id), api_key_id=_api_key_id, agent_id=agent_id,
             primary_slug=slug, user_params=_user_params,
             primary_error=error_msg, primary_settlement=_primary_settlement,
             primary_cost=credit_cost, primary_balance_after=balance_after,

@@ -151,7 +151,8 @@ def check_service_margins() -> None:
 async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
                                    service_id: str = None, tx_type: str = "execution",
                                    agent_id: str = None, api_key_id: str = None,
-                                   return_tx_id: bool = False, run_id: str = None):
+                                   return_tx_id: bool = False, run_id: str = None,
+                                   run_prefetch=None):
     """Atomically check and deduct credits.
 
     Returns (success, balance_after) normally, or (success, balance_after, tx_id)
@@ -164,7 +165,7 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
     cap would be exceeded and no-ops for all non-cloud traffic.
     """
     if tx_type == "execution":
-        await check_run_credit_cap(db, agent_id, cost)
+        await check_run_credit_cap(db, agent_id, cost, prefetched=run_prefetch)
     async with db.transaction():
         row = await db.fetchrow(
             "SELECT credits_balance, pioneer_credits_balance FROM user_credits WHERE user_id = $1::uuid FOR UPDATE",
@@ -212,7 +213,7 @@ async def check_and_deduct_credits(db, user_id: str, cost: int, endpoint: str,
         return True, new_balance
 
 
-async def check_run_credit_cap(db, agent_id, additional_cost: int) -> None:
+async def check_run_credit_cap(db, agent_id, additional_cost: int, *, prefetched=None) -> None:
     """CLOUD-2: enforce a hosted-agent run's credit_cap as a LIVE spend ceiling.
 
     The pre-reserve/release model alone does not bound spend: an agent's own
@@ -228,7 +229,9 @@ async def check_run_credit_cap(db, agent_id, additional_cost: int) -> None:
     """
     if not agent_id or not _RUN_UUID_RE.match(str(agent_id)):
         return
-    run = await db.fetchrow(
+    # The /proxy run-token auth already loads this row for its binding cross-check;
+    # it passes it here as `prefetched` so the cap costs no extra read (Guardrail 2).
+    run = prefetched if prefetched is not None else await db.fetchrow(
         "SELECT credits_reserved, status FROM agent_runs WHERE id = $1::uuid",
         str(agent_id),
     )
