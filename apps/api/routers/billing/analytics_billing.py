@@ -17,34 +17,32 @@ router = APIRouter()
 @router.get("/billing/transactions")
 @limiter.limit("20/minute")
 async def get_transactions(request: Request, limit: int = 50, offset: int = 0, db=Depends(get_db)):
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401)
-
-    key_record = await db.fetchrow(
-        "SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true",
-        hashlib.sha256(api_key.encode()).hexdigest()
-    )
-    if not key_record:
-        raise HTTPException(status_code=401)
+    # Session-OR-key auth (resolve_dashboard_caller, PR #25 pattern). The dashboard's
+    # billing-history page authenticates by wf_session cookie, NOT an API key. This
+    # endpoint was key-only, so the cookie-authed dashboard 401'd here and rendered
+    # "No transactions yet" even though credit_transactions has rows — the exact gap
+    # resolve_dashboard_caller exists to close for every dashboard /billing endpoint.
+    from core.auth import resolve_dashboard_caller
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
 
     txs = await db.fetch("""
         SELECT id, amount, balance_after, type, description,
-               api_endpoint, service_id, created_at
+               api_endpoint, service_id, run_id, created_at
         FROM credit_transactions
-        WHERE user_id = $1
+        WHERE user_id = $1::uuid
         ORDER BY created_at DESC
         LIMIT $2 OFFSET $3
-    """, key_record['user_id'], limit, offset)
+    """, user_id, limit, offset)
 
     total = await db.fetchval(
-        "SELECT COUNT(*) FROM credit_transactions WHERE user_id = $1",
-        key_record['user_id']
+        "SELECT COUNT(*) FROM credit_transactions WHERE user_id = $1::uuid",
+        user_id
     )
 
     credits_row = await db.fetchrow(
-        "SELECT payment_method FROM user_credits WHERE user_id = $1",
-        key_record['user_id']
+        "SELECT payment_method FROM user_credits WHERE user_id = $1::uuid",
+        user_id
     )
     user_payment_method = (credits_row["payment_method"] if credits_row else None) or "card"
     user_multiplier = PAYMENT_MULTIPLIERS.get(user_payment_method, 1.00)
@@ -85,24 +83,18 @@ async def get_transactions(request: Request, limit: int = 50, offset: int = 0, d
 @router.get("/billing/purchases")
 @limiter.limit("20/minute")
 async def get_purchases(request: Request, db=Depends(get_db)):
-    api_key = request.headers.get("X-Wayforth-API-Key", "")
-    if not api_key:
-        raise HTTPException(status_code=401)
-
-    key_record = await db.fetchrow(
-        "SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true",
-        hashlib.sha256(api_key.encode()).hexdigest()
-    )
-    if not key_record:
-        raise HTTPException(status_code=401)
+    # Session-OR-key auth — same dashboard-cookie gap as /billing/transactions.
+    from core.auth import resolve_dashboard_caller
+    caller = await resolve_dashboard_caller(request, db)
+    user_id = caller["user_id"]
 
     purchases = await db.fetch("""
         SELECT id, package_name, credits_total, payment_method,
                payment_status, amount_usd, tx_hash, purchased_at
         FROM package_purchases
-        WHERE user_id = $1
+        WHERE user_id = $1::uuid
         ORDER BY purchased_at DESC
-    """, key_record['user_id'])
+    """, user_id)
 
     return {"purchases": [dict(p) for p in purchases]}
 
