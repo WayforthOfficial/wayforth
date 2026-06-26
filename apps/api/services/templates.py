@@ -2292,6 +2292,40 @@ validates the input, and injects the resolved values as `WAYFORTH_PARAMS`.
 ~5 per run (4 Alpha Vantage + 1 compute).
 """
 
+_STOCK_QUOTE_TS = '''\
+/**
+ * Wayforth Cloud Template: Stock Quote (TypeScript)
+ *
+ * Parameters arrive as the WAYFORTH_PARAMS env var (JSON), resolved from the
+ * dashboard form. The form schema is declared only in the Python variant; schema
+ * extraction is Python-only in v1, so this node variant runs WITHOUT a form
+ * (unchanged from before) and reads whatever params are injected.
+ */
+const KEY    = process.env.WAYFORTH_API_KEY!;
+const RUN_ID = process.env.X_WAYFORTH_AGENT_ID ?? '';
+const BASE   = (process.env.WAYFORTH_BASE_URL ?? 'https://gateway.wayforth.io').replace(/\\/$/, '');
+const params = JSON.parse(process.env.WAYFORTH_PARAMS ?? '{}');
+
+const ticker   = params.ticker ?? 'AAPL';
+const interval = params.interval ?? 'daily';
+
+const resp = await fetch(
+  `${BASE}/proxy/alphavantage?symbol=${ticker}&function=GLOBAL_QUOTE`,
+  { headers: { 'X-Wayforth-API-Key': KEY, 'X-Wayforth-Agent-ID': RUN_ID } },
+);
+const data: any = await resp.json();
+
+console.log(JSON.stringify({
+  ticker,
+  interval,
+  price:      data.price,
+  change:     data.change,
+  change_pct: data.change_percent,
+  wri:        resp.headers.get('x-wayforth-wri'),
+  run_id:     RUN_ID,
+}, null, 2));
+'''
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TEMPLATES: dict[str, dict] = {
@@ -2437,7 +2471,7 @@ TEMPLATES: dict[str, dict] = {
         ),
         "category":        "data",
         "default_runtime": "python3.12",
-        "runtimes":        ["python3.12"],
+        "runtimes":        ["python3.12", "node20"],
         "services_used":   ["alphavantage"],
         "credits_per_run": {
             "min":       5,
@@ -2447,7 +2481,8 @@ TEMPLATES: dict[str, dict] = {
         "env_vars":        [],
         "tags":   ["finance", "stocks", "alphavantage", "params", "form"],
         "code": {
-            "python3.12": _STOCK_QUOTE_PY,
+            "python3.12": _STOCK_QUOTE_PY,   # declares PARAMS → form on deploy
+            "node20":     _STOCK_QUOTE_TS,   # formless (params extraction is python-only in v1)
         },
         "readme": _STOCK_QUOTE_README,
     },
