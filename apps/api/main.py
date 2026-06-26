@@ -1143,6 +1143,11 @@ async def lifespan(app: FastAPI):
                 ALTER TABLE hosted_agents
                     ADD COLUMN IF NOT EXISTS params_schema JSONB
             """)
+            # Migration 068: resolved param values per run
+            await _mconn.execute("""
+                ALTER TABLE agent_runs
+                    ADD COLUMN IF NOT EXISTS params JSONB
+            """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hosted_agents_next_run
                     ON hosted_agents(next_run_at)

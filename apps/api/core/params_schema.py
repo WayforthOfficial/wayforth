@@ -68,7 +68,9 @@ def extract_params(code: str, language: str = "python"):
     try:
         tree = ast.parse(code or "")
     except SyntaxError as e:
-        raise ParamsSchemaError(f"could not parse agent code: {e}")
+        where = f" (line {e.lineno})" if e.lineno else ""
+        raise ParamsSchemaError(
+            f"could not parse agent code: {e.msg or 'syntax error'}{where}")
 
     node = None
     for stmt in tree.body:  # top-level statements only
@@ -118,7 +120,9 @@ def validate_schema(raw) -> dict:
             pred = f.get(key)
             if pred is not None:
                 deps[f["name"]] |= _validate_predicate(pred, name_set, f["name"], key)
-        # cross-field validation refs (date ordering) — must exist, not self
+        # cross-field validation refs (date ordering) — must exist, not self, and
+        # contribute to the dependency graph so the referenced field is RESOLVED
+        # before this one is validated (and a cross-field ordering cycle is caught).
         for vk in ("min_field", "max_field"):
             ref = f["validation"].get(vk)
             if ref is not None:
@@ -128,6 +132,7 @@ def validate_schema(raw) -> dict:
                 if ref == f["name"]:
                     raise ParamsSchemaError(
                         f"field '{f['name']}' validation.{vk} cannot reference itself")
+                deps[f["name"]].add(ref)
 
     order = _topo_order(names, deps)
     return {"fields": fields, "order": order,

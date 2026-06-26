@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from core.agent_secrets import decrypt_env, encrypt_env
 from core.auth import _resolve_user, decrypt_api_key, encrypt_api_key, provision_runner_key, resolve_dashboard_caller
 from core.credits import check_and_deduct_credits
+from core.params_eval import validate_and_resolve
 from core.params_schema import ParamsSchemaError, compile_params
 from core.run_token import mint_run_token
 from core.db import get_db
@@ -269,6 +270,7 @@ async def _dispatch_run_internal(
     user_id: str,
     user_api_key: str,
     trigger: str = "manual",
+    params: dict | None = None,
 ) -> tuple[str, int]:
     """Reserve credits, insert agent_runs, fire _execute_run background task.
 
@@ -294,9 +296,10 @@ async def _dispatch_run_internal(
 
     await db.execute("""
         INSERT INTO agent_runs
-          (id, hosted_agent_id, user_id, status, trigger, credits_reserved)
-        VALUES ($1::uuid, $2::uuid, $3::uuid, 'queued', $4, $5)
-    """, run_id, agent["id"], user_id, trigger, credits_reserved)
+          (id, hosted_agent_id, user_id, status, trigger, credits_reserved, params)
+        VALUES ($1::uuid, $2::uuid, $3::uuid, 'queued', $4, $5, $6)
+    """, run_id, agent["id"], user_id, trigger, credits_reserved,
+        json.dumps(params) if params else None)
 
     await db.execute(
         "UPDATE hosted_agents SET status = 'running', updated_at = NOW() "
@@ -309,7 +312,8 @@ async def _dispatch_run_internal(
     runtime_key = _runtime_key_for_run(user_id, agent["id"], run_id, user_api_key)
 
     asyncio.create_task(
-        _execute_run(pool, run_id, dict(agent), user_id, runtime_key, credits_reserved)
+        _execute_run(pool, run_id, dict(agent), user_id, runtime_key, credits_reserved,
+                     params=params)
     )
 
     return run_id, credits_reserved
@@ -322,6 +326,7 @@ async def _execute_run(
     user_id: str,
     user_api_key: str,
     credits_reserved: int,
+    params: dict | None = None,
 ) -> None:
     """Background task: dispatch to E2B sandbox, settle credits, write ranking signals.
 
@@ -360,6 +365,7 @@ async def _execute_run(
             **user_env,
             "WAYFORTH_API_KEY": user_api_key,
             "X_WAYFORTH_AGENT_ID": run_id,  # tags all proxy credit_transactions to this run
+            "WAYFORTH_PARAMS": json.dumps(params or {}),  # validated, resolved run params
         }
 
         async with pool.acquire() as conn:
@@ -835,6 +841,23 @@ async def dispatch_run(
             "credit_cap": credit_cap,
         })
 
+    # Validate the agent's declared params against the request body — AUTHORITATIVE,
+    # never trusts the client. Agents with no schema accept no params (empty resolved).
+    schema = agent.get("params_schema")
+    if isinstance(schema, str):
+        schema = json.loads(schema)
+    resolved_params: dict = {}
+    if schema:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        raw_params = body.get("params") if isinstance(body, dict) else {}
+        resolved_params, perrors = validate_and_resolve(schema, raw_params or {})
+        if perrors:
+            raise HTTPException(status_code=422, detail={
+                "error": "invalid_params", "errors": perrors})
+
     # Runtime key for the agent's own gateway calls: SDK header key, or (dashboard/
     # session callers with no header) the agent's stored runner key — so manual
     # runs are authenticated too, not just scheduled/webhook runs.
@@ -843,6 +866,7 @@ async def dispatch_run(
     from main import app
     run_id, credits_reserved = await _dispatch_run_internal(
         app.state.pool, db, dict(agent), user_id, api_key_header, trigger="manual",
+        params=resolved_params,
     )
 
     return {
@@ -920,7 +944,7 @@ async def get_run(
     row = await db.fetchrow("""
         SELECT id, status, trigger, sandbox_id, started_at, completed_at, duration_ms,
                exit_code, credits_reserved, credits_compute, credits_proxy,
-               credits_total, credits_released,
+               credits_total, credits_released, params,
                services_called, failover_events, substitutions,
                error_type, error_message, log_tail, created_at
         FROM agent_runs
@@ -962,6 +986,7 @@ async def get_run(
             "failover_events":  row["failover_events"],
             "substitutions":    _parse_jsonb(row["substitutions"]),
         },
+        "params":        _parse_jsonb(row["params"]) or {},
         "error_type":    row["error_type"],
         "error_message": row["error_message"],
         "log_tail":      row["log_tail"],
