@@ -9,6 +9,8 @@ Requires cloud_agents tier gate (starter+). Auth via X-Wayforth-API-Key.
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 import uuid
 
@@ -18,8 +20,11 @@ from pydantic import BaseModel, Field
 from core.agent_secrets import encrypt_env
 from core.auth import provision_runner_key, resolve_dashboard_caller
 from core.db import get_db
+from core.params_schema import ParamsSchemaError, compile_params
 from core.tier_gates import require_tier
 from services.templates import get_template, list_templates
+
+logger = logging.getLogger("wayforth")
 
 router = APIRouter(tags=["Templates"])
 
@@ -99,6 +104,18 @@ async def deploy_template(
 
     code = tmpl["code"][runtime]
 
+    # Extract the template's declared PARAMS so the deployed agent shows its form
+    # (templates are where most users first hit params). STATIC — never executed.
+    # First-party content: a bad PARAMS is OUR bug (caught by the bundled-template
+    # test), so fail SOFT here — never block a user's deploy — and log it loudly.
+    params_schema = None
+    if runtime.startswith("python"):
+        try:
+            params_schema = compile_params(code, "python")
+        except ParamsSchemaError as e:
+            logger.error("template %s PARAMS invalid; deploying without a form: %s",
+                         template_id, e)
+
     slug = body.slug
     if not slug:
         slug = re.sub(r"[^a-z0-9\-]", "-", body.name.lower())
@@ -127,9 +144,9 @@ async def deploy_template(
         INSERT INTO hosted_agents
             (user_id, name, slug, runtime, trigger_type, status,
              credit_cap, env_encrypted, code, sandbox_provider,
-             runner_key_encrypted, runner_key_version)
+             runner_key_encrypted, runner_key_version, params_schema)
         VALUES ($1::uuid, $2, $3, $4, 'manual', 'ready',
-                $5, $6, $7, 'e2b', $8, $9)
+                $5, $6, $7, 'e2b', $8, $9, $10)
         RETURNING id, name, slug, runtime, trigger_type, status, credit_cap,
                   created_at, webhook_id
         """,
@@ -142,6 +159,7 @@ async def deploy_template(
         code,
         runner_key_ct,
         runner_key_ver,
+        json.dumps(params_schema) if params_schema else None,
     )
 
     return {
