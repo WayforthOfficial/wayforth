@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -39,6 +40,7 @@ from pydantic import BaseModel, Field
 from core.agent_secrets import decrypt_env, encrypt_env
 from core.auth import _resolve_user, decrypt_api_key, encrypt_api_key, provision_runner_key, resolve_dashboard_caller
 from core.credits import check_and_deduct_credits
+from core.run_token import mint_run_token
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier, CONCURRENT_RUNS_PER_USER, HOSTED_AGENT_LIMITS
@@ -219,6 +221,33 @@ def _compute_next_run(schedule: str) -> "datetime | None":
         return None
 
 
+def _agent_run_tokens_enabled() -> bool:
+    """Step 3 cutover flag (default OFF). Flip AGENT_RUN_TOKENS_ENABLED on only after
+    the token code is deployed and proven inert."""
+    return os.environ.get("AGENT_RUN_TOKENS_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _runtime_key_for_run(user_id: str, agent_id: str, run_id: str, snapshot_key: str) -> str:
+    """The credential injected into the run sandbox as WAYFORTH_API_KEY.
+
+    Flag ON  → a fresh wf_run_ token bound to (user, agent, run); the user's raw
+               wf_live_ key never enters the sandbox.
+    Flag OFF → snapshot_key — byte-identical to today's behavior (exact rollback).
+
+    If minting fails while ON (e.g. signing secret unset), fall back to snapshot_key so
+    a run never breaks. Not expected once RUN_TOKEN_SIGNING_SECRET is set; logged loudly.
+    """
+    if not _agent_run_tokens_enabled():
+        return snapshot_key
+    try:
+        return mint_run_token(user_id, str(agent_id), run_id)
+    except Exception as exc:  # pragma: no cover - defensive; secret is set in prod
+        logger.error("run-token mint failed for run %s; using snapshot key: %s", run_id, exc)
+        return snapshot_key
+
+
 async def _dispatch_run_internal(
     pool,
     db,
@@ -261,8 +290,12 @@ async def _dispatch_run_internal(
         agent["id"],
     )
 
+    # Sandbox credential: a per-run wf_run_ token (flag ON) or the snapshot key (OFF).
+    # The run row now exists, so the token's binding cross-check at /proxy will resolve.
+    runtime_key = _runtime_key_for_run(user_id, agent["id"], run_id, user_api_key)
+
     asyncio.create_task(
-        _execute_run(pool, run_id, dict(agent), user_id, user_api_key, credits_reserved)
+        _execute_run(pool, run_id, dict(agent), user_id, runtime_key, credits_reserved)
     )
 
     return run_id, credits_reserved
