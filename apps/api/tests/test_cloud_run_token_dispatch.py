@@ -20,7 +20,7 @@ SNAPSHOT = "wf_live_RAWUSERKEY_must_never_enter_sandbox"
 SECRET = "step3-secret-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 
-def _run_execute_capturing_env(monkeypatch, runtime_key):
+def _run_execute_capturing_env(monkeypatch, runtime_key, params=None):
     """Drive _execute_run with mocked deps; return the run_env passed to the sandbox."""
     captured = {}
 
@@ -57,7 +57,7 @@ def _run_execute_capturing_env(monkeypatch, runtime_key):
     monkeypatch.setattr(cloud, "_reconcile_run_signals", _signals)
 
     agent = {"id": AGENT, "runtime": "python", "env_encrypted": None, "sandbox_provider": "e2b"}
-    asyncio.run(cloud._execute_run(_Pool(), RUN, agent, USER, runtime_key, 0))
+    asyncio.run(cloud._execute_run(_Pool(), RUN, agent, USER, runtime_key, 0, params=params))
     return captured["env"]
 
 
@@ -113,3 +113,18 @@ def test_flag_on_without_secret_falls_back_to_snapshot(monkeypatch):
     monkeypatch.delenv("RUN_TOKEN_SIGNING_SECRET", raising=False)
     monkeypatch.delenv("RUN_TOKEN_SIGNING_SECRET_PREV", raising=False)
     assert cloud._runtime_key_for_run(USER, AGENT, RUN, SNAPSHOT) == SNAPSHOT
+
+
+# ── Step 3: resolved params injected as WAYFORTH_PARAMS ──────────────────────────
+
+def test_params_injected_as_wayforth_params(monkeypatch):
+    import json
+    monkeypatch.delenv("AGENT_RUN_TOKENS_ENABLED", raising=False)
+    env = _run_execute_capturing_env(monkeypatch, SNAPSHOT, params={"ticker": "AAPL", "n": 5})
+    assert json.loads(env["WAYFORTH_PARAMS"]) == {"ticker": "AAPL", "n": 5}
+
+
+def test_no_params_injects_empty_object(monkeypatch):
+    monkeypatch.delenv("AGENT_RUN_TOKENS_ENABLED", raising=False)
+    env = _run_execute_capturing_env(monkeypatch, SNAPSHOT)
+    assert env["WAYFORTH_PARAMS"] == "{}"
