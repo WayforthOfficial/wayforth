@@ -278,11 +278,14 @@ async def _execute_run(
 ) -> None:
     """Background task: dispatch to E2B sandbox, settle credits, write ranking signals.
 
-    Pre-reserve model:
-      credits_reserved  — deducted from balance at dispatch (= credit_cap when set, else 0)
-      credits_proxy     — proxy call deductions during the run (from credit_transactions)
-      credits_compute   — 1.5 credits/actual-min (ceil, 1-credit min) at completion
-      credits_released  — max(0, reserved - proxy - compute), returned to balance at completion
+    Pre-reserve model: the reserve is a pure HOLD, not a charge. proxy + compute are
+    charged live to the balance (during the run / at completion), so the FULL reserve
+    is returned at completion — the hold nets to zero and the run's net balance impact
+    equals actual spend (proxy + compute), never double.
+      credits_reserved  — deducted from balance at dispatch as a hold (= credit_cap when set, else 0)
+      credits_proxy     — proxy call deductions during the run (from credit_transactions, live)
+      credits_compute   — 1.5 credits/actual-min (ceil, 1-credit min) at completion (live)
+      credits_released  — the FULL reserve, returned at completion (the hold nets to zero)
     """
 
     async def _update(status: str, **fields) -> None:
@@ -368,11 +371,13 @@ async def _execute_run(
         signals = await _reconcile_run_signals(pool, run_id, user_id)
         proxy_credits = signals["credits_proxy"]
 
-        # Release unused pre-reserve: reserved - (proxy + compute actually charged),
-        # min 0. Only credits actually spent reduce the release — uncollected
-        # compute must NOT inflate the amount returned to the balance.
+        # Release the FULL hold. proxy + compute were already charged live to the
+        # balance (the compute deduction above + the per-call proxy deductions during
+        # the run), so the reserve is a pure hold that must return in full — net
+        # balance impact per run == actual_spend, never 2×. actual_spend is still the
+        # run's reported credits_total ("cost") below; only the release changes.
         actual_spend = proxy_credits + compute_charged
-        credits_released = max(0, credits_reserved - actual_spend)
+        credits_released = credits_reserved
         if credits_released > 0:
             await _release_reserve(pool, user_id, credits_released, run_id)
 
