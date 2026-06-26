@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from core.agent_secrets import decrypt_env, encrypt_env
 from core.auth import _resolve_user, decrypt_api_key, encrypt_api_key, provision_runner_key, resolve_dashboard_caller
 from core.credits import check_and_deduct_credits
+from core.params_schema import ParamsSchemaError, compile_params
 from core.run_token import mint_run_token
 from core.db import get_db
 from core.rate_limit import limiter
@@ -246,6 +247,19 @@ def _runtime_key_for_run(user_id: str, agent_id: str, run_id: str, snapshot_key:
     except Exception as exc:  # pragma: no cover - defensive; secret is set in prod
         logger.error("run-token mint failed for run %s; using snapshot key: %s", run_id, exc)
         return snapshot_key
+
+
+def _params_schema_for_upload(runtime: str, code: str):
+    """Compile the agent's declared PARAMS for storage at code upload.
+
+    Python agents only in v1 — extracted statically (never executed). node (and any
+    non-python runtime) gets no schema for now. Returns the compiled schema, or None
+    if there's no PARAMS / unsupported runtime. Raises ParamsSchemaError on an invalid
+    PARAMS literal (or unparseable Python); the caller maps that to a 422.
+    """
+    if runtime.startswith("python"):
+        return compile_params(code, "python")
+    return None
 
 
 async def _dispatch_run_internal(
@@ -610,10 +624,22 @@ async def upload_code(
 
     code = body_bytes.decode("utf-8", errors="replace")
 
+    # Extract the agent's declared PARAMS schema (single source of truth). STATIC —
+    # the code is never executed (see _params_schema_for_upload). An invalid PARAMS
+    # literal rejects the upload with clear author feedback BEFORE the code is stored,
+    # so the agent is never left with stored code and schema that disagree.
+    try:
+        params_schema = _params_schema_for_upload(agent["runtime"], code)
+    except ParamsSchemaError as e:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_params_schema",
+            "message": str(e),
+        })
+
     await db.execute(
-        "UPDATE hosted_agents SET code = $1, status = 'ready', updated_at = NOW() "
-        "WHERE id = $2::uuid",
-        code, agent_id,
+        "UPDATE hosted_agents SET code = $1, status = 'ready', params_schema = $2, "
+        "updated_at = NOW() WHERE id = $3::uuid",
+        code, json.dumps(params_schema) if params_schema is not None else None, agent_id,
     )
 
     ext = "ts" if agent["runtime"] == "node20" else "py"
@@ -622,6 +648,7 @@ async def upload_code(
         "status": "ready",
         "size_bytes": len(body_bytes),
         "runtime": agent["runtime"],
+        "params_fields": len(params_schema["fields"]) if params_schema else 0,
         "message": f"Code uploaded. Run: POST /cloud/agents/{agent_id}/runs",
         "file": f"agent.{ext}",
     }
@@ -710,12 +737,18 @@ async def get_agent(request: Request, agent_id: str, db=Depends(get_db)) -> dict
         ORDER BY created_at DESC LIMIT 1
     """, agent_id)
 
+    # params_schema is JSONB; asyncpg may hand it back as text — normalize to an object.
+    _ps = agent.get("params_schema")
+    if isinstance(_ps, str):
+        _ps = json.loads(_ps)
+
     return {
         "id":             str(agent["id"]),
         "name":           agent["name"],
         "slug":           agent["slug"],
         "runtime":        agent["runtime"],
         "status":         agent["status"],
+        "params_schema":  _ps,
         "trigger_type":   agent["trigger_type"],
         "schedule":       agent["schedule"],
         "credit_cap":     agent["credit_cap"],

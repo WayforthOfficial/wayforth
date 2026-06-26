@@ -1138,6 +1138,11 @@ async def lifespan(app: FastAPI):
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_hosted_agents_webhook_id
                     ON hosted_agents(webhook_id) WHERE webhook_id IS NOT NULL
             """)
+            # Migration 067: agent params v1 — declared PARAMS schema per agent
+            await _mconn.execute("""
+                ALTER TABLE hosted_agents
+                    ADD COLUMN IF NOT EXISTS params_schema JSONB
+            """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hosted_agents_next_run
                     ON hosted_agents(next_run_at)
