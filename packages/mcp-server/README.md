@@ -30,14 +30,14 @@ export WAYFORTH_API_KEY=wf_live_...
 
 | Tool | Description |
 |------|-------------|
-| `wayforth_search` | Search ~5,000 APIs by natural language — returns WRI scores, tier, price/req |
+| `wayforth_search` | Search ~5,000 APIs by natural language — returns reliability scores, tier, price/req |
 | `wayforth_query` | Structured discovery — filter by tier, latency, region, price, payment rail |
 | `wayforth_run` | Intent-based routing with automatic reliability failover — returns result + failover status |
 | `wayforth_execute` | Direct execution of a managed service; auto-fails over to best alternative if degraded — returns result + failover status |
-| `wayforth_reliability` | Real-time reliability check — WRI score, tier, 7d uptime, last probe, failover candidate |
+| `wayforth_reliability` | Real-time reliability check — reliability score, tier, 7d uptime, last probe, failover candidate |
 | `wayforth_pay` | Pay for a service via card credits or USDC on Base |
 | `wayforth_list` | Browse catalog with category, tier, and limit filters |
-| `wayforth_status` | Live API health, WRI scores, tier levels, last probe result, and failover history |
+| `wayforth_status` | Live API health, reliability scores, tier levels, last probe result, and failover history |
 | `wayforth_stats` | Catalog statistics — total services, tier breakdown |
 | `wayforth_keys` | Store your own API keys encrypted at rest (BYOK) |
 | `wayforth_remember` | Save a service to persistent agent memory |
@@ -46,7 +46,7 @@ export WAYFORTH_API_KEY=wf_live_...
 | `wayforth_similar` | Find services co-used alongside a given service |
 | `wayforth_identity` | Get or create your agent identity — returns trust score, reputation tier, usage history |
 | `wayforth_check_agent_identity` | Look up another agent's identity by wallet address |
-| `wayforth_set_wri_alert` | Set a webhook to fire when a service crosses a WRI score threshold |
+| `wayforth_set_wri_alert` | Set a webhook to fire when a service crosses a reliability score threshold |
 | `wayforth_quickstart` | Get started guide — returned as a formatted string |
 
 ## Development

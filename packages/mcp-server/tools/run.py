@@ -32,7 +32,7 @@ async def wayforth_run(
     ),
 ) -> str:
     """Intent-based routing with automatic reliability failover.
-    Describe what you need — Wayforth selects the highest-WRI verified service
+    Describe what you need — Wayforth selects the highest-reliability verified service
     and executes it. If the primary service degrades mid-session, automatically
     reroutes to the next verified equivalent. Returns result + failover status.
 
@@ -115,6 +115,6 @@ async def wayforth_run(
     if failover.get("triggered"):
         out["_failover_note"] = (
             f"⚡ Failover: {failover.get('original_service')} → {failover.get('routed_to')} "
-            f"({failover.get('reason')}, WRI {failover.get('original_wri')} → {failover.get('fallback_wri')})"
+            f"({failover.get('reason')}, reliability {failover.get('original_wri')} → {failover.get('fallback_wri')})"
         )
     return json.dumps(out, indent=2)

@@ -19,13 +19,13 @@ async def wayforth_reliability(
     ),
     category: Optional[str] = Field(
         default=None,
-        description="Category name — returns top 5 services by WRI score. "
+        description="Category name — returns top 5 services by reliability score. "
                     "Options: translation, inference, search, data, image, audio, communication. "
                     "Used when slug is not provided.",
     ),
 ) -> str:
     """Check real-time reliability for a service or category.
-    Returns WRI score (0-100), Tier level, uptime over 7 days, last probe timestamp,
+    Returns reliability score (0-100), Tier level, uptime over 7 days, last probe timestamp,
     and whether a verified failover alternative exists.
     Use to pre-check before committing to a service for a long-running task.
     """
@@ -70,7 +70,7 @@ async def wayforth_reliability(
         status_icon = {"healthy": "✅", "degraded": "⚠️", "outage": "🔴"}.get(e.get("status", ""), "❓")
         lines = [
             f"{status_icon} {e.get('name', e.get('service'))} ({e.get('service')})",
-            f"  WRI:     {e.get('wri', 'N/A')} / 100",
+            f"  Reliability: {e.get('wri', 'N/A')} / 100",
             f"  Tier:    {e.get('tier', 'N/A')}",
             f"  Uptime:  {e.get('uptime_7d') or 'N/A'} (7d)",
             f"  Latency: {e.get('avg_response_ms', 'N/A')} ms avg",
