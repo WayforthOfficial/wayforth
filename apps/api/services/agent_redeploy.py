@@ -86,6 +86,15 @@ async def redeploy(pool, agent: dict, files: dict, requirements_text: str, *, bu
     pins, errors = validate_requirements(requirements_text or "")
     if errors:
         raise RedeployError("requirements", "requirements rejected", errors=errors)
+    # a package can be allowlisted yet later REVOKED — block new builds that use one
+    if pins:
+        from core.package_revocation import revoked_pins
+        async with pool.acquire() as conn:
+            bad = await revoked_pins(conn, pins)
+        if bad:
+            raise RedeployError("requirements", "revoked package(s)", errors=[
+                {"field": n, "code": "revoked", "message": f"'{n}=={v}' is revoked"}
+                for n, v in bad])
 
     # ── create the building version (immutable attempt record) ───────────────────
     version = await _create_building_version(pool, agent_id, files, pins, params_schema)

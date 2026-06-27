@@ -131,3 +131,38 @@ async def test_activate_version_rejects_foreign_version():
     db = FakeDB(fetchval=None)           # RETURNING nothing → version not owned by agent
     with pytest.raises(ValueError, match="does not belong"):
         await av.activate_version(db, AGENT, VID)
+
+
+# ── rollback_to: usability-guarded backward repoint ─────────────────────────────
+
+class _RbConn:
+    def __init__(self, target):
+        self.target = target
+        self.execs = []
+    async def fetchrow(self, q, *a): return self.target
+    async def execute(self, q, *a): self.execs.append(q)
+
+
+@pytest.mark.asyncio
+async def test_rollback_to_ok():
+    conn = _RbConn({"version_no": 2, "status": "superseded"})
+    out = await av.rollback_to(conn, AGENT, VID)
+    assert out["version_no"] == 2
+    assert len(conn.execs) == 2          # repoint + status update
+
+
+@pytest.mark.asyncio
+async def test_rollback_to_rejects_foreign():
+    conn = _RbConn(None)
+    with pytest.raises(ValueError, match="does not belong"):
+        await av.rollback_to(conn, AGENT, VID)
+    assert conn.execs == []              # nothing mutated
+
+
+@pytest.mark.parametrize("status", ["failed", "building"])
+@pytest.mark.asyncio
+async def test_rollback_to_rejects_unusable_status(status):
+    conn = _RbConn({"version_no": 3, "status": status})
+    with pytest.raises(ValueError, match=f"cannot roll back to a '{status}'"):
+        await av.rollback_to(conn, AGENT, VID)
+    assert conn.execs == []              # never repointed to an unbuilt version

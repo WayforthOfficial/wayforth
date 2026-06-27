@@ -1200,6 +1200,22 @@ async def lifespan(app: FastAPI):
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_agent_runs_version ON agent_runs(version_id)
             """)
+            # Migration 071: package revocation flagging (code-editing Step 5).
+            # Mirrored in infra/migrations/071_package_revocation.sql. Additive/reversible.
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS revoked_packages (
+                    name TEXT NOT NULL, version TEXT, reason TEXT,
+                    revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (name, version)
+                )
+            """)
+            await _mconn.execute("""
+                ALTER TABLE agent_versions
+                    ADD COLUMN IF NOT EXISTS dep_flagged BOOLEAN NOT NULL DEFAULT FALSE
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_versions_dep_flagged
+                    ON agent_versions(agent_id) WHERE dep_flagged
+            """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hosted_agents_next_run
                     ON hosted_agents(next_run_at)

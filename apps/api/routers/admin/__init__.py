@@ -14,6 +14,7 @@ from .rank import router as rank_router
 from .services import router as services_router
 from .dashboard import router as dashboard_router
 from .usdc import router as usdc_router
+from .packages import router as packages_router
 
 logger = logging.getLogger("wayforth")
 
@@ -275,3 +276,4 @@ router.include_router(rank_router)
 router.include_router(services_router)
 router.include_router(dashboard_router)
 router.include_router(usdc_router)
+router.include_router(packages_router)
