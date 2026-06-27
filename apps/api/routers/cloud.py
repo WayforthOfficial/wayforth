@@ -46,7 +46,10 @@ from core.run_token import mint_run_token
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier, CONCURRENT_RUNS_PER_USER, HOSTED_AGENT_LIMITS
+from core.agent_versions import get_active_version
 from services.sandbox import compute_credits_for_run, get_provider
+from services.agent_redeploy import redeploy, RedeployError
+from services.agent_deps import build_agent_image, DepsError
 
 logger = logging.getLogger("wayforth")
 
@@ -319,6 +322,60 @@ async def _dispatch_run_internal(
     return run_id, credits_reserved
 
 
+def _versioned_dispatch_enabled() -> bool:
+    """Step 4 cutover flag (default OFF). When off, save + dispatch are the legacy
+    single-file .code paths, byte-identical to before."""
+    return os.environ.get("AGENT_VERSIONED_DISPATCH_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+async def _resolve_dispatch(pool, agent: dict) -> dict:
+    """Resolve what a run executes, ONCE per run — the in-flight isolation binding.
+
+    Returns {code, files, image_ref, version_id}. When the flag is off (or no active
+    version / no built image), this is the legacy .code path with version_id=None. When
+    the active version has a built image (python), the run boots that image + files. A
+    version without a built image (e.g. backfilled v1) still binds version_id for audit
+    but runs the legacy .code path — the NULL-image fallback.
+    """
+    async with pool.acquire() as conn:
+        code_row = await conn.fetchrow(
+            "SELECT code FROM hosted_agents WHERE id = $1::uuid", agent["id"])
+        code = (code_row or {}).get("code") or ""
+        if not _versioned_dispatch_enabled():
+            return {"code": code, "files": None, "image_ref": None, "version_id": None}
+        v = await get_active_version(conn, agent["id"])
+    if not v:
+        return {"code": code, "files": None, "image_ref": None, "version_id": None}
+    if not v.get("image_ref") or agent["runtime"] != "python3.12":
+        return {"code": code, "files": None, "image_ref": None, "version_id": v["id"]}
+    return {"code": code, "files": v["files"], "image_ref": v["image_ref"],
+            "version_id": v["id"]}
+
+
+def _mirror_config() -> tuple[str, str]:
+    """The private wheel mirror the build sandbox installs from (mirror-only egress).
+    Empty until the mirror stands up (Step 4b) — the flag stays off until then."""
+    url = os.environ.get("AGENT_MIRROR_URL", "").strip()
+    host = os.environ.get("AGENT_MIRROR_HOST", "").strip()
+    return url, host
+
+
+async def _prod_build_fn(*, agent: dict, version: dict, files: dict, requirements) -> str:
+    """Production build_fn for redeploy: the Step-1 egress-locked, wheels-only, hashed
+    build. Runs the sync build in an executor. Injected so tests use a fake instead."""
+    from services.agent_deps import build_requirements_lock  # local: avoid import cycle churn
+    mirror_url, mirror_host = _mirror_config()
+    reqs_text = build_requirements_lock(requirements) if requirements else ""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: build_agent_image(
+            str(agent["id"]), version["version_no"], files, reqs_text,
+            mirror_url=mirror_url, mirror_host=mirror_host),
+    )
+
+
 async def _execute_run(
     pool,
     run_id: str,
@@ -354,7 +411,12 @@ async def _execute_run(
             )
 
     try:
-        await _update("running", started_at=datetime.now(timezone.utc))
+        # Resolve the dispatch version ONCE and bind it to the run (in-flight isolation):
+        # a concurrent edit that repoints active_version_id afterward cannot change what
+        # this run executes. version_id stamped atomically with the 'running' transition.
+        dispatch = await _resolve_dispatch(pool, agent)
+        await _update("running", started_at=datetime.now(timezone.utc),
+                      version_id=dispatch["version_id"])
 
         # Decrypt user env vars at dispatch — decrypted value never stored or logged
         user_env: dict[str, str] = {}
@@ -368,12 +430,8 @@ async def _execute_run(
             "WAYFORTH_PARAMS": json.dumps(params or {}),  # validated, resolved run params
         }
 
-        async with pool.acquire() as conn:
-            code_row = await conn.fetchrow(
-                "SELECT code FROM hosted_agents WHERE id = $1::uuid", agent["id"]
-            )
-        code = (code_row or {}).get("code") or ""
-        if not code.strip():
+        code = dispatch["code"]
+        if not (code.strip() or dispatch["files"]):
             if credits_reserved > 0:
                 await _release_reserve(pool, user_id, credits_reserved, run_id)
             await _update(
@@ -394,6 +452,8 @@ async def _execute_run(
             runtime=agent["runtime"],
             env=run_env,
             timeout_seconds=min(timeout_s, _MAX_TIMEOUT),
+            files=dispatch["files"],
+            image_ref=dispatch["image_ref"],
         )
 
         # Deduct compute charge (1.5 credits/actual-min, ceil, min 1).
@@ -647,6 +707,21 @@ async def upload_code(
         "updated_at = NOW() WHERE id = $3::uuid",
         code, json.dumps(params_schema) if params_schema is not None else None, agent_id,
     )
+
+    # Step 4: when versioned dispatch is on, also create→build→activate a version from
+    # this save (single-file entrypoint here; multi-file + requirements arrive in Step 5).
+    # The .code write above stays in sync as the NULL-image fallback. Flag off → legacy
+    # save only, behavior unchanged. A redeploy failure leaves the prior version serving.
+    if _versioned_dispatch_enabled():
+        from core.agent_versions import entrypoint_for_runtime
+        entrypoint = entrypoint_for_runtime(agent["runtime"])
+        try:
+            await redeploy(request.app.state.pool, dict(agent), {entrypoint: code}, "",
+                           build_fn=_prod_build_fn)
+        except RedeployError as e:
+            code_map = {"files": 422, "params": 422, "requirements": 422, "build": 502}
+            raise HTTPException(status_code=code_map.get(e.stage, 500), detail={
+                "error": f"redeploy_{e.stage}", "message": e.message, "errors": e.errors})
 
     ext = "ts" if agent["runtime"] == "node20" else "py"
     return {
