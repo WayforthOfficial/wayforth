@@ -19,6 +19,8 @@ import asyncpg
 
 from services.agent_redeploy import redeploy, RedeployError
 from routers.cloud import _resolve_dispatch
+from core.agent_versions import rollback_to
+from core.package_revocation import revoke_package, is_revoked, flagged_versions
 
 SCHEMA = """
 CREATE TABLE hosted_agents (
@@ -28,11 +30,14 @@ CREATE TABLE hosted_agents (
 CREATE TABLE agent_versions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), agent_id UUID NOT NULL, version_no INT NOT NULL,
   files JSONB NOT NULL, requirements JSONB, params_schema JSONB, image_ref TEXT,
-  status TEXT NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(agent_id, version_no));
+  status TEXT NOT NULL DEFAULT 'active', dep_flagged BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(agent_id, version_no));
 CREATE TABLE agent_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), agent_id UUID, version_id UUID, status TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE revoked_packages (
+  name TEXT NOT NULL, version TEXT, reason TEXT,
+  revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(name, version));
 """
 
 CODE = "print('hello')"
@@ -125,6 +130,49 @@ async def main():
             str(agent_id), str(vlo), 8)
         active = str(await c.fetchval("SELECT active_version_id FROM hosted_agents WHERE id=$1", agent_id))
     check("older build (v8) did NOT clobber newer active (v9)", moved is None and active == str(vhi))
+
+    # ── D. rollback — instant pointer repoint to a prior built version ───────────
+    print("D. rollback to a prior version (no rebuild)")
+    async with pool.acquire() as c:
+        async with c.transaction():
+            out = await rollback_to(c, str(agent_id), v1)        # active is v9 → roll back to v1
+        active = str(await c.fetchval("SELECT active_version_id FROM hosted_agents WHERE id=$1", agent_id))
+        v1_status = await c.fetchval("SELECT status FROM agent_versions WHERE id=$1::uuid", v1)
+    check("rollback repointed active to v1", active == v1 and out["version_no"] == 1)
+    check("rolled-back version is now active", v1_status == "active")
+    # rollback to a failed version is rejected
+    async with pool.acquire() as c:
+        bad = await c.fetchval(
+            "INSERT INTO agent_versions (agent_id, version_no, files, status) "
+            "VALUES ($1, 99, $2, 'failed') RETURNING id", agent_id, json.dumps({"agent.py": CODE}))
+        try:
+            async with c.transaction():
+                await rollback_to(c, str(agent_id), str(bad))
+            check("rollback to a 'failed' version rejected", False)
+        except ValueError:
+            check("rollback to a 'failed' version rejected", True)
+
+    # ── E. package revocation flagging ──────────────────────────────────────────
+    print("E. package revocation flags affected versions")
+    async with pool.acquire() as c:
+        vr = await c.fetchval(
+            "INSERT INTO agent_versions (agent_id, version_no, files, requirements, status) "
+            "VALUES ($1, 50, $2, $3, 'active') RETURNING id", agent_id,
+            json.dumps({"agent.py": CODE}), json.dumps([["badpkg", "1.0", ["sha256:x"]]]))
+        v_safe = await c.fetchval(
+            "INSERT INTO agent_versions (agent_id, version_no, files, requirements, status) "
+            "VALUES ($1, 51, $2, $3, 'active') RETURNING id", agent_id,
+            json.dumps({"agent.py": CODE}), json.dumps([["httpx", "0.28.1", ["sha256:y"]]]))
+        async with c.transaction():
+            n = await revoke_package(c, "badpkg", version="1.0", reason="canary")
+        flagged_bad = await c.fetchval("SELECT dep_flagged FROM agent_versions WHERE id=$1::uuid", vr)
+        flagged_safe = await c.fetchval("SELECT dep_flagged FROM agent_versions WHERE id=$1::uuid", v_safe)
+        revoked = await is_revoked(c, "badpkg", "1.0")
+        flist = await flagged_versions(c)
+    check("revoke flagged exactly the version using badpkg", n == 1 and flagged_bad is True)
+    check("unrelated version (httpx) NOT flagged", flagged_safe is False)
+    check("is_revoked(badpkg==1.0) true", revoked is True)
+    check("flagged_versions surfaces the affected version", any(f["version_id"] == str(vr) for f in flist))
 
     await pool.close()
     ok = all(v for _, v in results)

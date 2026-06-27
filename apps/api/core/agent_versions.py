@@ -92,3 +92,27 @@ async def activate_version(db, agent_id, version_id) -> None:
            RETURNING h.id""", str(agent_id), str(version_id))
     if not updated:
         raise ValueError(f"version {version_id} does not belong to agent {agent_id}")
+
+
+async def rollback_to(conn, agent_id, version_id) -> dict:
+    """Roll the active version back to a prior one — instant and safe: its image is
+    already built, so this is a pure pointer repoint (no rebuild). Deliberately NOT
+    forward-only (rollback goes backward by design). Rejects rolling back to a
+    failed/building version (nothing usable to serve). Run inside a transaction."""
+    target = await conn.fetchrow(
+        "SELECT version_no, status FROM agent_versions WHERE id = $1::uuid AND agent_id = $2::uuid",
+        str(version_id), str(agent_id))
+    if not target:
+        raise ValueError(f"version {version_id} does not belong to agent {agent_id}")
+    if target["status"] in ("failed", "building"):
+        raise ValueError(f"cannot roll back to a '{target['status']}' version")
+    await conn.execute(
+        "UPDATE hosted_agents SET active_version_id = $2::uuid, updated_at = NOW() "
+        "WHERE id = $1::uuid", str(agent_id), str(version_id))
+    await conn.execute(
+        """UPDATE agent_versions
+           SET status = CASE WHEN id = $2::uuid THEN 'active'
+                             WHEN status = 'active' THEN 'superseded' ELSE status END
+           WHERE agent_id = $1::uuid AND (id = $2::uuid OR status = 'active')""",
+        str(agent_id), str(version_id))
+    return {"version_id": str(version_id), "version_no": target["version_no"]}

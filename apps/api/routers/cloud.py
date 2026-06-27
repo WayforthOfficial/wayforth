@@ -46,7 +46,7 @@ from core.run_token import mint_run_token
 from core.db import get_db
 from core.rate_limit import limiter
 from core.tier_gates import require_tier, CONCURRENT_RUNS_PER_USER, HOSTED_AGENT_LIMITS
-from core.agent_versions import get_active_version
+from core.agent_versions import get_active_version, list_versions, rollback_to
 from services.sandbox import compute_credits_for_run, get_provider
 from services.agent_redeploy import redeploy, RedeployError
 from services.agent_deps import build_agent_image, DepsError
@@ -719,9 +719,7 @@ async def upload_code(
             await redeploy(request.app.state.pool, dict(agent), {entrypoint: code}, "",
                            build_fn=_prod_build_fn)
         except RedeployError as e:
-            code_map = {"files": 422, "params": 422, "requirements": 422, "build": 502}
-            raise HTTPException(status_code=code_map.get(e.stage, 500), detail={
-                "error": f"redeploy_{e.stage}", "message": e.message, "errors": e.errors})
+            raise _redeploy_http(e)
 
     ext = "ts" if agent["runtime"] == "node20" else "py"
     return {
@@ -733,6 +731,93 @@ async def upload_code(
         "message": f"Code uploaded. Run: POST /cloud/agents/{agent_id}/runs",
         "file": f"agent.{ext}",
     }
+
+
+def _redeploy_http(e: RedeployError) -> HTTPException:
+    """Map a RedeployError stage to an HTTP status (validation → 422, build → 502)."""
+    code_map = {"files": 422, "params": 422, "requirements": 422, "build": 502}
+    return HTTPException(status_code=code_map.get(e.stage, 500), detail={
+        "error": f"redeploy_{e.stage}", "message": e.message, "errors": e.errors})
+
+
+@router.post("/agents/{agent_id}/deploy", status_code=200)
+@limiter.limit("30/minute")
+async def deploy_version(request: Request, agent_id: str, db=Depends(get_db)) -> dict:
+    """Multi-file versioned deploy: {files: {path: content}, requirements: "name==ver\\n…"}.
+    Runs the full save→redeploy (create→validate→build→activate). Flag-gated."""
+    user_id, _, tier = await _resolve_caller(request, db)
+    require_tier(tier, "cloud_agents")
+    if not _versioned_dispatch_enabled():
+        raise HTTPException(status_code=409, detail={"error": "versioning_disabled",
+            "message": "Versioned multi-file deploy is not enabled."})
+    agent = await _get_agent_or_404(db, user_id, agent_id)
+    if agent["status"] == "running":
+        raise HTTPException(status_code=409, detail={"error": "agent_running",
+            "message": "Cannot deploy while a run is in progress."})
+    body = await request.json()
+    files = body.get("files") or {}
+    requirements = body.get("requirements") or ""
+    if not isinstance(files, dict) or not files:
+        raise HTTPException(status_code=422, detail={"error": "no_files",
+            "message": "A non-empty 'files' map is required."})
+    total = sum(len(c.encode("utf-8")) for c in files.values() if isinstance(c, str))
+    if total > _MAX_CODE_BYTES:
+        raise HTTPException(status_code=413, detail={"error": "code_too_large",
+            "max_bytes": _MAX_CODE_BYTES})
+    try:
+        out = await redeploy(request.app.state.pool, dict(agent), files, requirements,
+                             build_fn=_prod_build_fn)
+    except RedeployError as e:
+        raise _redeploy_http(e)
+    return {"id": agent_id, "version_no": out["version_no"], "version_id": out["version_id"],
+            "image_ref": out["image_ref"], "activated": out["activated"], "status": out["status"]}
+
+
+@router.get("/agents/{agent_id}/versions")
+@limiter.limit("60/minute")
+async def list_agent_versions(request: Request, agent_id: str, db=Depends(get_db)) -> dict:
+    """Version history (newest first) + the active pointer — what rollback can target."""
+    user_id, _, tier = await _resolve_caller(request, db)
+    require_tier(tier, "cloud_agents")
+    agent = await _get_agent_or_404(db, user_id, agent_id)
+    versions = await list_versions(db, agent_id)
+    active = agent.get("active_version_id")
+    return {"id": agent_id, "active_version_id": str(active) if active else None,
+            "versions": versions}
+
+
+@router.post("/agents/{agent_id}/rollback", status_code=200)
+@limiter.limit("30/minute")
+async def rollback_version(request: Request, agent_id: str, db=Depends(get_db)) -> dict:
+    """Roll the active version back to a prior one (by version_id or version_no). Instant
+    + safe — the target's image is already built, so this is a pure pointer repoint."""
+    user_id, _, tier = await _resolve_caller(request, db)
+    require_tier(tier, "cloud_agents")
+    if not _versioned_dispatch_enabled():
+        raise HTTPException(status_code=409, detail={"error": "versioning_disabled",
+            "message": "Rollback requires versioned dispatch."})
+    agent = await _get_agent_or_404(db, user_id, agent_id)
+    if agent["status"] == "running":
+        raise HTTPException(status_code=409, detail={"error": "agent_running",
+            "message": "Cannot roll back while a run is in progress."})
+    body = await request.json()
+    version_id, version_no = body.get("version_id"), body.get("version_no")
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if version_id is None and version_no is not None:
+                version_id = await conn.fetchval(
+                    "SELECT id FROM agent_versions WHERE agent_id = $1::uuid AND version_no = $2",
+                    agent_id, int(version_no))
+            if not version_id:
+                raise HTTPException(status_code=404, detail={"error": "version_not_found",
+                    "message": "Target version not found for this agent."})
+            try:
+                out = await rollback_to(conn, agent_id, str(version_id))
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail={"error": "rollback_rejected",
+                    "message": str(e)})
+    return {"id": agent_id, "rolled_back_to": out["version_no"], "version_id": out["version_id"]}
 
 
 @router.get("/agents")
