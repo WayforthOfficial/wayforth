@@ -20,7 +20,7 @@ mirror is up). When OFF, those endpoints return **`409 versioning_disabled`**.
 | Endpoint | Flag-gated? | Testable now? |
 |---|---|---|
 | `GET /cloud/agents/{id}/versions` | no | **yes** (returns the backfilled v1 today) |
-| `GET /cloud/deps/allowlist` *(to add — §2)* | no | yes, once implemented |
+| `GET /cloud/deps/allowlist` | no | **yes** (live) |
 | `GET /templates`, `GET /templates/{id}` | no | **yes** (already live) |
 | `POST /cloud/agents/{id}/deploy` | **yes** | after the flip (409 until then) |
 | `POST /cloud/agents/{id}/rollback` | **yes** | after the flip (409 until then) |
@@ -116,13 +116,12 @@ rebuild). Roll **forward or backward** to any prior version that was actually li
 
 ## 2. The requirements picker — the allowlist source
 
-**Answer to "is there a GET, or is it static?":** the allowlist is currently a **static
-server-side lockfile** (`services/agent_deps_lock.json`, shape `{name: {version: [hashes]}}`)
-with **no public endpoint** yet. The frontend cannot and should not read that file or bundle
-a copy (it drifts + leaks hashes). So this contract specifies a small read-only endpoint to
-add:
+**Answer to "is there a GET, or is it static?":** the allowlist is a static server-side
+lockfile (`services/agent_deps_lock.json`, shape `{name: {version: [hashes]}}`). The
+frontend must not read that file or bundle a copy (it drifts + leaks hashes), so it's
+served — hashes stripped — by a dedicated endpoint:
 
-### `GET /cloud/deps/allowlist` — **NOT YET IMPLEMENTED (trivial to add)**
+### `GET /cloud/deps/allowlist` — **live**
 **Response `200`**
 ```json
 {
@@ -142,9 +141,9 @@ add:
 `name==version` line into `requirements`. Anything not in this map will be rejected at
 deploy with `not_allowed` (§4) — so gate the "add" button on this list.
 
-> **Action needed (one-liner, your call):** implement `GET /cloud/deps/allowlist` returning
-> the lockfile minus hashes. Until then, the picker has no data source. Flagging it here so
-> it's not discovered mid-build.
+> **Auth + security:** authenticated `cloud_agents` tier (same as the rest of `/cloud/*`).
+> Hashes are a build-time integrity detail and are **never** sent — the payload is only
+> names + versions.
 
 ---
 

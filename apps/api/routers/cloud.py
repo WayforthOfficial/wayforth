@@ -820,6 +820,24 @@ async def rollback_version(request: Request, agent_id: str, db=Depends(get_db)) 
     return {"id": agent_id, "rolled_back_to": out["version_no"], "version_id": out["version_id"]}
 
 
+def _allowlist_payload() -> dict:
+    """The requirements-picker payload: name → sorted versions, + the dep cap. Hashes are
+    a build-time integrity detail and are dropped here — they NEVER reach the client."""
+    from services.agent_deps import MAX_DIRECT_DEPS, load_lockfile
+    lock = load_lockfile()  # {name: {version: [hashes]}}
+    return {"packages": {name: sorted(versions.keys()) for name, versions in lock.items()},
+            "max_direct_deps": MAX_DIRECT_DEPS}
+
+
+@router.get("/deps/allowlist")
+@limiter.limit("60/minute")
+async def deps_allowlist(request: Request, db=Depends(get_db)) -> dict:
+    """Installable packages for the requirements picker: name → versions (no hashes)."""
+    _user_id, _, tier = await _resolve_caller(request, db)
+    require_tier(tier, "cloud_agents")
+    return _allowlist_payload()
+
+
 @router.get("/agents")
 @limiter.limit("60/minute")
 async def list_agents(request: Request, db=Depends(get_db)) -> dict:
