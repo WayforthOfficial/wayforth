@@ -2,7 +2,7 @@
 -- Data fix: deduplicate managed services & repair WRI base history
 -- Date:    2026-06-03
 -- Author:  platform / WRI recalibration
--- Context: WayforthRank v2 recalculate was returning 84.0 for several top
+-- Context: the rank recalculate was returning 84.0 for several top
 --          managed services. Root cause was a "base/clicks split": each of
 --          these managed services had TWO rows —
 --            * a source='managed'/canonical row that receives the click signal

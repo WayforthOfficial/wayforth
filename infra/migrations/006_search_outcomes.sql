@@ -1,4 +1,4 @@
--- WayforthRank data pipeline — search outcomes and analytics
+-- Ranking data pipeline — search outcomes and analytics
 -- Run in Railway Data tab before deploying
 
 CREATE TABLE IF NOT EXISTS search_outcomes (
