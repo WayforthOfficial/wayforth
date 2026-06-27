@@ -89,11 +89,15 @@ def main() -> int:
     if sid:
         rn = Sandbox.create(sid, timeout=120, network=_net([GATEWAY_HOST]))
         try:
-            imp = _run(rn, 'python3 -c "import httpx;print(httpx.__version__)" && pip show wayforth-sdk | grep -i ^version')
-            if "EXIT=0" not in imp.stdout:
-                failures.append(f"#3 base deps not importable in run sandbox: {imp.stdout!r}")
+            # A REAL httpx request (not just `import httpx`) — exercises the full
+            # closure (httpcore et al.), the gap a bare import check misses.
+            imp = _run(rn, 'python3 -c "import httpx; '
+                       f'r=httpx.get(\\"https://{GATEWAY_HOST}/status\\",timeout=10); '
+                       'print(\\"OK\\", httpx.__version__, r.status_code)"')
+            if "EXIT=0" not in imp.stdout or "OK" not in imp.stdout:
+                failures.append(f"#3 existing-agent workload failed in run sandbox: {imp.stdout!r}")
             else:
-                print(f"#3 PASS — base deps importable in run sandbox: {imp.stdout.splitlines()[:2]}")
+                print(f"#3 PASS — real httpx request works on base image: {imp.stdout.splitlines()[:1]}")
             # §0: run sandbox cannot reach the mirror/PyPI
             pp = _run(rn, f'curl -sS -o /dev/null -w "%{{http_code}}" --max-time 8 {MIRROR_URL}')
             if "ec=35" not in pp.stdout and "000" not in pp.stdout:

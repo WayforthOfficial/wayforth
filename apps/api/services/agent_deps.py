@@ -34,14 +34,19 @@ MAX_IMAGE_DELTA_MB = 500
 # Base closure baked into EVERY agent image. Gateway-only run egress (Step 2) makes
 # run-time pip impossible, so the SDK + http client (and httpx's pinned closure) live
 # in the image. All present in the lockfile.
+# The FULL resolved closure (pip download wayforth-sdk httpx, with deps) — not a
+# hand-list. The survival proof (a real httpx request, not just `import httpx`) caught
+# that hand-listing missed httpcore + typing-extensions; httpx imports httpcore lazily
+# only on the first request, so an import check alone passed while a real run failed.
 BASE_DEPS = [
-    ("wayforth-sdk", "0.9.0"),
-    ("httpx", "0.28.1"),
     ("anyio", "4.14.1"),
-    ("sniffio", "1.3.1"),
-    ("h11", "0.16.0"),
     ("certifi", "2026.6.17"),
+    ("h11", "0.16.0"),
+    ("httpcore", "1.0.9"),
+    ("httpx", "0.28.1"),
     ("idna", "3.18"),
+    ("typing-extensions", "4.15.0"),
+    ("wayforth-sdk", "0.9.0"),
 ]
 
 _REQS_PATH = "/home/user/requirements.lock"
