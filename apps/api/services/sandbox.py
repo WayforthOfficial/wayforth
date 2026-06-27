@@ -38,6 +38,26 @@ _DENY_EGRESS = [
     "fc00::/7",         # IPv6 ULA
 ]
 
+# ── Step 2: run-sandbox egress lock (gateway-only) ──────────────────────────────
+# Flag-gated cutover (default OFF), reversible like the run-token flip. When ON, a
+# PYTHON run gets gateway-ONLY egress (deny everything, allow only the gateway — no
+# exfiltration) and boots the pre-built BASE IMAGE (httpx/wayforth-sdk closure baked),
+# so it runs WITHOUT the run-time `pip install` that gateway-only egress would break.
+# Requires AGENT_BASE_IMAGE to be set (the built base snapshot); if unset, falls back
+# to the current deny-list path so a run never breaks. node runs are NOT locked in v1
+# (they npm-install at run time; a node deps pipeline is a follow-on).
+_GATEWAY_HOST = os.environ.get("WAYFORTH_GATEWAY_HOST", "gateway.wayforth.io")
+
+
+def _gateway_egress_enabled() -> bool:
+    return os.environ.get("AGENT_GATEWAY_EGRESS_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _agent_base_image() -> str:
+    return os.environ.get("AGENT_BASE_IMAGE", "").strip()
+
 
 @dataclass
 class SandboxResult:
@@ -94,22 +114,39 @@ class E2BSandboxProvider(SandboxProvider):
     ) -> SandboxResult:
         from e2b import Sandbox, SandboxNetworkOpts
 
-        network = SandboxNetworkOpts(deny_out=_DENY_EGRESS)
-        t0 = time.monotonic()
-        sbx = Sandbox.create(
-            timeout=timeout_seconds,
-            envs=env,
-            network=network,
-            api_key=self._api_key or None,
+        # Egress lock applies to PYTHON only, and only when the base image is set
+        # (deps must be baked since gateway-only egress makes run-time pip impossible).
+        python_locked = (
+            _gateway_egress_enabled()
+            and runtime == "python3.12"
+            and bool(_agent_base_image())
         )
+        if _gateway_egress_enabled() and runtime == "python3.12" and not _agent_base_image():
+            logger.error("AGENT_GATEWAY_EGRESS_ENABLED on but AGENT_BASE_IMAGE unset; "
+                         "falling back to the deny-list path so the run doesn't break")
+
+        create_kwargs = dict(timeout=timeout_seconds, envs=env, api_key=self._api_key or None)
+        if python_locked:
+            create_kwargs["network"] = SandboxNetworkOpts(
+                deny_out=["0.0.0.0/0"], allow_out=[_GATEWAY_HOST])
+            create_kwargs["template"] = _agent_base_image()
+        else:
+            create_kwargs["network"] = SandboxNetworkOpts(deny_out=_DENY_EGRESS)
+
+        t0 = time.monotonic()
+        sbx = Sandbox.create(**create_kwargs)
         sandbox_id = sbx.sandbox_id
         try:
             if runtime == "python3.12":
                 sbx.files.write("/home/user/agent.py", code)
-                cmd = (
-                    "pip install wayforth-sdk httpx -q --break-system-packages "
-                    "2>/dev/null; python3 /home/user/agent.py"
-                )
+                if python_locked:
+                    # deps are baked into the base image — no run-time pip
+                    cmd = "python3 /home/user/agent.py"
+                else:
+                    cmd = (
+                        "pip install wayforth-sdk httpx -q --break-system-packages "
+                        "2>/dev/null; python3 /home/user/agent.py"
+                    )
             else:  # node20
                 sbx.files.write("/home/user/agent.ts", code)
                 # "type":"module" is required for top-level await in tsx/esbuild
