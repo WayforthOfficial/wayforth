@@ -17,7 +17,7 @@ async def wayforth_execute(
     agent_id: str = Field(default="", description="Optional: tag this call with your agent's name for per-agent analytics. Example: 'translation-agent'. Max 64 chars, alphanumeric/hyphens/underscores."),
 ) -> str:
     """Direct execution against a managed service by slug.
-    If the service is below Tier 2 or WRI-degraded at call time, Wayforth
+    If the service is below Tier 2 or reliability-degraded at call time, Wayforth
     fails over to the best verified alternative automatically.
     Returns result + failover status.
 
@@ -65,7 +65,7 @@ async def wayforth_execute(
     if failover.get("triggered"):
         out["_failover_note"] = (
             f"⚡ Failover: {failover.get('original_service')} → {failover.get('routed_to')} "
-            f"({failover.get('reason')}, WRI {failover.get('original_wri')} → {failover.get('fallback_wri')})"
+            f"({failover.get('reason')}, reliability {failover.get('original_wri')} → {failover.get('fallback_wri')})"
         )
     result_str = json.dumps(out, indent=2)
 

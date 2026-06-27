@@ -19,7 +19,7 @@ async def wayforth_compare(
 ) -> str:
     """
     Compare 2-5 API services side by side.
-    Returns WRI scores, response times, costs, signal counts and a plain-English recommendation.
+    Returns reliability scores, response times, costs, signal counts and a plain-English recommendation.
     Use this before committing to a service.
     """
     api_key = _get_api_key()
@@ -41,7 +41,7 @@ async def wayforth_compare(
     lines.append("")
     for svc in d["services"]:
         verdict = f"  [{svc['verdict']}]" if svc.get("verdict") else ""
-        wri = f"WRI {svc['wri_score']}" if svc.get("wri_score") else "WRI —"
+        wri = f"Reliability {svc['wri_score']}" if svc.get("wri_score") else "Reliability —"
         signals = f"  signals={svc['total_signals']}" if svc.get("total_signals") else ""
         ms = f"  {svc['avg_response_ms']}ms" if svc.get("avg_response_ms") else ""
         credits = f"  {svc['credits_per_call']} credits/call" if svc.get("credits_per_call") else ""
