@@ -78,6 +78,9 @@ class SandboxProvider(ABC):
         runtime: str,       # 'python3.12' | 'node20'
         env: dict[str, str],
         timeout_seconds: int,
+        *,
+        files: dict[str, str] | None = None,   # Step 4: multi-file version (path: content)
+        image_ref: str | None = None,          # Step 4: per-version built image to boot
     ) -> SandboxResult:
         ...
 
@@ -99,10 +102,13 @@ class E2BSandboxProvider(SandboxProvider):
         runtime: str,
         env: dict[str, str],
         timeout_seconds: int,
+        *,
+        files: dict[str, str] | None = None,
+        image_ref: str | None = None,
     ) -> SandboxResult:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, self._run_sync, code, runtime, env, timeout_seconds
+            None, self._run_sync, code, runtime, env, timeout_seconds, files, image_ref
         )
 
     def _run_sync(
@@ -111,8 +117,16 @@ class E2BSandboxProvider(SandboxProvider):
         runtime: str,
         env: dict[str, str],
         timeout_seconds: int,
+        files: dict[str, str] | None = None,
+        image_ref: str | None = None,
     ) -> SandboxResult:
         from e2b import Sandbox, SandboxNetworkOpts
+
+        # Step 4 versioned dispatch: a per-version image (image_ref) carries baked deps,
+        # so it boots that image with gateway-ONLY egress and writes the version's files —
+        # no run-time pip. Set only when AGENT_VERSIONED_DISPATCH_ENABLED is on AND the
+        # version has a built image (callers fall back to the code path otherwise).
+        versioned = bool(image_ref)
 
         # Egress lock applies to PYTHON only, and only when the base image is set
         # (deps must be baked since gateway-only egress makes run-time pip impossible).
@@ -126,7 +140,11 @@ class E2BSandboxProvider(SandboxProvider):
                          "falling back to the deny-list path so the run doesn't break")
 
         create_kwargs = dict(timeout=timeout_seconds, envs=env, api_key=self._api_key or None)
-        if python_locked:
+        if versioned:
+            create_kwargs["network"] = SandboxNetworkOpts(
+                deny_out=["0.0.0.0/0"], allow_out=[_GATEWAY_HOST])
+            create_kwargs["template"] = image_ref
+        elif python_locked:
             create_kwargs["network"] = SandboxNetworkOpts(
                 deny_out=["0.0.0.0/0"], allow_out=[_GATEWAY_HOST])
             create_kwargs["template"] = _agent_base_image()
@@ -138,9 +156,11 @@ class E2BSandboxProvider(SandboxProvider):
         sandbox_id = sbx.sandbox_id
         try:
             if runtime == "python3.12":
-                sbx.files.write("/home/user/agent.py", code)
-                if python_locked:
-                    # deps are baked into the base image — no run-time pip
+                # multi-file version writes all files; single-file path writes agent.py
+                for path, content in (files or {"agent.py": code}).items():
+                    sbx.files.write(f"/home/user/{path}", content)
+                if versioned or python_locked:
+                    # deps are baked into the image — no run-time pip
                     cmd = "python3 /home/user/agent.py"
                 else:
                     cmd = (

@@ -1190,6 +1190,16 @@ async def lifespan(app: FastAPI):
                 FROM agent_versions av
                 WHERE av.agent_id = h.id AND av.version_no = 1 AND h.active_version_id IS NULL
             """)
+            # Migration 070: bind each run to its version (in-flight isolation anchor).
+            # Mirrored in infra/migrations/070_agent_run_version.sql. Additive/nullable;
+            # dispatch unchanged until AGENT_VERSIONED_DISPATCH_ENABLED flips (Step 4).
+            await _mconn.execute("""
+                ALTER TABLE agent_runs
+                    ADD COLUMN IF NOT EXISTS version_id UUID REFERENCES agent_versions(id)
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_runs_version ON agent_runs(version_id)
+            """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hosted_agents_next_run
                     ON hosted_agents(next_run_at)
