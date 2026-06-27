@@ -40,7 +40,7 @@ CREATE TABLE hosted_agents (
 CREATE INDEX idx_hosted_agents_user   ON hosted_agents(user_id, created_at DESC);
 CREATE INDEX idx_hosted_agents_status ON hosted_agents(status);
 
--- agent_runs is the primary WayforthRank data path for Cloud.
+-- agent_runs is the primary ranking data path for Cloud.
 -- Every completed run writes outcome data that feeds the ranking pipeline.
 CREATE TABLE agent_runs (
     id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -63,7 +63,7 @@ CREATE TABLE agent_runs (
         -- sum of proxy call charges attributed to this run (from credit_transactions)
     credits_total      INTEGER     DEFAULT 0,
         -- credits_compute + credits_proxy
-    -- WayforthRank signal data (first-class, not bolted-on logging)
+    -- Ranking signal data (first-class, not bolted-on logging)
     services_called    JSONB       DEFAULT '[]',
         -- [{slug, calls, credits_spent, avg_latency_ms}]
     failover_events    INTEGER     DEFAULT 0,

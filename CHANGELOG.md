@@ -13,7 +13,7 @@ All notable changes to the Wayforth platform are documented here.
 - Wayforth metadata in response headers: `X-Wayforth-Failover`, `X-Wayforth-Original-Service`, `X-Wayforth-Routed-To`, `X-Wayforth-Reason`, `X-Wayforth-WRI`, `X-Wayforth-Cost`, `X-Wayforth-Rail`, `X-Wayforth-Credits-Remaining`
 - `?wayforth_wrap=true` opt-in for full `/execute`-style envelope
 - Failover on primary degradation: same `SERVICE_ALTERNATIVES` engine as `/execute`; failover reflected in headers and signal row
-- Every proxied call writes a `credit_transactions` signal row with all 8 WayforthRank signal fields (`substitution_from`, `substitution_to`, `substitution_reason`, `failure_code`, `output_length_chars`, `model_routing_attempted`, `model_routing_selected`, `task_query_text`)
+- Every proxied call writes a `credit_transactions` signal row with substitution, routing, and outcome metadata for analytics
 - `X-Wayforth-Agent-ID` header support for agent tagging on proxy calls
 - 10 new tests: structural, auth, POST (Serper), GET (OpenWeather), wrap mode, failover unit (4 mock-based async tests verifying headers + signal kwargs)
 
@@ -80,7 +80,7 @@ Params, method, response parsing — unchanged.
 
 - SSRF: AssemblyAI, Jina, Firecrawl adapters now validate user-supplied URLs before any HTTP request
 - SSRF: Webhook DNS-rebind TOCTOU closed with socket-level IP pinning (post_pinned helper, verified on Python 3.12)
-- WayforthRank: All 8 stale MANAGED_TO_CATALOG mappings corrected — health signal routes to canonical rows
+- Catalog mappings: All 8 stale MANAGED_TO_CATALOG mappings corrected — health signal routes to canonical rows
 - Catalog: Retired services excluded from execute and catalog browse endpoints
 - Account deletion: grace period blocks re-authentication; deliberate re-login cancels pending deletion
 - Email canonicalization: UNIQUE constraint enforced at DB level (migration 057); all auth lookups normalized
@@ -124,7 +124,7 @@ Params, method, response parsing — unchanged.
 
 ---
 
-## v0.8.6 — WayforthRank integrity — 2026-06-03
+## v0.8.6 — Ranking integrity — 2026-06-03
 
 - Fixed slug matcher bug: recalculate now matches `clicked_slug` directly against `services.slug` (was using a name-derived proxy, which hit the wrong duplicate rows)
 - Deduped 8 managed service rows with split signal/base history; donor rows soft-retired (`active=false`, reversible)
@@ -143,7 +143,7 @@ USDC rails are disabled pending proper on-chain settlement; do not re-enable
 until the v0.9.0 real-money test sequence.
 
 - Disabled x402 and USDC rails pending proper on-chain settlement implementation (env-gated, default off)
-- Stripped shadow execute/search/webhook API from wayforth-rank (now `/health` + `/v1/rank/recalculate` only)
+- Stripped shadow execute/search/webhook API from the private rank service (now `/health` + `/v1/rank/recalculate` only)
 - Pinned JWT algorithm to {RS256, ES256} from JWKS only; never read `alg` from the token header; pinned issuer
 - Closed webhook SSRF DNS-rebind gap (IPv4-mapped-IPv6 unwrap, fail-closed parse, pre-connect re-validation)
 - Moved anonymous search counters to Redis; IPv6 /64 keying; fail-closed on Redis loss
@@ -167,7 +167,7 @@ until the v0.9.0 real-money test sequence.
 - DB-level CHECK constraint: `credits_balance >= 0`
 - Fixed multi-key credit replenishment vector — users with multiple API keys were eligible for N credit resets per month; now gated to once per calendar month per user regardless of key count
 
-### WayforthRank
+### Ranking
 - Fixed pioneer `signal_weight` discount — pioneer-routed payment conversions now correctly weighted at 0.75× in both ranking paths (`ranker_client.py` and `search.py`)
 - Restored x402 +5 bonus to v1 inline formula in `services/wayforthrank.py` (had silently drifted from `ranker.py`)
 - `/admin/rank/recalculate` endpoint fixed (was 500 in production — `wayforth_rank_v2.py` is gitignored and not deployed in API container); formula inlined
@@ -275,7 +275,7 @@ Signal fields are populated on all three execution paths:
 
 Security hardening release. See PR #12 and PR #13.
 
-### Security fixes (12 total across wayforth + wayforth-rank)
+### Security fixes (12 total across the public + private services)
 
 - Pioneer double-award race: atomic `UPDATE … WHERE pioneer_credits_awarded=FALSE RETURNING id`
 - Provider boost activation race: atomic `UPDATE … WHERE boost_used=FALSE RETURNING id`
