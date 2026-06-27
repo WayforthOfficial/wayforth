@@ -77,6 +77,44 @@ def test_too_many_deps_rejected():
     assert "too_many" in _codes(validate_requirements(body, LOCK)[1])
 
 
+# ── #2: parser can't be bypassed by requirements-file trickery ──────────────────
+
+def test_recursive_flag_rejected_and_no_partial_build():
+    # -r mixed with a valid line: rejected, and resolve returns [] (nothing built)
+    pins, errors = validate_requirements("requests==2.34.2\n-r /etc/secrets.txt", LOCK)
+    assert "unsupported" in _codes(errors)
+    iset, errs = resolve_install_set("requests==2.34.2\n-r /etc/secrets.txt")
+    assert iset == [] and errs            # any error ⇒ no install set, no build
+
+
+@pytest.mark.parametrize("line", ["requests ==2.34.2", "requests== 2.34.2",
+                                  "requests == 2.34.2", " requests==2.34.2 "])
+def test_whitespace_around_operator_failclosed(line):
+    # pip tolerates whitespace; we reject (fail-closed) so it can't dodge the allowlist
+    pins, errors = validate_requirements(line, LOCK)
+    if line.strip() == "requests==2.34.2":      # the fully-trimmed one is valid
+        assert errors == []
+    else:
+        assert errors                            # internal whitespace ⇒ rejected
+
+
+def test_separator_and_case_normalization_pep503():
+    # casing + separators normalize to ONE key, so the allowlist can't be dodged
+    lock = {"python-dateutil": {"2.9.0.post0": ["sha256:x"]}}
+    for variant in ["python-dateutil==2.9.0.post0", "Python_Dateutil==2.9.0.post0",
+                    "python.dateutil==2.9.0.post0", "PYTHON__DATEUTIL==2.9.0.post0"]:
+        pins, errors = validate_requirements(variant, lock)
+        assert errors == [] and pins[0][0] == "python-dateutil", variant
+
+
+def test_build_rejects_recursive_flag_before_sandbox():
+    captured = {}
+    with pytest.raises(DepsError):
+        build_agent_image("a", 1, {}, "-r secrets.txt", mirror_url="m", mirror_host="m",
+                          sandbox_factory=_factory_for(_FakeSandbox(), captured))
+    assert captured == {}                        # never spun a sandbox
+
+
 # ── resolve_install_set: base closure + user, conflicts ─────────────────────────
 
 def test_base_deps_always_included():
