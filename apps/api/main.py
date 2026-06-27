@@ -1148,6 +1148,48 @@ async def lifespan(app: FastAPI):
                 ALTER TABLE agent_runs
                     ADD COLUMN IF NOT EXISTS params JSONB
             """)
+            # Migration 069: multi-file model + versioning (code-editing Step 3).
+            # Mirrored in infra/migrations/069_agent_versions.sql. Idempotent backfill
+            # (NOT EXISTS + active_version_id IS NULL) so re-running is a no-op. Dispatch
+            # is unchanged — nothing reads active_version_id/agent_versions yet (Step 4).
+            await _mconn.execute("""
+                CREATE TABLE IF NOT EXISTS agent_versions (
+                    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    agent_id      UUID NOT NULL REFERENCES hosted_agents(id) ON DELETE CASCADE,
+                    version_no    INTEGER NOT NULL,
+                    files         JSONB NOT NULL,
+                    requirements  JSONB,
+                    params_schema JSONB,
+                    image_ref     TEXT,
+                    status        TEXT NOT NULL DEFAULT 'active',
+                    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (agent_id, version_no)
+                )
+            """)
+            await _mconn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_versions_agent
+                    ON agent_versions(agent_id, version_no DESC)
+            """)
+            await _mconn.execute("""
+                ALTER TABLE hosted_agents
+                    ADD COLUMN IF NOT EXISTS active_version_id UUID REFERENCES agent_versions(id)
+            """)
+            await _mconn.execute("""
+                INSERT INTO agent_versions (agent_id, version_no, files, params_schema, status, created_at)
+                SELECT h.id, 1,
+                       jsonb_build_object(
+                           CASE WHEN h.runtime LIKE 'node%' THEN 'agent.ts' ELSE 'agent.py' END,
+                           COALESCE(h.code, '')),
+                       h.params_schema, 'active', COALESCE(h.created_at, NOW())
+                FROM hosted_agents h
+                WHERE NOT EXISTS (SELECT 1 FROM agent_versions av WHERE av.agent_id = h.id)
+            """)
+            await _mconn.execute("""
+                UPDATE hosted_agents h
+                SET active_version_id = av.id
+                FROM agent_versions av
+                WHERE av.agent_id = h.id AND av.version_no = 1 AND h.active_version_id IS NULL
+            """)
             await _mconn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hosted_agents_next_run
                     ON hosted_agents(next_run_at)
