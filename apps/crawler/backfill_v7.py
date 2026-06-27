@@ -10,13 +10,9 @@ async def backfill():
     inserted = 0
     for svc in services:
         hex_id = "0x" + hashlib.sha256(svc['endpoint_url'].encode()).hexdigest()
-        score = 50.0
-        tier = svc['coverage_tier']
-        if tier >= 2: score += 20
-        elif tier >= 1: score += 5
-        if svc.get('consecutive_failures', 1) == 0: score += 20
-        if svc.get('payment_protocol') == 'x402': score += 5
-        wri = round(min(score, 100), 1)
+        # Interim placeholder; authoritative scoring is the private rank service
+        # (RANK_SERVICE_URL), recalculated via promoter.run_rank_recalculate.
+        wri = 50.0
         for hours_ago in [18, 12, 6]:
             await db.execute("""
                 INSERT INTO service_score_history

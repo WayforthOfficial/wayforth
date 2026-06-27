@@ -36,18 +36,10 @@ async def probe_service(client: httpx.AsyncClient, service: dict) -> bool:
         return False
 
 
-def compute_wri_simple(svc: dict) -> float:
-    score = 50.0
-    tier = svc.get("coverage_tier", 0)
-    if tier >= 2:
-        score += 20
-    elif tier >= 1:
-        score += 5
-    if svc.get("consecutive_failures", 1) == 0:
-        score += 20
-    if svc.get("payment_protocol") == "x402":
-        score += 5
-    return round(min(score, 100), 1)
+def _interim_score(svc: dict) -> float:
+    """Interim placeholder written during health probes; the authoritative composite
+    score is computed by the private rank service (RANK_SERVICE_URL)."""
+    return 50.0
 
 
 async def fire_tier_promotion_email(db, service_id: str, service_name: str, new_tier: int) -> None:
@@ -136,7 +128,7 @@ async def run_health_check(pool=None) -> None:
                             INSERT INTO service_score_history
                             (service_id, wri_score, tier, consecutive_failures, recorded_at)
                             VALUES ($1, $2, $3, $4, NOW())
-                        """, str(svc["id"]), compute_wri_simple(snapshot), svc["coverage_tier"], 0)
+                        """, str(svc["id"]), _interim_score(snapshot), svc["coverage_tier"], 0)
                         logger.info(f"✅ {svc['name']} — UP")
                     else:
                         failures = (svc["consecutive_failures"] or 0) + 1
@@ -159,7 +151,7 @@ async def run_health_check(pool=None) -> None:
                                 INSERT INTO service_score_history
                                 (service_id, wri_score, tier, consecutive_failures, recorded_at)
                                 VALUES ($1, $2, $3, $4, NOW())
-                            """, str(svc["id"]), compute_wri_simple(snapshot), 1, failures)
+                            """, str(svc["id"]), _interim_score(snapshot), 1, failures)
                             await fire_tier_change_webhook(pool, str(svc["id"]), 2, 1, svc["name"])
                             logger.warning(f"⬇️ {svc['name']} — DEMOTED to Tier 1 after {failures} failures")
                         else:
@@ -178,7 +170,7 @@ async def run_health_check(pool=None) -> None:
                                 INSERT INTO service_score_history
                                 (service_id, wri_score, tier, consecutive_failures, recorded_at)
                                 VALUES ($1, $2, $3, $4, NOW())
-                            """, str(svc["id"]), compute_wri_simple(snapshot), svc["coverage_tier"], failures)
+                            """, str(svc["id"]), _interim_score(snapshot), svc["coverage_tier"], failures)
                             logger.warning(f"⚠️ {svc['name']} — DOWN ({failures}/{CONSECUTIVE_FAILURE_THRESHOLD} failures)")
 
         logger.info("Health check complete")

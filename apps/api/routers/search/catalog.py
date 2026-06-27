@@ -525,14 +525,9 @@ async def leaderboard_x402(request: Request, limit: int = 20, db=Depends(get_db)
         service_id = '0x' + svc['service_id']
         svc['service_id'] = service_id
 
-        score = 50.0
-        tier = svc.get('coverage_tier', 0)
-        if tier >= 2: score += 20
-        elif tier >= 1: score += 5
-        if svc.get('consecutive_failures', 1) == 0: score += 10
-        if svc.get('payment_protocol') == 'x402': score += 5
-        if svc.get('payment_count', 0) > 0: score += min(svc['payment_count'] * 2, 8)
-        svc['wri'] = round(min(score, 100), 1)
+        # Interim placeholder; authoritative scoring is the private rank service
+        # (RANK_SERVICE_URL). No signal weights live in this public container.
+        svc['wri'] = round(float(svc.get('wri_score') or 50.0), 1)
 
         price = svc.get('pricing_usdc')
         svc['price_display'] = f"${price:.7f}/req".rstrip('0').rstrip('.') + '/req' if price and price > 0 else "Free"

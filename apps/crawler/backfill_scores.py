@@ -15,11 +15,11 @@ async def backfill():
     """)
 
     sys.path.insert(0, os.path.dirname(__file__))
-    from health_monitor import compute_wri_simple
+    from health_monitor import _interim_score
 
     inserted = 0
     for svc in services:
-        wri = compute_wri_simple(dict(svc))
+        wri = _interim_score(dict(svc))
         for hours_ago in [18, 12, 6]:
             await db.execute("""
                 INSERT INTO service_score_history

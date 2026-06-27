@@ -244,15 +244,14 @@ async def bulk_demote_stale_tier2(db_conn: asyncpg.Connection) -> int:
     return count
 
 
-async def run_wri_recalculate() -> None:
-    """Trigger WRI score recalculation via the wayforth-rank private service.
+async def run_rank_recalculate() -> None:
+    """Trigger score recalculation via the private rank service.
 
     No-ops if RANK_SERVICE_URL or RANK_SERVICE_KEY is not configured.
-    The v2 formula lives in wayforth-rank; this call keeps formula weights
-    out of the public crawler code.
+    Scoring is computed by the private rank service; no weights live here.
     """
     if not RANK_SERVICE_URL or not RANK_SERVICE_KEY:
-        logger.info("run_wri_recalculate: RANK_SERVICE_URL/KEY not set, skipping")
+        logger.info("run_rank_recalculate: RANK_SERVICE_URL/KEY not set, skipping")
         return
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -262,10 +261,10 @@ async def run_wri_recalculate() -> None:
             )
             r.raise_for_status()
             data = r.json()
-            logger.info("run_wri_recalculate: updated=%d unmatched=%d",
+            logger.info("run_rank_recalculate: updated=%d unmatched=%d",
                         data.get("updated", 0), len(data.get("unmatched_slugs", [])))
     except Exception as exc:
-        logger.error("run_wri_recalculate failed: %s", exc)
+        logger.error("run_rank_recalculate failed: %s", exc)
 
 
 # Representative search→execute pairs for daily signal seeding.
@@ -285,7 +284,7 @@ _SIGNAL_QUERIES: list[tuple[str, str, dict]] = [
 
 
 async def run_signal_feed(api_key: str, base_url: str) -> None:
-    """Feed search→execute pairs to generate WayforthRank signal data.
+    """Feed search-execute pairs to generate ranking signal data.
 
     Runs daily at 06:00 UTC only (gated in run_promotion_cycle).
     Requires WAYFORTH_TEST_API_KEY and WAYFORTH_BASE_URL in the crawler service env.
@@ -409,7 +408,7 @@ async def run_promotion_cycle(db_url: str) -> None:
     )
 
     await run_health_check(pool)
-    await run_wri_recalculate()
+    await run_rank_recalculate()
     await build_service_graph(pool)
     logger.info("Service graph updated")
     await run_x402_monitor(pool)

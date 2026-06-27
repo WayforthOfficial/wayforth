@@ -18,7 +18,6 @@ Proves:
   #3 base deps build → snapshot → boot a run sandbox (gateway-only egress) with
      httpx + wayforth-sdk importable and PyPI unreachable (unblocks Step 2).
   §0 two-allowlist separation: build can't reach the gateway; run can't reach the mirror.
-TODO(canary): a wheel that POSTs to an external host → blocked at run egress.
 """
 from __future__ import annotations
 
