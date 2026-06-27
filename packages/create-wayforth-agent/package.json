@@ -1,6 +1,6 @@
 {
   "name": "create-wayforth-agent",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Scaffold a Wayforth agent project in one command — discovery via SDK, execution via proxy",
   "keywords": ["wayforth", "ai", "agents", "scaffold", "create"],
   "license": "BSL-1.1",
