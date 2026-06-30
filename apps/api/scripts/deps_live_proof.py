@@ -25,7 +25,8 @@ import os
 import sys
 
 from services.agent_deps import (
-    BASE_DEPS, _norm, build_requirements_lock, load_lockfile, pip_install_command,
+    base_deps_lock, base_deps_match, build_requirements_lock, diff_against_base_deps,
+    pip_install_command,
 )
 
 MIRROR_URL = os.environ.get("DEPS_MIRROR_URL", "https://pypi.org/simple")
@@ -49,9 +50,7 @@ def main() -> int:
 
     from e2b import Sandbox
 
-    lock = load_lockfile()
-    base = [(_norm(n), v, lock[_norm(n)][v]) for n, v in BASE_DEPS]
-    good_lock = build_requirements_lock(base)
+    good_lock = base_deps_lock()  # the BASE_DEPS closure — shared with build_base_image.py
     bad_lock = build_requirements_lock([("httpx", "0.28.1", ["sha256:" + "0" * 64])])
     pip = pip_install_command(MIRROR_URL)
     failures = []
@@ -109,6 +108,25 @@ def main() -> int:
                 Sandbox.delete_snapshot(sid)
             except Exception:
                 pass
+
+    # WIRED-IMAGE ANTI-DRIFT — if AGENT_BASE_IMAGE is set, the image agents will actually
+    # boot must equal BASE_DEPS exactly. This is what ties "proof passed" to "wired image
+    # correct": you set AGENT_BASE_IMAGE, run this, and a stale/hand-built image fails here.
+    wired = os.environ.get("AGENT_BASE_IMAGE", "").strip()
+    if wired:
+        wb = Sandbox.create(wired, timeout=120, network=_net([GATEWAY_HOST]))
+        try:
+            fr = _run(wb, "python3 -m pip list --format=freeze")
+            if not base_deps_match(fr.stdout or ""):
+                failures.append(
+                    f"WIRED base image (AGENT_BASE_IMAGE={wired}) != BASE_DEPS: "
+                    f"{diff_against_base_deps(fr.stdout or '')}")
+            else:
+                print(f"WIRED PASS — AGENT_BASE_IMAGE={wired} closure matches BASE_DEPS exactly")
+        finally:
+            wb.kill()
+    else:
+        print("WIRED check skipped — AGENT_BASE_IMAGE not set (set it before flipping).")
 
     if failures:
         print("DEPS LIVE PROOF: FAIL")
