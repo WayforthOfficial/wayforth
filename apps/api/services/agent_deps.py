@@ -171,6 +171,49 @@ def build_requirements_lock(install_set) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ── base-image recipe + drift detection (shared by the build script + the ship-gate) ──
+# These exist so "the wired base image" can never silently drift from BASE_DEPS: the build
+# script bakes FROM base_deps_lock(), and deps_live_proof asserts the wired image's
+# pip freeze matches base_deps_pinned(). Single source of truth = BASE_DEPS.
+
+_BASE_IGNORE = {"pip", "setuptools", "wheel"}  # base interpreter pkgs, not part of the closure
+
+
+def base_deps_lock() -> str:
+    """The hashed requirements.lock for the full BASE_DEPS closure (what the base image
+    bakes). Pulls the hashes from the allowlist lockfile."""
+    lock = load_lockfile()
+    base = [(_norm(n), v, lock[_norm(n)][v]) for n, v in BASE_DEPS]
+    return build_requirements_lock(base)
+
+
+def base_deps_pinned() -> dict:
+    """{normalized_name: version} for BASE_DEPS — the expected baked closure."""
+    return {_norm(n): v for n, v in BASE_DEPS}
+
+
+def diff_against_base_deps(freeze_text: str) -> dict:
+    """Compare a `pip list --format=freeze` (or `pip freeze`) dump to BASE_DEPS.
+    Returns {missing, mismatch, extra}; all empty ⇒ the image is exactly BASE_DEPS."""
+    got: dict[str, str] = {}
+    for line in freeze_text.splitlines():
+        line = line.strip()
+        if "==" in line:
+            name, _, ver = line.partition("==")
+            got[_norm(name)] = ver.strip()
+    expected = base_deps_pinned()
+    missing = sorted(n for n in expected if n not in got)
+    mismatch = sorted((n, expected[n], got[n]) for n in expected if n in got and got[n] != expected[n])
+    extra = sorted(n for n in got if n not in expected and n not in _BASE_IGNORE)
+    return {"missing": missing, "mismatch": mismatch, "extra": extra}
+
+
+def base_deps_match(freeze_text: str) -> bool:
+    """True iff the freeze dump equals BASE_DEPS exactly (no missing/mismatch/extra)."""
+    d = diff_against_base_deps(freeze_text)
+    return not (d["missing"] or d["mismatch"] or d["extra"])
+
+
 def pip_install_command(mirror_url: str, reqs_path: str = _REQS_PATH) -> str:
     """The wheels-only, hashed, mirror-pinned, no-deps install — the install-RCE control."""
     return (
